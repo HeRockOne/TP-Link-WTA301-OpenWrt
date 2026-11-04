@@ -101,7 +101,14 @@ RAM 分别 `0x44000000 / 0x45000000 / 0x44000000 / 0x46000000`，校验址 `0x43
 
 任一条不符：先留串口全文（乱码则该轮作废），再决定回退 S7 冻结四件套。
 
-## 9. 刷写指令（`work/images/v25.12.6-P3/flash_cmds.txt` 原样，已含四区 + 逐区校验）
+## 10. 回退到 S7 的完整四件套（失败时用）
+
+`work/backup/FROZEN-S7-20261105/` 里必须有、也必须用**它自己的** UBI 镜像
+（`ubi_rootfs_data3_wta301data.img`，卷名 `wta301data`，crc32 `e850127a`）——
+S7 的 fstools 认这个名字，25.12.6 的那份（`rootfs_data`）不能拿来回退。
+回退顺序同样是 **kernel → rootfs → ubi → tphdr**，命令地址与 P4 相同，只换文件名。
+
+## 11. 刷写指令（`work/images/v25.12.6-P3/flash_cmds.txt` 原样，已含四区 + 逐区校验）
 
 四区顺序 **kernel → rootfs → ubi → tphdr**（tphdr 最后：头一改 `+0xa0` 就变，前面写坏还能靠旧头认出来）。
 
