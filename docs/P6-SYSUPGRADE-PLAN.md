@@ -35,72 +35,91 @@ secondary u-boot 的 `tpl_boot_one()` 每次都校验它。stock `sysupgrade` �
 > RedBoot 表搬过来时保留的原始次序。**改动分区节点顺序会改 mtd 编号**
 > ⇒ `root=/dev/mtdblock6` 指错设备 ⇒ 直接不启动。
 
-## 3. tphdr 目前没有 mtd 节点（P6 必须补）
+## 3. DTS 需要两处改动（都是为了「Linux 侧可写」）
+
+### 3.1 tphdr 没有 mtd 节点
 
 `0x4800000`（tphdr）落在 `normal_boot`(0x4740000 止) 与 `kernel`(0x4880000 起) 之间的空隙，
-不属任何分区 ⇒ **从 Linux 里无法通过 mtd 分区写它**，也就无法在 sysupgrade 里更新校验头。
-
-P6 要做的最小改动（DTS）：
+不属任何分区 ⇒ **从 Linux 无法通过 mtd 分区写它**，也就无法在 sysupgrade 里更新校验头。
 
 ```dts
-            tp_header@4800000 {
-                label = "tp_header";
-                reg = <0x04800000 0x00020000>;
-                read-only;          /* 只在升级时由钩子临时接管 */
-            };
+/* 追加在 partitions 节点【末尾】，不能插中间（见 §2 编号警告） */
+tp_header@4800000 {
+    label = "tp_header";
+    reg = <0x04800000 0x00020000>;
+};
 ```
 
-- **必须追加在 partitions 节点末尾**（不能插在中间，理由见 §2 的编号警告）。
-- 追加后：mtd 0–12 编号**全部不变**，新增 `mtd13 = tp_header`，全部物理区不重叠
-  （0x4800000+0x20000 = 0x4820000，远在 kernel 起点 0x4880000 之前）。
-- 代价：板级 DTB 节点数从 174 变 175，与 S7 的 `fdtdiff` 比对会多一条**已知**差异，
-  需在 `tools/fdtdiff.py` 的期望差异表里登记。
+### 3.2 kernel 分区装不下要写的内核区
+
+`kernel` 分区是 `0x4880000` 长 **0x400000**（RedBoot 表原样），但 u-boot 实际校验/使用的是
+**0x480000**（`tphdr +0x5c`），比分区多出 `0x80000`，跨进 `kernel` 与 `rootfs` 之间的空隙
+`0x4c80000–0x4fc0000`（这段没人声明，S7 也一样）。所以在 Linux 里 `mtd write ... kernel`
+写满 4 MiB 就会被分区边界截断 ⇒ 必须把分区长度改成与实际写区一致：
+
+```dts
+kernel@4880000 {
+    label = "kernel";
+    reg = <0x04880000 0x00480000>;   /* 0x400000 -> 0x480000 */
+};
+```
+
+- **只改长度不改基址** ⇒ mtd 编号不变；`0x4c80000–0x4fc0000` 仍然空闲，无重叠。
+- u-boot 不解析 DTS，改这里对它零影响。
+- `0x4880000 + 0x480000 = 0x4d00000 < 0x4fc0000` ✓ 不会碰到 rootfs。
+
+改动后分区表 = 14 项（0–12 编号与 S7 完全一致，新增 `mtd13 = tp_header`），物理区两两不重叠。
+与 S7 的 `fdtdiff` 会比出这两条**已知**差异，登记进期望差异表。
 
 ## 4. 升级钩子（`platform.sh` 加 `tplink,wta301` 分支）
 
-伪代码，长度全部**从当前 tphdr 读**，不写死：
+**关键决定：不在路由器上算 md5。** 补齐（0xFF）与 `md5(kernel‖rootfs)` 全部由
+`tools/mk_op_pack.py` 在造包时算好，`+0x5c/+0x64/+0xa0` 直接进产物。
+理由：busybox 没有 `xxd`，把 32 字符 hex 变成 16 字节原始 md5 要绕一圈（`printf` 的 `\xHH`
+在部分 busybox 上不支持）；而且设备上现算 13 MB 的 md5 既慢又没法离线复核。
+这样钩子退化成**三条纯写操作**，与 P4 手工刷写用的是**同一份字节**，风险最低。
+
+升级包格式（我们自己的，不是 stock `*sysupgrade.bin`）：tar，含三个已补齐的文件
+
+| 成员 | 大小 | 写到哪里 |
+|---|---|---|
+| `kernel` | 0x480000 | `mtd kernel`（0x4880000） |
+| `root` | 0xbc0000 | `mtd rootfs`（0x4fc0000） |
+| `tp_header` | 0x20000 | `mtd tp_header`（0x4800000） |
 
 ```sh
 tplink_wta301_do_upgrade() {
-	local tar="$1" klen rlen mtdk mtdr mtdt tmpd
-	mtdk=$(find_mtd_index kernel); mtdr=$(find_mtd_index rootfs)
-	mtdt=$(find_mtd_index tp_header)          # §3 才有
-	[ -n "$mtdk" ] && [ -n "$mtdr" ] && [ -n "$mtdt" ] || return 1
+	local tar="$1" tmpd mtdk mtdr mtdt
+	mtdk=$(find_mtd_part kernel); mtdr=$(find_mtd_part rootfs); mtdt=$(find_mtd_part tp_header)
+	[ -n "$mtdk" ] && [ -n "$mtdr" ] && [ -n "$mtdt" ] || {
+		echo "wta301: 缺 tp_header 分区，DTS 没打补丁？" >&2; return 1; }
 
 	tmpd=$(mktemp -d)
-	tar -xf "$tar" -C "$tmpd"                 # 里面是 kernel(ITB) + root( squashfs )
+	tar -xf "$tar" -C "$tmpd" kernel root tp_header || return 1
 
-	# 1) 长度取自闪存上的 tphdr：+0x5c = kernel 长度、+0x64 = rootfs 长度
-	klen=$(( 0x$(dd if=/dev/mtd$mtdt bs=1 skip=$((0x5c)) count=4 2>/dev/null | hexdump -e '4/1 "%02x"') ))
-	rlen=$(( 0x$(dd if=/dev/mtd$mtdt bs=1 skip=$((0x64)) count=4 2>/dev/null | hexdump -e '4/1 "%02x"') ))
+	# 尺寸必须与头里的字段吻合（防止把没补齐的包写进去）
+	[ "$(stat -c%s "$tmpd/kernel")"    = $((0x480000)) ] || { echo "kernel 长度不对" >&2; return 1; }
+	[ "$(stat -c%s "$tmpd/root")"      = $((0xbc0000)) ] || { echo "root 长度不对" >&2; return 1; }
+	[ "$(stat -c%s "$tmpd/tp_header")" = $((0x20000))  ] || { echo "头长度不对" >&2; return 1; }
 
-	# 2) 按 NAND 擦除态 0xFF 补齐到 klen / rlen
-	mkpad() { size=$1; f=$2; cur=$(stat -c%s "$f"); \
-	          [ "$cur" -le "$size" ] || return 1; \
-	          head -c $((size-cur)) /dev/zero | tr '\0' '\377' >> "$f"; }
-	mkpad "$klen" "$tmpd/kernel"; mkpad "$rlen" "$tmpd/root"
+	# 顺序：先两个大区，最后才写头。中途失败 ⇒ 新头未写 ⇒ 旧头校验必然失败
+	# ⇒ u-boot 自动落 B 槽，可 TTL 抢救。
+	mtd write "$tmpd/kernel"    "$mtdk" || return 1
+	mtd write "$tmpd/root"      "$mtdr" || return 1
+	mtd write "$tmpd/tp_header" "$mtdt" || return 1
 
-	# 3) 算 payload md5 并写进 tphdr 的 +0xa0（16 字节 ASCII hex）
-	hash=$(cat "$tmpd/kernel" "$tmpd/root" | md5sum | cut -d' ' -f1)
-	cp /dev/mtd$mtdt "$tmpd/tphdr"
-	printf '%s' "$hash" | dd of="$tmpd/tphdr" bs=1 seek=$((0xa0)) conv=notrunc 2>/dev/null
-
-	# 4) 先写两个大区，最后才写头（头一改校验就生效，写坏前面还能靠旧头认出来）
-	nandwrite -p /dev/mtd$mtdk "$tmpd/kernel" || return 1
-	nandwrite -p /dev/mtd$mtdr "$tmpd/root"  || return 1
-	nandwrite -p /dev/mtd$mtdt "$tmpd/tphdr" || return 1
 	rm -rf "$tmpd"
 }
 ```
 
-要点：
-- **`+0xa0`/`+0x90` 存的是 16 字节原始 md5**（不是 32 字符 ASCII）。
-  实测 S7/P3 两版都是原始字节，十六进制显示为 `8a45889a2355038fbec1f65f95a23602` /
-  `94867ec5c85a92567405516651935691`。离线判据固化在 `tools/verify_pack.py`（`--uboot` 可比对 +0x90）。
-- **不得改 `+0x90`**（那是 secondary u-boot 自己的 md5，对应 mtd4，不随系统升级变）。
-- **不得写 mtd0/mtd4/mtd12**（红线）。
-- overlay（mtd11 `rootfs_data3`）默认保留；`sysupgrade -n` 时是否清理由 `-n` 语义决定，
-  钩子里不做额外擦除（少一个变量）。
+要点（都是硬约束）：
+- **`+0xa0`/`+0x90` 是 16 字节原始 md5**，不是 ASCII；`+0xa0` 已在造包时算好 ⇒ 钩子不许重算。
+- **不得改 `+0x90`**（那是 secondary u-boot 自身 md5，对应 mtd4，不随系统升级变）。
+- **不得写 mtd0 / mtd4 / mtd12**（红线：一级 u-boot、二级 u-boot、boot_flag）。
+- overlay（`mtd11 rootfs_data3`）默认保留；不做额外擦除（少一个变量）。
+- 三个写入长度都是 128 KiB 的整数倍 ✓（0x480000 / 0xbc0000 / 0x20000）。
+- 首次实施：先 `mtd verify <file> <device>`（`mtd` 工具支持 `verify` 子命令）再断电重启；
+  `boot_flag` 保持 2 不动。
 
 ## 5. 验收
 
