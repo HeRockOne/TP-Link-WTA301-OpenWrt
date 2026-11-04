@@ -55,3 +55,25 @@ wsl -d Ubuntu2404 -u root bash /root/make-release.sh     # 自动：解包→mk_
 - 不加 `ipq-wifi-*`（会覆盖我们的 board-2.bin；本板 BDF 与 S7 逐字节一致，直接复用）。
 - 不加 `kmod-qca-nss-dp`（已决定纯 CPU 转发，见 R14）。
 - 不在 P5 顺手改 DTS/bootargs（单一变量：P4 首验通过之后再谈优化）。
+
+## 6. 实测结果（2026-11-05 05:27，`make -j8` MAKE_EXIT=0）
+
+| 项 | P3 | P5 | 判据 |
+|---|---|---|---|
+| manifest 包数 | 147 | **182**（S7 178） | 全在 |
+| LuCI | 无 | `luci-base` `luci-mod-admin-full` `luci-theme-bootstrap` `luci-app-firewall` `uhttpd` `cgi-io` ✓ | 逐条 grep manifest |
+| zram | 无 | `zram-swap` + `kmod-zram` ✓ | 同上 |
+| kernel ITB | 4,276,536 B | 4,277,940 B（+1,404，zram 模块） | ≤ 0x740000 ✓ |
+| squashfs | 8,244,224 B | **8,713,216 B** | ≤ 0xbc0000 ✓，余量 3.6 MB |
+
+产物 `work/images/v25.12.6-P5/`，`tools/verify_pack.py` **PASS**（`+0xa0` = `1abdd945…`）。
+rootfs 内 `90_wta301`(3,310 B) / `12-wta301-caldata`(4,586 B) / 两个 `board-2.bin`
+（`78f5b21b…` / `e4904f13…` = S7 逐字节一致）全部就位，无 `nss`、无 `ipq-wifi-*`。
+
+### 已知非确定性（无害，但要知道）
+
+`mkfs.ubifs`/`ubinize` 在 UBIFS superblock 与 UBI EC 头里写时间戳，**同参数两次生成的两个
+空 overlay 镜像字节不同**（实测 `SOURCE_DATE_EPOCH` 在本机 host 工具上不生效）。
+因此：**空 overlay 镜像不可能字节级复现**，判据只能看结构（卷名/PEB 数/autoresize/vtable CRC），
+由 `tools/verify_pack.py` 检查；归档指纹以 `SHA256SUMS` 为准（成品一旦归档就是固定的）。
+kernel/rootfs/tphdr 三个区不受影响（都由 `mk_op_pack.py` 用固定字节补齐），crc32 只随内容变。

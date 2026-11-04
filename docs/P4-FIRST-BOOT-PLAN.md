@@ -108,7 +108,10 @@ RAM 分别 `0x44000000 / 0x45000000 / 0x44000000 / 0x46000000`，校验址 `0x43
 S7 的 fstools 认这个名字，25.12.6 的那份（`rootfs_data`）不能拿来回退。
 回退顺序同样是 **kernel → rootfs → ubi → tphdr**，命令地址与 P4 相同，只换文件名。
 
-## 11. 刷写指令（`work/images/v25.12.6-P3/flash_cmds.txt` 原样，已含四区 + 逐区校验）
+## 11. 刷写指令（`work/images/v25.12.6-P5/flash_cmds.txt` 原样，已含四区 + 逐区校验）
+
+**刷哪一版**：优先刷 **P5**（182 包，含 LuCI+zram）。它是 P3 的严格超集，内核/rootfs/DTS
+结构未变，只是 squashfs 多了 469 KB；首验有 Web UI 更方便。P3 归档（147 包）保留作对照回退。
 
 四区顺序 **kernel → rootfs → ubi → tphdr**（tphdr 最后：头一改 `+0xa0` 就变，前面写坏还能靠旧头认出来）。
 

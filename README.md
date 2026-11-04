@@ -13,10 +13,11 @@
 | P2 造 DTS + 编内核（6.12.112） | ✅ `target/linux` EXIT=0，`make -j8` EXIT=0 | `docs/P2-BUILD-DELIVERY.md` |
 | P3 四件套打包 + 独立复核 | ✅ kernel/rootfs/tphdr/ubi 全绿 | `docs/P3-PACK-CONTRACT.md` · `../work/images/v25.12.6-P3/` |
 | P4 真机首验 | ⏸ **等板子上电 + 串口**（机箱网卡无 192.168.1.x、串口通道未起） | `docs/P4-FIRST-BOOT-PLAN.md` |
-| P5 LuCI/包集对齐 | 🔄 构建中 | `deliver/s7-parity-packages.txt` |
+| P5 LuCI/包集对齐 | ✅ 182 包，squashfs 8.71 MB（余量 3.6 MB），产物 `../work/images/v25.12.6-P5/` | `docs/P5-PACKAGE-PARITY.md` |
 
 **一句话下一步**：插上串口 + 网线、给板子上电，然后按 `docs/P4-FIRST-BOOT-PLAN.md` §9.1 先做回退演练，
-再照着 `../work/images/v25.12.6-P3/flash_cmds.txt` 四区顺序刷写（每区都有 `crc32` 期望值）。
+再照着 `../work/images/v25.12.6-P5/flash_cmds.txt` 四区顺序刷写（每区都有 `crc32` 期望值）。
+升级/在线刷写（P6）的设计见 `docs/P6-SYSUPGRADE-PLAN.md`——**stock sysupgrade 会破坏启动**，别直接跑。
 
 ---
 
