@@ -308,3 +308,22 @@ cd /root/ow2512 && ./scripts/feeds update -a && ./scripts/feeds install -a
 ```
 已确认 `package/system/zram-swap` 在 core 里（不需要 feeds）；`cgi-io`/`kmod-zram` 来自 `packages` feed，
 `luci*` 来自 `luci` feed，三者都要等 `feeds update` 之后才可见。
+
+## 8. 构建收尾结果（2026-11-05 05:08，全部 EXIT=0）
+
+| 阶段 | 结果 |
+|---|---|
+| `target/linux/compile` | **EXIT=0**（vmlinux 75,204,472 B；`dwmac-ipq5018.o` 32,280 B） |
+| `make -j8` world | **EXIT=0**，147 包 |
+| 产物 | `...tplink_wta301-squashfs-sysupgrade.bin` 12,534,037 B；`...initramfs-uImage.itb` 12,229,176 B |
+| 包内 kernel(ITB) | 4,276,536 B ≤ 0x740000 ✓ |
+| 包内 root(squashfs4) | 8,244,224 B ≤ 0xbc0000 ✓（余量 4,338,688 B ≈ 4.1 MB，够放 LuCI） |
+
+**镜像内已核实（不是"应该"）**：
+- `/etc/board.d/90_wta301` 3,310 B ✓
+- `/etc/hotplug.d/firmware/12-wta301-caldata` 4,586 B ✓
+- `lib/firmware/ath11k/IPQ5018/hw1.0/board-2.bin` = `78f5b21b2cd1dee8fb6155e1f74a1073`（与 S7 `lib/` 逐字节一致）
+- `lib/firmware/ath11k/QCN6122/hw1.0/board-2.bin` = `e4904f1326df5edfd7842b319e0828da`（同上）
+- 关键包：`kmod-dsa-rtl8365mb` `kmod-ath11k 6.12.112.6.18.55-r2` `ath11k-firmware-ipq5018-qcn6122` `uboot-envtools` `fstools` ✓
+
+**注意**：包里**没有** `kmod-qca-nss-dp`（按 R14 已从 DEFAULT_PACKAGES 移除）⇒ 纯 CPU 转发。
