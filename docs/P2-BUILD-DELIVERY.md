@@ -89,7 +89,8 @@ CONFIG_STMMAC_PLATFORM=y
 | **A2** | 去掉 `"ipq5018-nss.dtsi"` 与 `&nss_region` 覆写 | 25.12.6 无 NSS/EDMA，已决定纯 CPU 转发 |
 | **A3** | 显式 `&crypto` / `&cryptobam` / `&watchdog` = okay | 6.18 dtsi 默认开、6.12 默认关，S7 是开着的（docs/M09） |
 | **A4** | 显式 `&pcie0` / `&pcie1` = disabled | QCN6122 是 WCSS user PD，不是 PCIe 设备（docs/M09） |
-| **A5** | `coherent_pool` 512K → **2M** | 6.12 的 ath11k 仍经 coherent 池搬运固件段；2M 是 v19-fix5/v20 在本硬件验证过的值 |
+| **A5** | `coherent_pool` **2M**（v24 源文本写 512K，但实际跑的 DTB 是 2M） | 跟 DTB，不跟源文本 |
+| **A6** | 分区表与 bootargs 取自 **S7 实际 DTB**：`rootfs_data`→`rootfs_data2`、**新增 `rootfs_data3`(0x1bc0000+0x2440000)**、**删除 `tp_header`/`tp_header_bak`**、bootargs 补 `ubi.mtd=rootfs_data3 fstools_overlay_name=wta301data` | v24 源 dts 与实跑 DTB 又不一致（第 3 次踩同一个坑）。13 个分区，rootfs 仍 index 6 |
 
 **原样保留（逐字未动）**：`tz_region` 4 MiB、`q6_region` 52 MiB、NAND 8/512 + 15 个 fixed-partitions、
 `mdio0`(ge_phy@7) / `mdio1`(rtl8365mb@0x1d, 5×GE + port6 sgmii cpu)、`&uniphy0`(ref 25MHz)、
@@ -120,3 +121,27 @@ keys(gpio17/20) + 5×LED(gpio19/10/11/13/**38**) + LED 别名 `led-19`、
 | 6.12 的 stmmac + PCS 组合在 SGMII/1G 上是否与 6.18 同行为 | 🟠 R15 | 只能真机验（P4） |
 | `coherent_pool=2M` 是否足够 6.12 ath11k | 🟡 | S7 用 512K 成功，但那走 `request_firmware_into_buf`；2M 是保守取法 |
 | RTL8367S 在 25.12.6 的 rtl8365mb 驱动版本下 5 口全 probe | 🟡 | DSA 驱动同名同源，风险低 |
+
+---
+
+## 5. ★ 离线 DTS 验证结果（不等构建，先验）
+
+用 cpp + dtc（`-I` 指向 6.18.55 的 dt-bindings，dtsi 用已套完全部补丁的 6.12 版本）先编一遍板级 DTS：
+
+```
+cpp OK → 1921 行；dtc OK → 25,918 B（S7 实跑 DTB 25,978 B）
+4 个 warning，全是上游 dtsi 自带（qfprom 重复 unit-address、mdio 无 ranges）
+```
+
+再和 `pin/s7-actual-dtb.dtb` 做全树对比（`tools/fdtdiff.py`）：
+
+| 指标 | 结果 |
+|---|---|
+| 节点总数 | **174 = 174**（修完 A6 之后；修之前是 175 vs 174） |
+| 只在我们的：| `usb@8af8800` 包装节点 + 其子节点 —— 6.12 与 6.18 的 USB 节点组织不同，两者都 `disabled` |
+| 只在 S7 的：| `phy@5d000`（`qcom,ipq5018-uniphy-usb3-phy`，`disabled`）—— 6.12 的 dtsi 还没这个节点；USB 关闭，无害 |
+| 属性差异 | 49 处，**全部**是 phandle 重新编号（0x22 vs 0xb 之类）或 gcc 时钟表条数不同 |
+| `status okay` 3 处 | `crypto` / `cryptobam` / `watchdog`：我们显式写，S7 是 6.18 dtsi 默认开 ⇒ 等价 |
+| 分区表 / bootargs / wifi / memory / nand-ecc | **零差异** |
+
+⇒ 板级 DTB 已与 S7 运行态结构等价，剩余差异全部可解释。

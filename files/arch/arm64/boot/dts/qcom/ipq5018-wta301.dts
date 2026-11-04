@@ -43,7 +43,7 @@
  *       longer bounces segments through the atomic DMA pool
  *   D4  &wifi1 explicitly `okay` (it is okay in the DTB as well - stating it
  *       here so a future edit cannot silently drop the 5 GHz radio)
- * v25.12.6 (kernel 6.12.112) ADAPTATION - the five changes below, nothing else
+ * v25.12.6 (kernel 6.12.112) ADAPTATION - the six changes below, nothing else
  * -------------------------------------------------------------------------
  * This file was carried over from the S7 tree (kernel 6.18.55). For 25.12.6 the
  * ethernet DT comes from a different place, so the includes and two reserved
@@ -63,11 +63,16 @@
  *       on this board, it is a WCSS user PD (docs/M09).  Without this, anyone
  *       copying a Linksys/IPQ5018 board file re-enables PCIe and the 5 GHz
  *       radio stops probing.
- *   A5  coherent_pool back to 2M.  S7 got away with 512K because 6.18 ath11k
- *       loads firmware with request_firmware_into_buf(); 6.12's ath11k still
- *       bounces segments through the coherent pool while the Q6 is already
- *       running on a 256 MiB box.  2M is the value v19-fix5/v20 proved on
- *       this exact hardware.  Costs 1.5 MiB of RAM, buys a boot.
+ *   A5  coherent_pool 2M (the v24 *source* text said 512K, but the DTB that
+ *       actually ran on the board has 2M - the source had drifted.  We follow
+ *       the DTB, not the source text.)
+ *   A6  partition table and bootargs taken from the S7 DTB, not from the v24
+ *       source text: rootfs_data -> rootfs_data2, plus rootfs_data3
+ *       (0x1bc0000 + 0x2440000, the live UBI overlay named "wta301data"),
+ *       and no tp_header/tp_header_bak nodes (those two overlap a live slot
+ *       and are absent from the running system).  13 partitions, rootfs still
+ *       index 6 so root=/dev/mtdblock6 keeps working.
+ *       Lesson (again): T2 actual DTB != source dts - see AGENTS-CASES 9jqrphw.
  */
 
 /dts-v1/;
@@ -102,7 +107,7 @@
 		 * stock TP-Link rootfs - never name a ubi.mtd= partition here,
 		 * mtd7/mtd12 belong to the stock overlay and its backup.
 		 */
-		bootargs-append = " root=/dev/mtdblock6 rootfstype=squashfs rootwait coherent_pool=2M";
+		bootargs-append = " root=/dev/mtdblock6 rootfstype=squashfs rootwait coherent_pool=2M ubi.mtd=rootfs_data3 fstools_overlay_name=wta301data";
 	};
 
 	memory@40000000 {
@@ -292,19 +297,18 @@
 				reg = <0x4fc0000 0xc00000>;
 			};
 
+			/*
+			 * Named rootfs_data2 (not rootfs_data) on purpose: fstools'
+			 * mount_root looks for a partition named rootfs_data and would
+			 * otherwise land on the 0xe0000 mtdsplit stub at the tail of
+			 * the squashfs.  Naming it rootfs_data2 leaves "rootfs_data3"
+			 * free to be the real overlay (UBI volume "wta301data"), which
+			 * is what /chosen/bootargs-append points fstools at.
+			 * This is v19-fix5's fix, proven on the board.
+			 */
 			rootfs-data@6a00000 {
-				label = "rootfs_data";
+				label = "rootfs_data2";
 				reg = <0x6a00000 0x1600000>;
-			};
-
-			tp-header@4800000 {
-				label = "tp_header";
-				reg = <0x4800000 0x20000>;
-			};
-
-			tp-header-bak@800000 {
-				label = "tp_header_bak";
-				reg = <0x800000 0x20000>;
 			};
 
 			normal-boot-bak@700000 {
@@ -320,6 +324,12 @@
 			rootfs-bak@fc0000 {
 				label = "rootfs_bak";
 				reg = <0xfc0000 0xc00000>;
+			};
+
+			/* the live overlay: UBI, one volume "wta301data" */
+			rootfs-data3@1bc0000 {
+				label = "rootfs_data3";
+				reg = <0x1bc0000 0x2440000>;
 			};
 
 			boot-flag@4000000 {
