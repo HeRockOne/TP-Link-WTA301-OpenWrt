@@ -117,6 +117,22 @@ configure: error: you should not run configure as root
 
 ---
 
+## 2.8 FIT 的 config 名（已从 S7 冻结内核里 parse 确认）
+
+`work/backup/FROZEN-S7-20261105/op_kernel_0x480000.bin` 就是 FIT/ITB（偏移 0 即 `d0 0d fe ed`）。
+结构块里可见：
+
+```
+configurations → config@mp02.1 → { kernel = "kernel-1"; fdt = "fdt-1"; hash-1 { algo = "crc32" } }
+description = "OpenWrt tplink_wta301"
+images: kernel-1 (type=kernel) / fdt-1 (type=flat_dt, arch=arm64, compression=none)
+```
+
+⇒ `DEVICE_DTS_CONFIG := config@mp02.1` 与 S7 **逐字一致**，不是猜的。
+顺带确认了 fdt-1 里的 bootargs（`root=/dev/mtdblock6 … coherent_pool=2M ubi.mtd=rootfs_data3 fstools_overlay_name=wta301data`）、
+`ethernet@39c00000` disabled / `ethernet@39d00000` okay+sgmii+fixed-link、`wifi@b00a040` okay / `wifi@b00b040` disabled、
+5 个 LED（19/10/11/13/38）、`mdio-ahb-clk` —— 与本次 A1–A6 完全吻合。
+
 ## 3. 构建阶段要盯的量（P2.4–P2.6）
 
 | 项 | 判据 | 怎么查 |
