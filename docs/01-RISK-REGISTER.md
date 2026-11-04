@@ -16,8 +16,8 @@
 | R10 | snapshot 源的包在迁移期被清理 | 🟡 | 中 | S7 无法再装包 | 404 | 迁移前先把 154 个版本匹配的包抓下来冻结 |
 | R11 | 刷入新固件后无法回退（u-boot 窗口抢不到） | 🔴 | 低 | 需 TTL 救砖 | 串口无响应 | 刷前确认二级 u-boot 窗口可抢（3 s），保留 S7 全套产物 |
 | R12 | 迁移产物与 S7 混淆，误刷 | 🟡 | 低 | 覆盖基线 | — | 分离目录 + 指纹文件不同名 + 刷写前打印指纹 |
-| **R14** | **25.12.6 的 ipq50xx 只有 QSDK ESS+NSS-DP，没有主线以太网栈；SSDK 不支持 RTL8367S ⇒ 有线全灭** | 🔴→🟢 **已交付** | 已发生 | 无 `eth0`，只有无线 | `grep -rln "ipq5018-gmac\|pcs-qca-uniphy" 25.12.6/target/` 为空 | **★真正的缺口是 DT 不是补丁**：25.12.6 的 `ipq5018-ess.dtsi` 里根本没有 `&gmac0/&gmac1`；已把 S7 树的 DWMAC 版收为 `ipq5018-gmac.dtsi` + 7 个补丁（0920–0926）+ 5 个 files + 5 行 config。详见 `P2-BUILD-DELIVERY.md` §0 |
-| **R15** | 补齐的 `dwmac-ipq5018.c` / `pcs-qca-uniphy.c` 在 6.12.112 上编译失败或行为异常 | 🟠 编译验证中 | 中 | 有线不通 | `make` 报错；`dmesg` 无 uniphy/gmac probe | 驱动取上游 6.12 时代版本；API 依赖面已核：只用 `fwnode_pcs_get()`（pending-6.12/737-*）+ `plat_dat->get_interfaces`（我们自己的 0924 补丁）。首个 `make` 即验；失败则回退 S7 |
+| **R14** | **25.12.6 的 ipq50xx 只有 QSDK ESS+NSS-DP，没有主线以太网栈；SSDK 不支持 RTL8367S ⇒ 有线全灭** | 🔴→✅ **已交付并编译通过**（P2/P3 闭环） | 已发生 | 无 `eth0`，只有无线 | `grep -rln "ipq5018-gmac\|pcs-qca-uniphy" 25.12.6/target/` 为空 | **★真正的缺口是 DT 不是补丁**：25.12.6 的 `ipq5018-ess.dtsi` 里根本没有 `&gmac0/&gmac1`；已把 S7 树的 DWMAC 版收为 `ipq5018-gmac.dtsi` + 7 个补丁（0920–0926）+ 5 个 files + 5 行 config。详见 `P2-BUILD-DELIVERY.md` §0 |
+| **R15** | 补齐的 `dwmac-ipq5018.c` / `pcs-qca-uniphy.c` 在 6.12.112 上编译失败或行为异常 | ✅ **已解**（2026-11-05） | 已发生 | 有线不通 | `target/linux/compile` 报 `pcs-qca-uniphy.c:567 implicit declaration of clk_hw_recalc_rate`；`:985 returning struct fwnode_pcs_provider* from int` | **根因：上游那份 pcs-qca-uniphy.c 本身是死代码** —— `clk_hw_recalc_rate()` 在 6.12 与 6.18 **都不存在**；25.12.6 的 5 个 ipq50xx profile 全走 ESS+NSS-DP，**从不编译它**，所以上游一直没暴露。S7 实跑证据（`work/evidence/V3-boot.log`）：`ipq5018-gmac-dwmac` + `rtl8365mb … fixed/sgmii` + `Link is Up 1Gbps`，全文无 PCS；S7 `.config`/`System.map` 无 `qca_uniphy`。`dwmac-ipq5018.c` 对缺 PCS 优雅降级（`-ENOENT → return 0`）⇒ 定案 `# CONFIG_PCS_QCA_UNIPHY is not set`，走 fixed-link，与 S7 完全一致。`dwmac-ipq5018.o` 已编出 32,280 B |
 
 ---
 
