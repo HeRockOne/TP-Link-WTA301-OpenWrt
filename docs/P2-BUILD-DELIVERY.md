@@ -145,6 +145,33 @@ images: kernel-1 (type=kernel) / fdt-1 (type=flat_dt, arch=arm64, compression=no
 D1 是唯一会波及别人的偏离。我们不做上游提交，但**将来若要上游化**，正确做法是保留 `kmod-qca-nss-dp`
 并用 `DEVICE_PACKAGES` 的负号语法（`-kmod-qca-nss-dp`）在我们的 Device 块里摘掉，而不是从 DEFAULT_PACKAGES 全局删。
 
+## 2.85 FIT/ITB 全字段核对（S7 内核 ITB vs 25.12.6 的 `Device/FitImageLzma`）
+
+用 FDT 解析器逐属性读出 S7 `op_kernel_0x480000.bin` 的 ITB 结构：
+
+```
+/images/kernel-1   type=kernel arch=arm64 os=linux compression=lzma
+                   load=0x41000000 entry=0x41000000   hash-1=crc32
+/images/fdt-1      type=flat_dt arch=arm64 compression=none
+/configurations   default=config@mp02.1  →  { kernel-1, fdt-1 }
+```
+
+25.12.6 的 `target/linux/qualcommax/image/Makefile`：
+
+```make
+define Device/FitImageLzma
+	KERNEL_SUFFIX := -uImage.itb
+	KERNEL = kernel-bin | lzma | fit lzma $$(KDIR)/image-$$(DEVICE_DTS).dtb
+	KERNEL_NAME := Image
+endef
+define Device/Default
+	KERNEL_LOADADDR := 0x41000000          ← 与 S7 一致
+	DEVICE_DTS_CONFIG := config@1          ← 我们覆盖成 config@mp02.1（与 S7 一致）
+```
+
+⇒ `load/entry 0x41000000`、`compression=lzma`、`config@mp02.1` 三个量**逐项对上**，
+产物文件名是 `<...>-uImage.itb`（P3 从这里取 kernel）。
+
 ## 3. 构建阶段要盯的量（P2.4–P2.6）
 
 | 项 | 判据 | 怎么查 |
