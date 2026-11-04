@@ -1,0 +1,111 @@
+#!/bin/sh
+#
+# TP-Link WTA301 -- ath11k calibration data for v24.
+#
+# Why this is a separate hotplug script and not a branch inside
+# 11-ath11k-caldata: see board.d/90_wta301.  11-ath11k-caldata has no
+# "tplink,wta301" case, so it falls through and creates nothing; this one
+# runs after it (12 > 11) and fills the gap.  Zero edits to the shared file.
+#
+# ---------------------------------------------------------------------------
+# What the stock firmware does (evidence, not guesswork)
+# ---------------------------------------------------------------------------
+# /lib/read_caldata_to_fs.sh + /lib/preinit/81_load_wifi_board_bin in the
+# stock rootfs:
+#
+#   flashCaldata -r /tmp/virtual_art.bin.tar.xz   # pull ART out
+#   tar -zxvf     /tmp/virtual_art.bin.tar.xz
+#   read_caldata  /tmp/virtual_art.bin  IPQ5018,qcn6122
+#
+# and read_caldata() then does literally:
+#
+#   IPQ5018 : dd skip=4096    count=131072   -> 0x01000 / 0x20000
+#   qcn6122 : dd skip=157696  count=131072   -> 0x26800 / 0x20000
+#
+# The ART partition on this board (mtd "art", 0x480000, 0x20000) is
+#   gzip( tar{ tmp/virtual_art.bin } )
+# i.e. one gzip member followed by NAND 0xff padding.  The tar member is
+# "tmp/virtual_art.bin", 0x80000 bytes, and it sits at tar offset 512
+# (single 512-byte ustar header, typeflag '0', size 0x80000 at header+124).
+#
+# Verified end to end on the running board:
+#   gzip -dc /dev/mtdblock2 | dd bs=512 skip=1 count=1024   -> 524288 B
+#     md5 dad7c3afc009a6c27b800b37a560ce36   (== virtual_art.bin)
+#   + skip=4096   count=131072 -> md5 f15ca65305465749986f19662aaefb19
+#   + skip=157696 count=131072 -> md5 c681908f261826dda8ff6c90e1ecbba5
+# and the same two blobs also appear byte-identically in the factory cal
+# extraction (work/v24-nss/ipq-wifi/), so the offsets are cross-checked.
+#
+# Do NOT use caldata_extract on this board: it is a bare dd at a raw offset
+# and would hand ath11k compressed gzip bytes.
+# ---------------------------------------------------------------------------
+
+[ "$ACTION" = "add" ] || exit 0
+[ "$(board_name)" = "tplink,wta301" ] || exit 0
+[ -e "/lib/firmware/$FIRMWARE" ] && exit 0
+
+. /lib/functions/caldata.sh
+
+VA=/tmp/wta301/virtual_art.bin
+
+extract_virtual_art() {
+	local mtdblk
+
+	[ -s "$VA" ] && return 0
+
+	mtdblk=$(find_mtd_chardev art)
+	[ -n "$mtdblk" ] || caldata_die "no mtd device found for partition art"
+
+	mkdir -p /tmp/wta301
+
+	# gzip -dc stops at end-of-stream and ignores the trailing 0xff, but
+	# busybox may still complain on stderr; dd reads exactly the tar member
+	# that follows the single 512-byte ustar header.
+	gzip -dc "$mtdblk" 2>/dev/null | \
+		dd of="$VA" bs=512 skip=1 count=1024 2>/dev/null
+
+	[ -s "$VA" ] && [ "$(wc -c < "$VA")" -eq 524288 ] || \
+		caldata_die "failed to extract virtual_art.bin from art"
+}
+
+# ---------------------------------------------------------------------------
+# MAC addresses
+# ---------------------------------------------------------------------------
+# factory_info (mtd "factory_info") M1CT TLV: type(be16) len(be16) value from
+# 0x18, so the type-0 / len-6 value sits at 0x1c.  Reads 98:97:cc:a8:1f:e7 on
+# this unit, matching the SSIDs the factory firmware advertises
+# (ChinaNet-1FE7 / ChinaNet-1FE7-5G).
+#
+# The factory calibration blob itself carries 00:03:7f:12:34:56 (a Qualcomm
+# reserved OUI) with the "use this address" flag at 0x3e left at 00 00, i.e.
+# the blob does NOT dictate a MAC.  That is exactly why v23 came up with
+# 00:03:7f:12:xx: ath11k fell back to the firmware built-in address, which is
+# identical on every unit of every model.  So we must patch both the address
+# and the flag:
+#   ath11k_patch_mac(..., 0) -> writes the 6 bytes at 0x0e (mac_id*6 + 0xe)
+#   ath11k_set_macflag()     -> writes 01 00 at 0x3e
+#
+# Offsets follow the sibling TP-Link IPQ5018 boards in this subtarget
+# (archer-ax55-v1 / ax58-v2): LAN keeps the label MAC, 2.4 GHz is label+2,
+# 5 GHz is label+3.  +1 stays unused because this board has no dedicated WAN
+# port.  Same choice v20 arrived at after its own board measurements.
+label_mac=$(mtd_get_mac_binary factory_info 0x1c)
+
+case "$FIRMWARE" in
+"ath11k/IPQ5018/hw1.0/cal-ahb-c000000.wifi.bin")
+	extract_virtual_art
+	caldata_from_file "$VA" 0x1000 0x20000
+	# 2.4 GHz = label + 2
+	[ -n "$label_mac" ] && ath11k_patch_mac "$(macaddr_add "$label_mac" 2)" 0
+	ath11k_set_macflag
+	;;
+"ath11k/QCN6122/hw1.0/cal-ahb-b00a040.wifi.bin")
+	extract_virtual_art
+	caldata_from_file "$VA" 0x26800 0x20000
+	# 5 GHz = label + 3
+	[ -n "$label_mac" ] && ath11k_patch_mac "$(macaddr_add "$label_mac" 3)" 0
+	ath11k_set_macflag
+	;;
+esac
+
+exit 0

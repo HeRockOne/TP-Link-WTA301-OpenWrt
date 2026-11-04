@@ -1,0 +1,595 @@
+// SPDX-License-Identifier: GPL-2.0-or-later OR MIT
+/*
+ * TP-Link WTA301 v1.1 (China Telecom AX3000)
+ *
+ * SoC:     Qualcomm IPQ5018 (2x Cortex-A53), 256 MiB DDR3, 128 MiB SPI-NAND
+ * Switch:  Realtek RTL8367S, 5x GE front jacks, SGMII 1G trunk to gmac1
+ * WiFi:    IPQ5018 internal 2.4 GHz + QCN6122 5 GHz (WCSS MPD, no PCIe)
+ *
+ * PROVENANCE - read before editing.
+ *
+ * Every value below was taken from the device tree of a WTA301 that boots and
+ * runs on this board (the DTB inside the working 20,447,232-byte slot image,
+ * md5 7b2996ac26e90ffed479ee19c8e0473d, built 2026-11-01 19:16).  It was NOT
+ * taken from the earlier draft sources that were lying around in the tree
+ * (work/op-build/dts/ipq5018-wta301.dts and its archives): those are a
+ * REGRESSED copy and differ from the working board in four separate ways -
+ * wifi1 disabled, 4 front ports instead of 5, 2500base-x instead of sgmii/1G,
+ * and kernel/rootfs partition sizes of 0x480000/0xbc0000 instead of
+ * 0x400000/0xb00000.  Trust the DTB, never those files.
+ *
+ * Deliberately carried over unchanged from that DTB (do not "fix" them):
+ *   - reserved-memory: tz_region 4 MiB, q6_region 0x4b000000 + 0x3400000.
+ *     No separate per-PD reserved regions: ath11k 6.18 resolves neither
+ *     `memory-region` nor `qcom,bdf-addr` on ipq5018 (fixed_fw_mem = false,
+ *     fixed_bdf_addr = true, see ath11k/core.c hw params), so the firmware
+ *     gets its carveouts from TZ.  Keeping the stock layout is therefore
+ *     zero-risk and saves the guessing.
+ *   - nand-ecc-strength = 8 / step-size 512: the value the working DTB uses
+ *     and the one this board's NAND actually needs.
+ *   - SGMII at 1 Gbit on the RTL8367S trunk.  2.5G HSGMII does not come up on
+ *     this board; every attempt to raise it lost the link.
+ *   - No `reset-gpios` on the switch node: the bootloader brings the RTL8367S
+ *     out of reset and the kernel must not touch it.
+ *   - `mdio-ahb-clk`: mdio1 is fed by a 100 MHz fixed clock, not by gcc.
+ *
+ * v24 DELTAS vs that DTB - exactly four, nothing else:
+ *   D1  ipq5018-nss.dtsi included, &nss_region pinned to 8 MiB
+ *       (patch 0818 in the target defaults it to 16 MiB for 512 MB boards)
+ *   D2  qcom,ath11k-fw-memory-mode = <2> on both radios (was <1>); mode 2 is
+ *       what disables coldboot calibration and saves the ~64 MB
+ *   D3  coherent_pool = 512K (was 2M); safe on 6.18 because
+ *       mdt_load_split_segment() uses request_firmware_into_buf() and no
+ *       longer bounces segments through the atomic DMA pool
+ *   D4  &wifi1 explicitly `okay` (it is okay in the DTB as well - stating it
+ *       here so a future edit cannot silently drop the 5 GHz radio)
+ * v25.12.6 (kernel 6.12.112) ADAPTATION - the five changes below, nothing else
+ * -------------------------------------------------------------------------
+ * This file was carried over from the S7 tree (kernel 6.18.55). For 25.12.6 the
+ * ethernet DT comes from a different place, so the includes and two reserved
+ * regions change.  Everything else is byte-identical to the proven S7 DTS.
+ *
+ *   A1  "ipq5018-ess.dtsi" (25.12.6 ships the QSDK ESS+NSS switch version, it
+ *       does NOT define &gmac0/&gmac1) is replaced by our "ipq5018-gmac.dtsi",
+ *       which defines the two mainline DWMAC nodes, gmac1 with
+ *       pcs-handle = <&uniphy0>.  See docs/M03 / R14.
+ *   A2  "ipq5018-nss.dtsi" dropped: 25.12.6 has no NSS/EDMA at all (no
+ *       kmod-qca-nss-dp, no nss_region label) and we decided pure-CPU
+ *       forwarding.  &nss_region override goes away with it.
+ *   A3  6.12 ipq5018.dtsi defaults differ from 6.18.55: crypto/cryptobam/
+ *       watchdog are disabled upstream, S7 runs them enabled -> stated here
+ *       explicitly so the board keeps today's behaviour (docs/M09).
+ *   A4  pcie0/pcie1 stated disabled on purpose: QCN6122 is NOT a PCIe device
+ *       on this board, it is a WCSS user PD (docs/M09).  Without this, anyone
+ *       copying a Linksys/IPQ5018 board file re-enables PCIe and the 5 GHz
+ *       radio stops probing.
+ *   A5  coherent_pool back to 2M.  S7 got away with 512K because 6.18 ath11k
+ *       loads firmware with request_firmware_into_buf(); 6.12's ath11k still
+ *       bounces segments through the coherent pool while the Q6 is already
+ *       running on a 256 MiB box.  2M is the value v19-fix5/v20 proved on
+ *       this exact hardware.  Costs 1.5 MiB of RAM, buys a boot.
+ */
+
+/dts-v1/;
+
+#include "ipq5018.dtsi"
+#include "ipq5018-gmac.dtsi"
+#include "ipq5018-qcn6122.dtsi"
+
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/input/input.h>
+#include <dt-bindings/leds/common.h>
+
+/ {
+	model = "TP-Link WTA301";
+	compatible = "tplink,wta301", "qcom,ipq5018";
+
+	aliases {
+		serial0 = &blsp1_uart1;
+		led-boot = &led_system;
+		led-failsafe = &led_system;
+		led-running = &led_system;
+		led-upgrade = &led_system;
+	};
+
+	chosen {
+		stdout-path = "serial0:115200n8";
+		/*
+		 * The stock U-Boot injects its own fsbootargs for the ubi.mtd
+		 * layout; /chosen/bootargs-append is parsed after it and the
+		 * last "root=" wins, so this decides where the kernel mounts.
+		 * Slot A's rootfs is a plain squashfs on mtd6, exactly like the
+		 * stock TP-Link rootfs - never name a ubi.mtd= partition here,
+		 * mtd7/mtd12 belong to the stock overlay and its backup.
+		 */
+		bootargs-append = " root=/dev/mtdblock6 rootfstype=squashfs rootwait coherent_pool=2M";
+	};
+
+	memory@40000000 {
+		device_type = "memory";
+		reg = <0x0 0x40000000 0x0 0x10000000>;
+	};
+
+	keys {
+		compatible = "gpio-keys";
+		pinctrl-0 = <&button_pins>;
+		pinctrl-names = "default";
+
+		/* stock pinctrl "button_pins": wps=gpio17, reset=gpio20 */
+		key-reset {
+			label = "reset";
+			gpios = <&tlmm 20 GPIO_ACTIVE_LOW>;
+			linux,code = <KEY_RESTART>;
+		};
+
+		key-wps {
+			label = "wps";
+			gpios = <&tlmm 17 GPIO_ACTIVE_LOW>;
+			linux,code = <KEY_WPS_BUTTON>;
+		};
+	};
+
+	leds {
+		compatible = "gpio-leds";
+		pinctrl-0 = <&led_pins>;
+		pinctrl-names = "default";
+
+		/*
+		 * The stock firmware drives the LEDs from userspace (dms), so
+		 * /sys/class/leds was empty and the mapping comes from
+		 * /sys/kernel/debug/gpio plus the stock pinctrl node names.
+		 */
+		led_system: led-19 {
+			label = "green:system";
+			gpios = <&tlmm 19 GPIO_ACTIVE_LOW>;
+		};
+
+		led-10 {
+			label = "green:lan";
+			gpios = <&tlmm 10 GPIO_ACTIVE_LOW>;
+		};
+
+		led-11 {
+			label = "green:wan";
+			gpios = <&tlmm 11 GPIO_ACTIVE_LOW>;
+		};
+
+		led-13 {
+			label = "green:wlan2g";
+			gpios = <&tlmm 13 GPIO_ACTIVE_LOW>;
+		};
+
+		led-38 {
+			label = "green:wlan5g";
+			gpios = <&tlmm 38 GPIO_ACTIVE_LOW>;
+		};
+	};
+
+	/*
+	 * mdio1 is clocked from here, not from gcc: with GCC_MDIO_AHB_CLK the
+	 * RTL8367S never answers SMI (chip id reads back -ETIMEDOUT).
+	 */
+	mdio_ahb_clk: mdio-ahb-clk {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <100000000>;
+	};
+};
+
+/* 256 MB board: the stock layout is 4 MiB TZ and one 52 MiB WCSS carveout for
+ * both user PDs.  6.12's ipq5018.dtsi defaults are 2 MiB / 27 MiB (and
+ * ipq5018-qcn6122.dtsi raises q6_region to 48 MiB) - neither is enough here:
+ * 2 MiB of TZ walks into the secure region, 48 MiB leaves the 2.4G firmware
+ * with no room next to the 5G one.  docs/M07.
+ */
+&tz_region {
+	reg = <0x0 0x4ac00000 0x0 0x400000>;
+};
+
+&q6_region {
+	reg = <0x0 0x4b000000 0x0 0x3400000>;
+};
+
+&blsp1_uart1 {
+	pinctrl-0 = <&serial_0_pins>;
+	pinctrl-names = "default";
+	status = "okay";
+};
+
+/*
+ * The QPIC BAM DMA engine is "disabled" in ipq5018.dtsi by default and every
+ * working IPQ board turns it on explicitly.  Without it qcom_snand fails with
+ *   "qcom_snand: tx DMA channel request failed"
+ * and the whole NAND (all 15 mtd partitions) never appears.
+ */
+&qpic_bam {
+	status = "okay";
+};
+
+&qpic_nand {
+	status = "okay";
+
+	nand-ecc-strength = <8>;
+	nand-ecc-step-size = <512>;
+
+	nand@0 {
+		compatible = "spi-nand";
+		reg = <0>;
+
+		nand-ecc-engine = <&qpic_nand>;
+		nand-ecc-strength = <8>;
+		nand-ecc-step-size = <512>;
+		nand-bus-width = <8>;
+
+		/*
+		 * Hard-coded to reproduce the stock /proc/mtd numbering.  Do
+		 * NOT switch this to qcom,smem-part: OpenWrt's qcomsmempart
+		 * reads the u-boot published Qualcomm generic table
+		 * (0:sbl1 / 0:mibib / 0:qsee / ... / rootfs / rootfs_1), not
+		 * TP-Link's table, and then there is no mtd6 at all.
+		 *
+		 * Baseline: the offset/size pairs below are byte-identical to the
+		 * factory partition table embedded in the 512-byte TP header at
+		 * 0x04800000 (slot A) and 0x00800000 (slot B) of
+		 * work/backup/flash_full_128M.bin.  Both headers carry the same
+		 * 9 entries; slot B only differs in the four slot-relative
+		 * offsets.  See work/v24-nss/P1.2-FACTORY-BASELINE-VERIFY.md.
+		 *
+		 * Entry ORDER matters: rootfs must stay at index 6 because the
+		 * bootargs hardcode root=/dev/mtdblock6.  fixed-partitions
+		 * registers children in device-tree order, not by address.
+		 *
+		 * U-Boot hardcodes these absolute offsets (never move them):
+		 *   0x04000000  boot flag (magic 'UABF' = 55 AA 42 46)
+		 *   0x04800000  firmware slot A (boot flag == 2)
+		 *   0x00800000  firmware slot B (any other value)
+		 * and reads the kernel FIT using the offset/size stored in the
+		 * 512-byte TP header at the start of the selected slot.
+		 *
+		 * Deliberately NOT modelled (they are inventions of the earlier
+		 * local port, absent from the factory table, and they overlap
+		 * kernel+rootfs+rootfs_data): firmware@4800000 0x2620000,
+		 * firmware-bak@800000 0x2620000, rootfs-data-bak@6a00000.
+		 * Writing any of them would detroy a live slot.
+		 */
+		partitions {
+			compatible = "fixed-partitions";
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			factory-boot@0 {
+				label = "factory_boot";
+				reg = <0x0 0x3c0000>;
+			};
+
+			factory-info@400000 {
+				label = "factory_info";
+				reg = <0x400000 0x20000>;
+			};
+
+			art@480000 {
+				label = "art";
+				reg = <0x480000 0x20000>;
+			};
+
+			config@500000 {
+				label = "config";
+				reg = <0x500000 0x200000>;
+			};
+
+			normal-boot@4700000 {
+				label = "normal_boot";
+				reg = <0x4700000 0x40000>;
+			};
+
+			kernel@4880000 {
+				label = "kernel";
+				reg = <0x4880000 0x400000>;
+			};
+
+			rootfs@4fc0000 {
+				label = "rootfs";
+				reg = <0x4fc0000 0xc00000>;
+			};
+
+			rootfs-data@6a00000 {
+				label = "rootfs_data";
+				reg = <0x6a00000 0x1600000>;
+			};
+
+			tp-header@4800000 {
+				label = "tp_header";
+				reg = <0x4800000 0x20000>;
+			};
+
+			tp-header-bak@800000 {
+				label = "tp_header_bak";
+				reg = <0x800000 0x20000>;
+			};
+
+			normal-boot-bak@700000 {
+				label = "normal_boot_bak";
+				reg = <0x700000 0x40000>;
+			};
+
+			kernel-bak@880000 {
+				label = "kernel_bak";
+				reg = <0x880000 0x400000>;
+			};
+
+			rootfs-bak@fc0000 {
+				label = "rootfs_bak";
+				reg = <0xfc0000 0xc00000>;
+			};
+
+			boot-flag@4000000 {
+				label = "boot_flag";
+				reg = <0x4000000 0x20000>;
+			};
+		};
+	};
+};
+
+&mdio0 {
+	/* internal GE PHY; enabled because GCC_GEPHY_MISC_ARES gates MDIO */
+	status = "okay";
+};
+
+&mdio1 {
+	status = "okay";
+	clocks = <&mdio_ahb_clk>;
+	pinctrl-0 = <&mdio1_pins>;
+	pinctrl-names = "default";
+
+	ethernet-switch@1d {
+		compatible = "realtek,rtl8365mb";
+		reg = <0x1d>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		mdio {
+			compatible = "realtek,smi-mdio";
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			switchphy0: ethernet-phy@0 {
+				reg = <0>;
+			};
+
+			switchphy1: ethernet-phy@1 {
+				reg = <1>;
+			};
+
+			switchphy2: ethernet-phy@2 {
+				reg = <2>;
+			};
+
+			switchphy3: ethernet-phy@3 {
+				reg = <3>;
+			};
+
+			switchphy4: ethernet-phy@4 {
+				reg = <4>;
+			};
+		};
+
+		ports {
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			port@0 {
+				reg = <0>;
+				label = "lan1";
+				phy-handle = <&switchphy0>;
+			};
+
+			port@1 {
+				reg = <1>;
+				label = "lan2";
+				phy-handle = <&switchphy1>;
+			};
+
+			port@2 {
+				reg = <2>;
+				label = "lan3";
+				phy-handle = <&switchphy2>;
+			};
+
+			port@3 {
+				reg = <3>;
+				label = "lan4";
+				phy-handle = <&switchphy3>;
+			};
+
+			port@4 {
+				reg = <4>;
+				label = "lan5";
+				phy-handle = <&switchphy4>;
+			};
+
+			port@6 {
+				reg = <6>;
+				label = "cpu";
+				phy-mode = "sgmii";
+				ethernet = <&gmac1>;
+
+				fixed-link {
+					speed = <1000>;
+					full-duplex;
+				};
+			};
+		};
+	};
+};
+
+&uniphy0 {
+	status = "okay";
+
+	assigned-clocks = <&uniphy0 UNIPHY_CLK_REF>;
+	assigned-clock-rates = <UNIPHY_REFCLK_25MHZ>;
+};
+
+&gmac1 {
+	status = "okay";
+	phy-mode = "sgmii";
+
+	fixed-link {
+		speed = <1000>;
+		full-duplex;
+	};
+};
+
+/*
+ * Crypto / RNG / watchdog: 6.18.55's ipq5018.dtsi leaves crypto and watchdog
+ * "okay" while 6.12.112's leaves every one of them "disabled".  S7 runs with
+ * them on, so state it here - otherwise the board silently loses /dev/watchdog
+ * (and the crypto engine) even though both drivers are built in
+ * (CRYPTO_DEV_QCE=y, QCOM_WDT=y).  docs/M09.
+ */
+&crypto {
+	status = "okay";
+};
+
+&cryptobam {
+	status = "okay";
+};
+
+&watchdog {
+	status = "okay";
+};
+
+/*
+ * No PCIe on this SKU.  QCN6122 (5 GHz) is a WCSS user PD, not a PCIe card:
+ * the S7 board runs both radios with pcie0/pcie1 disabled.  Stated explicitly
+ * so that copying a Linksys SPNMX56 / MX5500 board file cannot turn it on.
+ */
+&pcie0 {
+	status = "disabled";
+};
+
+&pcie1 {
+	status = "disabled";
+};
+
+/*
+ * One multi-PD Q6 image: PD1 = IPQ5018 2.4 GHz (UPD 3, reset gpio 15),
+ * PD2 = QCN6122 5 GHz (UPD 2, reset gpio 27).
+ */
+&q6v5_wcss {
+	status = "okay";
+
+	boot-args = </*       type: */ 0x1	/* PCIE0	*/
+		     /*     length: */ 4
+		     /*     UPD ID: */ 3
+		     /* reset GPIO: */ 15
+		     /*   reserved: */ 0 0
+		     /*       type: */ 0x2	/* PCIE1	*/
+		     /*     length: */ 4
+		     /*     UPD ID: */ 2
+		     /* reset GPIO: */ 27
+		     /*   reserved: */ 0 0>;
+};
+
+/* IPQ5018 internal radio (2.4 GHz) -- stock: qcom,cnss-qca5018 */
+&wifi {
+	status = "okay";
+
+	qcom,rproc = <&q6_wcss_pd1>;
+	qcom,ath11k-fw-memory-mode = <2>;
+	qcom,ath11k-calibration-variant = "TP-Link-WTA301";
+	qcom,bdf-addr = <0x4c400000>;
+};
+
+/* QCN6122 over WCSS MPD (5 GHz) -- stock: qcom,cnss-qcn6122 */
+&wifi1 {
+	status = "okay";
+
+	qcom,rproc = <&q6_wcss_pd2>;
+	qcom,userpd-subsys-name = "q6v5_wcss_userpd2";
+	qcom,ath11k-fw-memory-mode = <2>;
+	qcom,ath11k-calibration-variant = "TP-Link-WTA301";
+	qcom,bdf-addr = <0x4d300000>;
+	qcom,m3-dump-addr = <0x4e200000>;
+};
+
+&tlmm {
+	button_pins: button-state {
+		wps_button {
+			pins = "gpio17";
+			function = "gpio";
+			drive-strength = <8>;
+			bias-disable;
+		};
+
+		reset_button {
+			pins = "gpio20";
+			function = "gpio";
+			drive-strength = <8>;
+			bias-disable;
+		};
+	};
+
+	led_pins: led-state {
+		led_system_pin {
+			pins = "gpio19";
+			function = "gpio";
+			drive-strength = <8>;
+			bias-disable;
+		};
+
+		led_lan_pin {
+			pins = "gpio10";
+			function = "gpio";
+			drive-strength = <8>;
+			bias-disable;
+		};
+
+		led_wan_pin {
+			pins = "gpio11";
+			function = "gpio";
+			drive-strength = <8>;
+			bias-disable;
+		};
+
+		led_2g_pin {
+			pins = "gpio13";
+			function = "gpio";
+			drive-strength = <8>;
+			bias-disable;
+		};
+
+		led_5g_pin {
+			pins = "gpio38";
+			function = "gpio";
+			drive-strength = <8>;
+			bias-disable;
+		};
+	};
+
+	/* stock "mdio_pinmux": gpio36=mdc, gpio37=mdio */
+	mdio1_pins: mdio-state {
+		mdc-pins {
+			pins = "gpio36";
+			function = "mdc";
+			drive-strength = <8>;
+			bias-pull-up;
+		};
+
+		mdio-pins {
+			pins = "gpio37";
+			function = "mdio";
+			drive-strength = <8>;
+			bias-pull-up;
+		};
+	};
+
+	/* stock "blsp0_uart_pins": gpio28=rx, gpio29=tx, blsp0_uart1 */
+	serial_0_pins: serial0-state {
+		mux {
+			pins = "gpio28", "gpio29";
+			function = "blsp0_uart1";
+			drive-strength = <8>;
+			bias-disable;
+		};
+	};
+};

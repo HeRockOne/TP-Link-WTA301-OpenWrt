@@ -1,8 +1,15 @@
 # M10 MAC 地址 / ART / caldata 来源
 
 **一句话结论：真 MAC 只存在于 `factory_info`(mtd1) 的 `M1CT` TLV 里（`@0x1c` = `98:97:cc:a8:1f:e7`），
-ART 里没有 MAC；原厂自己也没把它交给内核；S7 上实际上**没人设 MAC**（br-lan 随机、Wi-Fi 是 QCA 默认）。
-迁移动作落在 **rootfs 配置层**（`/etc/config/network` 的 `option macaddr`），与内核/DTS 无关。**
+ART 里没有 MAC；原厂自己也没把它交给内核。
+我们的 S7 移植早已在**用户态脚本**里解决了这件事：`board.d/90_wta301` 给 br-lan/eth0/label 设 MAC，
+`hotplug.d/firmware/12-wta301-caldata` 从 ART 抽 caldata 并 patch 两个射频频段的 MAC（label+2 / label+3）。
+迁移动作 = 把这 **两个脚本原样搬进 25.12.6**，与内核/DTS 无关。**
+
+> ⚠ 本文 §2 曾得出「S7 上没人设 MAC」的错误结论。原因是只查了 `11-ath11k-caldata`
+> （上游共享文件）和镜像里 **首次启动前** 的 `/etc/config/network`（由 board.d 在首启时重写）。
+> 真正的实现是我们自己的 `90_wta301` / `12-wta301-caldata`（v24 树，`target/linux/qualcommax/ipq50xx/base-files/`）。
+> 结论已更正，脚本已收入仓库 `deliver/ipq50xx-base-files/`。
 
 ---
 
@@ -49,20 +56,30 @@ ART 里没有 MAC；原厂自己也没把它交给内核；S7 上实际上**没�
 
 ---
 
-## 2. S7 现状：三处 MAC 各是什么
+## 2. S7 现状：MAC 是谁设的（已更正）
 
-| 设备 | S7 用的是什么 | 依据 |
+| 设备 | S7 用的是什么 | 谁设的 |
 |---|---|---|
-| `br-lan` | **随机**（每次启动变） | `work/../S7 rootfs /etc/config/network` **没有** `option macaddr`（全文仅 27 行，只有 ports 列表）；v19-fix5 曾有该行，S7 重建时丢了 |
-| `eth0` / `lan1..5` | 继承/conduit 决定，`eth0` 在 fix5 实测是 label **+1** | 未在本板复核 ⇒ **P4 待验** |
-| `phy0-ap0` / `phy1-ap0` | **`00:03:7f:12:*` = QCA 固件默认**，不是 factory_info | `work/docs/V19-WIFI-WORKS-WHY.md:84-86` 已实证 |
+| `br-lan` | `factory_info@0x1c` = **label** | `90_wta301` → `ucidef_set_interface_macaddr "lan"` |
+| `eth0`（DSA conduit = gmac1） | **label**（不是 +1） | `90_wta301` → `ucidef_set_network_device_mac "eth0"` |
+| `lan1..lan5` | 跟随 master（br-lan） | DSA |
+| `phy0-ap0`（2.4G） | label **+2** | `12-wta301-caldata` → `ath11k_patch_mac … 2` + `ath11k_set_macflag` |
+| `phy1-ap0`（5G） | label **+3** | 同上，`QCN6122/hw1.0/cal-ahb-b00a040.wifi.bin` 分支 |
 
-### 为什么 S7 的 Wi-Fi MAC 是 QCA 默认
-OpenWrt 的标准 `etc/hotplug.d/firmware/11-ath11k-caldata` 会按 **board name** 分支
-（`case "$board" in … ath11k_patch_mac $(macaddr_add $label_mac 2) 0`），我们的 board 名是
-`tplink,wta301`（DTB `compatible = "tplink,wta301","qcom,ipq5018"`），**不在任何分支里**
-⇒ 不 patch caldata ⇒ 固件用自己的默认 MAC。
-而且 **故意不 patch**：`V19-FIX5-STABLE.md §5` 记录「静态改 caldata 里的 MAC 会让 Q6 崩溃」。
+依据：`deliver/ipq50xx-base-files/etc/board.d/90_wta301`（80 行）与
+`deliver/ipq50xx-base-files/etc/hotplug.d/firmware/12-wta301-caldata`（111 行）。
+
+### 为什么 11-ath11k-caldata 帮不上忙
+OpenWrt 的 `11-ath11k-caldata` 按 **board name** 分支（`tplink,archer-ax55-v1` 用的是
+`mtd_get_mac_binary 0:art 12`），我们的 board 名 `tplink,wta301` 不在任何分支里；
+更关键的是，那套 `caldata_extract` 是 **裸 dd**，而本板 ART 是 `gzip(tar(virtual_art.bin))`，
+裸 dd 会把 gzip 头喂给 ath11k。所以需要我们自己的 `12-wta301-caldata`（12 > 11，跑在后面，不改共享文件）。
+
+### fix5 §5 那条「改 caldata 会让 Q6 崩」说的是什么
+说的是**静态**改镜像里烤进去的 `caldata.bin`（单一变量破坏 + 校验踩坑）。
+**运行时**用 `ath11k_patch_mac` + `ath11k_set_macflag` 写是正确的做法：
+caldata 里出厂 MAC 是 `00:03:7f:12:34:56`（Qualcomm 保留 OUI），且
+`0x3e` 的“使用本地址”标志是 `00 00`，两个字节**都**必须改，否则 ath11k 仍回落到固件内置地址。
 
 ---
 
@@ -75,37 +92,36 @@ OpenWrt 的标准 `etc/hotplug.d/firmware/11-ath11k-caldata` 会按 **board name
 | `lib/preinit/09_mount_factory_data` | S7 有，只服务 `tplink,eap650-outdoor-v1` / `tplink,re700x` | 与本板无关 |
 | `11-ath11k-caldata` 里 `tplink,archer-ax55-v1` 分支（`mtd_get_mac_binary 0:art 12`） | 有 | **本板无效**（ART 无 MAC），不能照抄 |
 
-⇒ 结论：**上游没有任何可直接复用的「M1CT 取 MAC」逻辑**，两条路都要自己写：
-① 只改 `/etc/config/network`（零风险，仅 br-lan）；
-② 加一个 uci-defaults/hotplug 脚本从 `/dev/mtd1` @0x1c 读（覆盖 eth0 + Wi-Fi 可选）。
+⇒ 结论：**上游没有任何可直接复用的「M1CT 取 MAC」逻辑**。我们自己已经写好了，且已在板上跑过。
 
 ---
 
-## 4. 迁移动作
+## 4. 迁移动作（定案）
 
-### 4.1 第一版（P3 造包时必做，零风险，纯配置）
-在 `/etc/config/network` 的 `config device 'br_lan_dev'` 里恢复：
-```
-option macaddr '98:97:cc:a8:1f:e7'
-```
-（这是 v19-fix5 已验证过的做法，`V19-FIX5-STABLE.md §3.2`；写死字面值，不依赖脚本）
-—— 目的：让 br-lan 稳定，DHCP 租约/防火墙规则不因重启而失效。
+把两个脚本 **原样** 搬进 25.12.6 的 `target/linux/qualcommax/ipq50xx/base-files/`
+（仓库已存：`deliver/ipq50xx-base-files/`）：
 
-### 4.2 第二版（P6 之后，独立改进项，不并入首次迁移）
-新增 `/etc/uci-defaults/99-wta301-mac`（或 `board.d/02_network` 的 `tplink,wta301` 分支）：
-1. `dd if=/dev/mtd1 bs=1 skip=0 count=32` → 校验 `M1CT`
-2. 取 `@0x1c` 6 字节 → `base`
-3. `eth0` = base+1（DSA conduit），`br-lan` = base，`lan*` 继承
-4. Wi-Fi **不动**（改 caldata 会崩 Q6）
-5. 任一步失败 → 静默退出，保持现状
+| 文件 | 作用 | 迁移要改的地方 |
+|---|---|---|
+| `etc/board.d/90_wta301` | 5 口全进 br-lan；br-lan/eth0/label 设 MAC；3 个 LED 绑 netdev | 无（逻辑与内核版本无关） |
+| `etc/hotplug.d/firmware/12-wta301-caldata` | 从 ART 解 `gzip(tar(virtual_art.bin))` 抽两段 caldata；写 MAC 和 macflag | 无（只依赖 `caldata.sh` 的 `caldata_from_file`/`ath11k_patch_mac`/`ath11k_set_macflag`，25.12.6 全有） |
 
-> 为什么不并入首次迁移：首次迁移的唯一变量是「内核/用户空间 6.18→6.12/25.12.6」。
-> 同时改 MAC 会让「有线通」的判定混入第二个变量，违反单一变量原则（AGENTS.md §2.1）。
+两个脚本都自带 `[ "$(board_name)" = "tplink,wta301" ] || exit 0` 护卫，对其它 5 个 profile 零影响（但脚本文件仍会进它们的 rootfs，是已知无宓）。
+
+### 4.1 为什么不写成 `02_network` / `11-ath11k-caldata` 分支
+- 那两个是 subtarget 共享文件（38 个 device），改一次就背上一个补丁，每次 rebase 都可能静默丢掉（就是当年 dts 跑偏的成因）。
+- 后编号的 `board.d` / `hotplug.d` 可以独立整存，不碰它们。
+
+### 4.2 为什么写 MAC 要同时改 `0x3e` 的 flag
+caldata 里出厂 MAC 是 `00:03:7f:12:34:56`（Qualcomm 保留 OUI），且 `0x3e` 的“使用本地址”标志为 `00 00`。
+只改 MAC 不改 flag，ath11k 仍回落固件内置地址（v23 就是这么得到 `00:03:7f:12:xx` 的）。
+所以脚本里 `ath11k_patch_mac` 后面必跟 `ath11k_set_macflag`。
 
 ### 4.3 迁移时**不得**做的事
-- ❌ 不抄 AX55 的 `mtd_get_mac_binary 0:art 12`（ART 无 MAC）
-- ❌ 不改 `caldata.bin` / `board-2.bin` 里的 MAC（Q6 会崩，已实证）
-- ❌ 不指望 u-boot 填 `local-mac-address`（现有 u-boot 不改；即使改了也走 `tpl_boot_one()` 不走 `fdt_fixup_ethernet`）
+- ❌ 不抄 AX55 的 `mtd_get_mac_binary 0:art 12`（ART 无 MAC，且本板 ART 是 gzip 容器）
+- ❌ 不用 `caldata_extract`（裸 dd 会把 gzip 头喂给 ath11k）
+- ❌ 不**静态**改镜像里的 `caldata.bin`（fix5 §5 踩过）
+- ❌ 不指望 u-boot 填 `local-mac-address`（走 `tpl_boot_one()` 不走 `fdt_fixup_ethernet`）
 
 ---
 
@@ -129,6 +145,6 @@ dd if=/dev/mtd1 bs=1 skip=24 count=12 2>/dev/null | hexdump -C
 
 | 项 | 级别 | 说明 |
 |---|---|---|
-| S7 上 `eth0` = label+1 的来源 | 🟡 | fix5 日志显示 `eth0 98:97:cc:a8:1f:e8`，但 S7 DTB 里没有 `local-mac-address`，无法解释；可能是 `br_lan_dev` 的 macaddr 在 bridge 上、eth0 是 DSA conduit 自动 +1。P4 一查即知 |
+| `eth0` 实际地址（应为 label，而不是 fix5 的 label+1） | 🟡 | fix5 日志显示 `eth0 98:97:cc:a8:1f:e8`，而 `90_wta301` 写的是 `ucidef_set_network_device_mac "eth0" "$label_mac"`（= label 本身）。两者矛盾，P4 用 `ip -d link show eth0` 一查即知；两种都不影响连通 |
 | `M1CT` 头 20 字节（`05 c0 00 01 3a ce 10 fc …`）含义 | ⚪ 不必 | 取 MAC 不需要解它 |
 | TLV type 1–6 是否含 2.4G/5G MAC | 🟡 | 目前只解出 type0。原厂固件用 +2/+3 推算，说明后面的 type 可能存的是别的数据（或就是同一 base 的变体），对迁移无影响 |

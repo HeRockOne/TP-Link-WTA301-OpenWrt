@@ -1,0 +1,80 @@
+#!/bin/sh
+#
+# TP-Link WTA301 -- board bring-up for v24.
+#
+# Deliberately a SEPARATE board.d script instead of a branch inside
+# 02_network.  Two reasons:
+#
+#   1. 02_network is a ~200 line file shared by 38 devices in this subtarget.
+#      Editing it means carrying a patch against a moving upstream file, and
+#      every rebase is a chance to silently lose the branch (which is exactly
+#      how the old work/op-build DTS drifted into a regressed copy).
+#   2. A later-numbered board.d script can override whatever 02_network did,
+#      because each one runs board_config_update / board_config_flush on its
+#      own.  02_network simply falls through its case for "tplink,wta301".
+#
+# Baseline facts (work/v24-nss/P1.2-FACTORY-BASELINE-VERIFY.md):
+#   - the factory partition table is byte-identical to the TP header tables
+#     at 0x04800000 / 0x00800000
+#   - the factory MAC lives in factory_info (mtd1) at 0x1c: the M1CT TLV
+#     starts at 0x18 with type(be16)=0 len(be16)=6, value at 0x1c
+#   - both radios come up in the stock firmware (wifi1 status="ok")
+
+. /lib/functions/uci-defaults.sh
+. /lib/functions/system.sh
+
+[ "$(board_name)" = "tplink,wta301" ] || exit 0
+
+board_config_update
+
+#
+# Interfaces: all five switch ports into one bridge, no dedicated WAN.
+#
+# This is not a guess about the panel.  The retail twin of this board
+# (TP-Link XDR3010) and the WTA301 itself are documented as "4 x 1GbE,
+# WAN/LAN blind-plug" -- there is no separate WAN port to model.  The DSA
+# driver still instantiates five user ports because rtl8365mb reports five
+# internal PHYs (lan1..lan5, all probe successfully; see dmesg
+# "found an RTL8367S switch"), so bridging all five is both harmless for
+# the unwired one and immune to getting the reg-to-silkscreen mapping
+# wrong.  v19/v23 ran this exact shape and had working network.
+#
+ucidef_set_interface_lan "lan1 lan2 lan3 lan4 lan5"
+
+#
+# MAC addresses.
+#
+# factory_info (mtd1) holds an M1CT record.  Its TLV list starts at 0x18:
+#   type(be16) len(be16) value
+#   type 0, len 6 -> the base MAC, i.e. byte offset 0x1c.
+# Verified against the board: reads 98:97:cc:a8:1f:e7, which is the label
+# MAC of this unit.
+#
+# eth0 is the DSA conduit (gmac1).  Its DT node has no nvmem MAC source, so
+# stmmac would pick a random address on every boot; pin it to the label MAC
+# like the other TP-Link boards in this subtarget do.
+#
+label_mac=$(mtd_get_mac_binary factory_info 0x1c)
+if [ -n "$label_mac" ]; then
+	ucidef_set_interface_macaddr "lan" "$label_mac"
+	ucidef_set_label_macaddr "$label_mac"
+	ucidef_set_network_device_mac "eth0" "$label_mac"
+fi
+
+#
+# LEDs.
+#
+# The stock firmware drives all five LEDs from userspace (its dms daemon),
+# so /sys/class/leds never exposed a mapping and the labels in the DTS
+# (green:system / green:lan / green:wan / green:wlan2g / green:wlan5g) are
+# best-effort.  Only the three that do not depend on guessing which port is
+# "WAN" are wired up here; a wrong netdev trigger would blink forever and
+# look like a fault.  green:system is left to the default heartbeat.
+#
+ucidef_set_led_netdev "lan" "LAN" "green:lan" "br-lan" "link tx rx"
+ucidef_set_led_netdev "wlan2g" "WLAN2G" "green:wlan2g" "phy0-ap0" "link tx rx"
+ucidef_set_led_netdev "wlan5g" "WLAN5G" "green:wlan5g" "phy1-ap0" "link tx rx"
+
+board_config_flush
+
+exit 0
