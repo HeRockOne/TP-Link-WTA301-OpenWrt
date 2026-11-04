@@ -48,7 +48,29 @@ echo "== 5. UBI overlay：直接复用冻结的 S7 镜像 =="
 cp $W/work/backup/FROZEN-S7-20261105/ubi_rootfs_data3_wta301data.img $OUT/pack/ || die "复制 UBI 失败"
 ls -la $OUT/pack/
 
-echo "== 6. 自检 =="
-python3 $W/work/out-final/verify_release.py --dir $OUT/pack || die "verify_release 失败"
+echo "== 6. 独立复核 tphdr（不依赖打包器的自述）=="
+python3 - $OUT/pack <<'PYEOF' || exit 1
+import sys,os,struct,hashlib
+d=sys.argv[1]
+h=open(os.path.join(d,'op_tphdr_0x20000.bin'),'rb').read()
+k=open(os.path.join(d,'op_kernel_0x480000.bin'),'rb').read()
+r=open(os.path.join(d,'op_rootfs_0xbc0000.bin'),'rb').read()
+be=lambda o: struct.unpack('>I',h[o:o+4])[0]
+exp={0x48:0x4700000,0x4c:0x40000,0x50:0x4800000,0x54:0x20000,0x58:0x4880000}
+ok=True
+for o,v in exp.items():
+    got=be(o); print("  0x%02x = 0x%x %s"%(o,got,"OK" if got==v else "!= 0x%x ***"%v)); ok&=got==v
+kl,rl=be(0x5c),be(0x64)
+print("  0x5c(klen)=0x%x  0x60(rootoff)=0x%x  0x64(rverify)=0x%x"%(kl,be(0x60),rl))
+print("  kernel 文件 %d B  root 文件 %d B"%(len(k),len(r)))
+print("  +0xa0 = md5(kernel||root) %s"%("OK" if h[0xa0:0xb0]==hashlib.md5(k[:kl]+r[:rl]).digest() else "*** 不匹配"))
+ok &= h[0xa0:0xb0]==hashlib.md5(k[:kl]+r[:rl]).digest()
+ub=os.path.join('$W','work/backup/mtd4_normal_boot.bin')
+ub=open(ub,'rb').read()
+print("  +0x90 = md5(normal_boot) %s"%("OK" if h[0x90:0xa0]==hashlib.md5(ub).digest() else "*** 不匹配"))
+ok &= h[0x90:0xa0]==hashlib.md5(ub).digest()
+sys.exit(0 if ok else 1)
+PYEOF
+[ $? -eq 0 ] || die "tphdr 复核不通过"
 echo
 echo "== 完成：$OUT/pack =="
