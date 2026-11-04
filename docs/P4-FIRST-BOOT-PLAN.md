@@ -100,3 +100,41 @@ RAM 分别 `0x44000000 / 0x45000000 / 0x44000000 / 0x46000000`，校验址 `0x43
 5. overlay `ubi0_0` 挂载、`/dev/ubi0_0` 可用空间 ≈26MB
 
 任一条不符：先留串口全文（乱码则该轮作废），再决定回退 S7 冻结四件套。
+
+## 9. 刷写指令（`work/images/v25.12.6-P3/flash_cmds.txt` 原样，已含四区 + 逐区校验）
+
+四区顺序 **kernel → rootfs → ubi → tphdr**（tphdr 最后：头一改 `+0xa0` 就变，前面写坏还能靠旧头认出来）。
+
+```
+printenv ;tftpboot 0x44000000 op_kernel_0x480000.bin
+printenv ;nand erase 0x4880000 0x480000
+printenv ;nand write 0x44000000 0x4880000 0x480000
+printenv ;nand read  0x43000000 0x4880000 0x480000
+printenv ;crc32 0x43000000 0x480000          # 期望 7678e6d7
+
+printenv ;tftpboot 0x45000000 op_rootfs_0xbc0000.bin
+printenv ;nand erase 0x4fc0000 0xbc0000
+printenv ;nand write 0x45000000 0x4fc0000 0xbc0000
+printenv ;nand read  0x43000000 0x4fc0000 0xbc0000
+printenv ;crc32 0x43000000 0xbc0000          # 期望 9dd9d9d3
+
+printenv ;tftpboot 0x44000000 ubi_rootfs_data3_wta301data.img
+printenv ;nand erase 0x1bc0000 0x2440000
+printenv ;nand write 0x44000000 0x1bc0000 0x1e0000
+printenv ;nand read  0x43000000 0x1bc0000 0x1e0000
+printenv ;crc32 0x43000000 0x1e0000          # 期望 e850127a
+
+printenv ;tftpboot 0x46000000 op_tphdr_0x20000.bin
+printenv ;nand erase 0x4800000 0x20000
+printenv ;nand write 0x46000000 0x4800000 0x20000
+printenv ;nand read  0x43000000 0x4800000 0x20000
+printenv ;crc32 0x43000000 0x20000           # 期望 5a8b3e89
+```
+
+**擦除长度差异是有意的**：UBI 区擦 `0x2440000`（整区）但只写 `0x1e0000`（镜像长），
+因为必须把 S7 残留的 PEB 全部擦掉，否则 overlay 会残留旧 master node / 旧 LEB。
+
+**UBI 区为什么必须刷**：S7 的 overlay 里有 `/etc/config/*`（network/wireless/fstab），
+留着会让 25.12.6 首启读进 S7 的网络配置 ⇒ 有线可能起不来。冻结镜像 `e850127a` 是空 overlay。
+
+**刷完**：`rescue.py setflag --value 2` 设 boot_flag，再断电重启。

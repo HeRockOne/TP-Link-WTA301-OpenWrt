@@ -50,6 +50,38 @@ python3 $W/work/op-build/mk_op_pack.py --kernel "$K" --root "$R" --outdir $OUT/p
 
 echo "== 5. UBI overlay：直接复用冻结的 S7 镜像 =="
 cp $W/work/backup/FROZEN-S7-20261105/ubi_rootfs_data3_wta301data.img $OUT/pack/ || die "复制 UBI 失败"
+
+# 把 UBI 区补进刷写序列：mk_op_pack 只产 kernel/rootfs/tphdr 三区，
+# 但 overlay 区必须一起刷（否则仍是 S7 的 /etc/config，会污染首启网络与无线配置）。
+# 顺序：kernel -> rootfs -> ubi -> tphdr（tphdr 最后，头一改校验就变）。
+UBILEN=$(stat -c%s $OUT/pack/ubi_rootfs_data3_wta301data.img)
+UBILENHEX=$(printf '0x%x' $UBILEN)
+python3 - "$OUT/pack/flash_cmds.txt" "$UBILENHEX" <<'PYEOF'
+import sys
+path, ublen = sys.argv[1], sys.argv[2]
+lines = open(path, encoding='utf-8').read().splitlines()
+ubi = ['printenv ;tftpboot 0x44000000 ubi_rootfs_data3_wta301data.img',
+       'printenv ;nand erase 0x1bc0000 0x2440000',
+       'printenv ;nand write 0x44000000 0x1bc0000 ' + ublen]
+# 插在 tphdr 三条之前
+cut = next(i for i, l in enumerate(lines) if 'op_tphdr_0x20000.bin' in l)
+lines = lines[:cut] + ubi + lines[cut:]
+
+# AGENTS 5.5：每区写完后立刻 nand read 到旁址 + crc32，与本地文件 crc32（FINGERPRINT.json）逐区对比。
+# 旁址用 0x43000000（4MiB 处 → 0x44000000，不与任何在飞缓冲重叠）。
+out, i = [], 0
+while i < len(lines):
+    out.append(lines[i])
+    if 'nand write' in lines[i]:
+        tok = lines[i].split()      # ['printenv', ';nand', 'write', ram, addr, len]
+        _ram, addr, ln = tok[-3], tok[-2], tok[-1]
+        out.append('printenv ;nand read 0x43000000 %s %s' % (addr, ln))
+        out.append('printenv ;crc32 0x43000000 %s' % ln)
+    i += 1
+lines = out
+open(path, 'w', newline='\n').write('\n'.join(lines) + '\n')
+print('  已插入 UBI 区 3 条命令 (len=%s) + 每区 crc32 校验 2 条' % ublen)
+PYEOF
 ls -la $OUT/pack/
 
 echo "== 6. FINGERPRINT.json + tphdr 自洽复核 =="
