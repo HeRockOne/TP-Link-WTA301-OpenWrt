@@ -30,7 +30,7 @@
 | **M6** | 时钟 / PLL / uniphy | ⚠ 25.12.6 缺 uniphy0 + 整个主线以太网栈 | ✅ 已核对（含 R14 解决方案 + 补丁集验证） | `docs/M06-CLOCK-UNIPHY.md` |
 | **M7** | 内存 / reserved-memory | ❌ 上游 tz 2 MiB 会踩踏 TZ；memory size=0 | ✅ 已核对 | `docs/M07-MEMORY.md` |
 | **M8** | 引导链 / chosen / bootargs | ⚠ vendor 有 `init=/init`，我们必须去掉 | ✅ 已核对 | `docs/M08-BOOT-CHAIN.md` |
-| **M9** | USB / PCIe / SDCC / 其它外设 | ⬜ 待做 | 🔄 下一个 | — |
+| **M9** | USB / PCIe / SDCC / 其它外设 | ⚪ 本板全关；★ QCN6122 不是 PCIe 设备 | ✅ 已核对 | `docs/M09-PERIPHERALS.md` |
 | **M10** | MAC 地址 / ART / caldata 来源 | ⚠ 原厂 ART 无 MAC；真 MAC 在 factory_info | ⚠ 基本已覆盖（详见 M12/M5） | — |
 | **M11** | 温度 / 电源 / 稳压器 | ⬜ 待做 | ⬜ | — |
 | **M12** | 无线固件 / BDF 加载路径 | ❌ bdwlan ≠ cal；包不含 board-2.bin | ✅ 已核对 | `docs/M12-FIRMWARE-BDF.md` |
