@@ -172,6 +172,20 @@ define Device/Default
 ⇒ `load/entry 0x41000000`、`compression=lzma`、`config@mp02.1` 三个量**逐项对上**，
 产物文件名是 `<...>-uImage.itb`（P3 从这里取 kernel）。
 
+## 2.95 7 个补丁的上下文冲突预判（离线查同文件竞争者）
+
+| 我们的补丁 | 改的文件 | 25.12.6 里同文件的其它补丁 | 判断 |
+|---|---|---|---|
+| 0920 | `Documentation/…/ethernet-phy.yaml` | **无** | 干净 |
+| 0921 | `ipq5018.dtsi`(ge_phy rx/tx clocks) | 102 个（p2dry 已全量实测通过） | 干净 |
+| 0922 | `drivers/net/phy/qcom/at803x.c` | `0057`(Qualcomm IPQ5018 PHY 支持，**我们依赖它先应用**)、`backport-6.12/720-09`(constify mdio_device_id) | 0922 排在 0057 之后，上下文就是含 0057 的树 ⇒ 预期干净；720-09 只动 id 表，与时钟管理无关 |
+| 0923 | `ipq5018.dtsi`(uniphy0) | 同上，p2dry 实测通过 | 干净 |
+| 0924 | `stmmac_main.c` + `include/linux/stmmac.h` | **无** | 干净（文件是 virgin） |
+| 0925 | `drivers/net/pcs/{Kconfig,Makefile}` | 无 | 干净 |
+| 0926 | `stmmac/{Kconfig,Makefile}` | 无 | 干净 |
+
+⇒ 唯一有理论风险的只有 0922（竞品是 backport 里的机械改动），其余 6 个都是干净应用面。
+
 ## 3. 构建阶段要盯的量（P2.4–P2.6）
 
 | 项 | 判据 | 怎么查 |
