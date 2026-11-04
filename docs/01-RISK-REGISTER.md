@@ -16,8 +16,8 @@
 | R10 | snapshot 源的包在迁移期被清理 | 🟡 | 中 | S7 无法再装包 | 404 | 迁移前先把 154 个版本匹配的包抓下来冻结 |
 | R11 | 刷入新固件后无法回退（u-boot 窗口抢不到） | 🔴 | 低 | 需 TTL 救砖 | 串口无响应 | 刷前确认二级 u-boot 窗口可抢（3 s），保留 S7 全套产物 |
 | R12 | 迁移产物与 S7 混淆，误刷 | 🟡 | 低 | 覆盖基线 | — | 分离目录 + 指纹文件不同名 + 刷写前打印指纹 |
-| **R14** | **25.12.6 的 ipq50xx 只有 QSDK ESS+NSS-DP，没有主线以太网栈；SSDK 不支持 RTL8367S ⇒ 有线全灭** | 🔴→🟡 **已解** | 已发生 | 无 `eth0`，只有无线 | `grep -rln "ipq5018-gmac\|pcs-qca-uniphy" 25.12.6/target/` 为空 | 补上游 6.12 时代的 7 个补丁 + 5 个 files + 5 行 config（见 `M06-CLOCK-UNIPHY.md` §4–§6），已实测 102+4 个补丁在 6.12.112 上全部干净应用 |
-| **R15** | 补齐的 `dwmac-ipq5018.c` / `pcs-qca-uniphy.c` 在 6.12.112 上编译失败或行为异常 | 🟠 | 中 | 有线不通 | `make` 报错；`dmesg` 无 uniphy/gmac probe | 驱动取上游 6.12 时代版本（conversion commit 当时树仍是 6.12）；P2 首个编译目标就是这两个 .o；失败则回退 S7 |
+| **R14** | **25.12.6 的 ipq50xx 只有 QSDK ESS+NSS-DP，没有主线以太网栈；SSDK 不支持 RTL8367S ⇒ 有线全灭** | 🔴→🟢 **已交付** | 已发生 | 无 `eth0`，只有无线 | `grep -rln "ipq5018-gmac\|pcs-qca-uniphy" 25.12.6/target/` 为空 | **★真正的缺口是 DT 不是补丁**：25.12.6 的 `ipq5018-ess.dtsi` 里根本没有 `&gmac0/&gmac1`；已把 S7 树的 DWMAC 版收为 `ipq5018-gmac.dtsi` + 7 个补丁（0920–0926）+ 5 个 files + 5 行 config。详见 `P2-BUILD-DELIVERY.md` §0 |
+| **R15** | 补齐的 `dwmac-ipq5018.c` / `pcs-qca-uniphy.c` 在 6.12.112 上编译失败或行为异常 | 🟠 编译验证中 | 中 | 有线不通 | `make` 报错；`dmesg` 无 uniphy/gmac probe | 驱动取上游 6.12 时代版本；API 依赖面已核：只用 `fwnode_pcs_get()`（pending-6.12/737-*）+ `plat_dat->get_interfaces`（我们自己的 0924 补丁）。首个 `make` 即验；失败则回退 S7 |
 
 ---
 
@@ -40,3 +40,4 @@
 | 基线冻结 | `work/backup/FROZEN-S7-20261105/` + `SHA256SUMS`（已完成） |
 | 板子状态 | 迁移的 P1–P3 全程不碰板子；P4 才上电 |
 | 回退演练 | 刷机前先把 S7 从归档刷回一次，证明回退路径可用 |
+| **R16** | 板级 DTS 跟错基线：`/root/nss-edma/dts/ipq5018-wta301.dts`（源文本）与实跑 DTB 又不一致（分区名/rootfs_data3/tp_header/bootargs） | 🟡 **已处理** | 已发生 3 次 | mtd 编号错位、overlay 不挂、`root=` 指错 | 本次 P2 离线对拍：修前 175 节点 vs S7 174，且缺 `rootfs_data3` | 基线固定为 `pin/s7-actual-dtb.dtb`；任何 DTS 改动先跑 `tools/fdtdiff.py` 与它逐节点对齐（见 lesson `2qfjl8d`） |
