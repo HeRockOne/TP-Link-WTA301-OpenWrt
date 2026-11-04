@@ -40,11 +40,12 @@
 
 | # | 任务 | 通过条件 |
 |---|---|---|
-| P2.1 | 以 **S7 实际 DTB 语义**（mode 2、双射频 okay）写 25.12.6 版 `ipq5018-wta301.dts` | `dtc` 编译 0 error |
-| P2.2 | 写 `target/linux/qualcommax/image/ipq50xx.mk` 的 `Device/tplink_wta301` | `make menuconfig` 能看到 `tplink_wta301` |
-| P2.3 | `make kernel` 编出 Image | Image 尺寸 **≤ 0x740000**（R7） |
-| P2.4 | 核对新内核的 `vermagic` 与随包模块一致 | 全部 `6.12.112` |
-| P2.5 | 核对 ath11k 的 QCN6122 补丁确实编进去 | 内核里含 `qcn6122_regs` 符号 |
+| P2.1 | **把 R14 以太网栈补齐**：7 个补丁 → `patches-6.12/`（在 25.12.6 树里按目标编号命名），5 个 files → `files/`，5 行 config，删 `kmod-qca-nss-dp`（详见 `M06-CLOCK-UNIPHY.md` §4–§6） | 补丁全部应用无 fuzz；`DWMAC_IPQ5018=y` 生效 |
+| P2.2 | 以 **S7 实际 DTB 语义**（mode 2、双射频 okay）写 25.12.6 版 `ipq5018-wta301.dts` | `dtc` 编译 0 error |
+| P2.3 | 写 `target/linux/qualcommax/image/ipq50xx.mk` 的 `Device/tplink_wta301` | `make menuconfig` 能看到 `tplink_wta301` |
+| P2.4 | `make kernel` 编出 Image | Image 尺寸 **≤ 0x740000**（R7）；`dwmac-ipq5018.ko` / `pcs-qca-uniphy.ko` 同时产出 |
+| P2.5 | 核对新内核的 `vermagic` 与随包模块一致 | 全部 `6.12.112` |
+| P2.6 | 核对 ath11k 的 QCN6122 补丁确实编进去 | 内核里含 `qcn6122_regs` 符号 |
 
 **通过条件**：Image 造出、尺寸合规、DTB 可编译、属性名与 6.12 对得上。
 

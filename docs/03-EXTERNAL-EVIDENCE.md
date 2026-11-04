@@ -264,3 +264,136 @@ wifi@b00b040 { status = "disabled"; };
 | E-13 | `qcom,smem-part` 与 `fixed-partitions` 在本 U-Boot 下是否冲突 | 25.12.6 源码 + 实测 |
 | E-14 | 25.12.6 IB tarball 的实际结构与是否含 wta301 | 下载后 grep |
 | E-15 | RTL8367S 是否有上游 DSA 驱动 | lore / kernel git |
+
+---
+
+## E-11 ★★ OpenWrt 上游把 ipq50xx 从 QSDK ESS 迁到主线 DWMAC/PCS 的提交（时间晚于 25.12 分支）
+
+**[外部实证]** commit `16ac5736c178c36d4cb7ae0f791f8bd2a5af095a`
+`qualcommax: ipq50xx: convert to UNIPHY PCS and DWMAC stack`
+作者 georgemoussalem；author date **2026-05-05**；fork 提交 date 2026-07-05
+URL: https://github.com/JuliusBairaktaris/openwrt-nss-edma/commit/16ac5736c178c36d4cb7ae0f791f8bd2a5af095a
+
+变更（+180/−456，22 文件）关键部分原文：
+```
+ target/linux/qualcommax/files/include/dt-bindings/net/qcom-ipq-ess.h | removed | 0 | 42
+ target/linux/qualcommax/ipq50xx/config-default                        | modified | 5 | 0
+ target/linux/qualcommax/ipq50xx/target.mk                             | modified | 0 | 1
+ target/linux/qualcommax/patches-6.12/0722-...-clk-providers-by-name.patch | removed | 0 | 40
+```
+config-default 增量（原文）：
+```
++# CONFIG_DWMAC_GENERIC is not set
++CONFIG_DWMAC_IPQ5018=y
++CONFIG_PCS_XPCS=y
++CONFIG_STMMAC_ETH=y
++CONFIG_STMMAC_PLATFORM=y
+```
+target.mk 减量（原文）：
+```
+-DEFAULT_PACKAGES += kmod-qca-nss-dp
+```
+commit message 原文：
+> Convert to UNIPHY PCS and DWMAC ethernet stack from qca-ssdk.
+> Since we are not using SSDK anymore, we dont need to patch in the UNIPHY clock names anymore so drop the patch.
+
+**板级差异表**（对 WTA301 的意义）：
+
+| 项 | 上游该提交 | 本板 | 同/不同 |
+|---|---|---|---|
+| SoC 以太网 IP | IPQ5018 GMAC0/GMAC1 + UniPHY | 同 | 同 |
+| 驱动栈 | stmmac(DWMAC_IPQ5018) + PCS_QCA_UNIPHY + DSA | S7 已在用同一套（6.18.55） | 同 |
+| 交换机 | QCA8337（qca8k） | **RTL8367S**（rtl8365mb） | **不同** |
+| 是否在 25.12.6 里 | ❌（25.12.0 分支于 2026-03-03） | — | 需自行补 |
+
+**结论**：25.12.6 必须补这批补丁才有有线；补齐方式 = 取该提交父提交
+`763d32b8d0a816e9a55de6464958b8d5597f66b3` 的 `patches-6.12/` 与 `files/`（那时上游树仍是 6.12）。
+
+---
+
+## E-12 ★ openwrt/qca-ssdk 不支持 Realtek 交换机（SSDK 路径不可行）
+
+**[外部实证]** `package/kernel/qca-ssdk/Makefile` 原文：
+```
+PKG_SOURCE_URL:=https://github.com/openwrt/qca-ssdk.git
+PKG_SOURCE_DATE:=2025-05-30
+PKG_SOURCE_VERSION:=446db12b1fd3bca2e61e45cb01c4ad52cfddd95b
+```
+GitHub tree API 拉全量 `?recursive=1`：**953 个文件**，
+用 `rtl|realtek|8367|8369` 正则匹配 → **0 命中**。
+
+**结论**：25.12.6 的 SSDK 无法驱动本板的 RTL8367S。
+TP-Link 原厂用的是 QSDK 私有 `qualcomm,rtk-gsw`（见 `patches/factory/fdt_mp02.1.dts` 的
+`rtl-instace` 节点），主line 与 openwrt/qca-ssdk 都没有。
+
+---
+
+## E-13 25.12.6 的 ipq50xx 前身就是 QSDK ESS（本地实证，附原文）
+
+**[本板实证/本地文件]** `target/linux/qualcommax/files/arch/arm64/boot/dts/qcom/ipq5018-ess.dtsi`：
+```dts
+switch: ess-switch@39c00000 {
+    compatible = "qcom,ess-switch-ipq50xx";
+    device_id = <0>;
+    switch_access_mode = "local bus";
+    ...
+};
+ess-uniphy@98000 { compatible = "qcom,ess-uniphy"; };
+dp1: dp1 { compatible = "qcom,nss-dp"; qcom,id = <1>; reg = <0x39C00000 0x10000>; };
+dp2: dp2 { compatible = "qcom,nss-dp"; qcom,id = <2>; reg = <0x39D00000 0x10000>; };
+```
+`target/linux/qualcommax/ipq50xx/config-default` 全文 30 行，含
+`CONFIG_NET_DSA_QCA8K=y` / `CONFIG_MAXLINEAR_GPHY=y` / `CONFIG_QCA83XX_PHY=y`，
+**不含** `STMMAC_ETH` / `DWMAC_IPQ5018`。
+
+---
+
+## E-14 25.12.6 已具备 PCS-provider 框架（前置 API 不需要自己补）
+
+**[本地文件]** `target/linux/generic/pending-6.12/`：
+```
+737-01-net-phylink-keep-and-use-MAC-supported_interfaces-in.patch
+737-02-net-phylink-introduce-internal-phylink-PCS-handling.patch
+737-03-net-pcs-implement-Firmware-node-support-for-PCS-driv.patch
+737-04-net-phylink-save-phylink-instance-fwnode-on-phylink_.patch
+737-05-net-phylink-support-PCS-provider-release.patch
+737-06-net-phylink-support-late-PCS-provider-attach.patch
+737-07-net-phylink-add-.pcs_link_down-PCS-OP.patch
+```
+`target/linux/generic/config-6.12:2169` = `# CONFIG_FWNODE_PCS is not set`（符号存在）
+`target/linux/generic/backport-6.12/601-09-v6.14-net-phylink-add-pcs_inband_caps-method.patch` 等。
+
+---
+
+## E-15 CMN PLL 频率是 4.8 GHz（纠正误读，引上游 commit message 原文）
+
+**[上游代码]** `patches-6.12/0818-arm64-dts-qcom-ipq5018-fix-assigned-cmn-pll-clock-rate.patch` 原文：
+> In IPQ5018, the reference clock to the CMN PLL block from the on-board Wi-Fi has its
+> divider set to 2. This divider wasn't taken into consideration when calculating the
+> CMN PLL clock rate which meant the resulting clock rate was doubled.
+> With the reference clock divider being accounted for in the driver, correct the
+> assigned clock rate to **4.8GHz**.
+```
+-			assigned-clock-rates-u64 = /bits/ 64 <9600000000>;
++			assigned-clock-rates-u64 = /bits/ 64 <4800000000>;
+```
+DTB 里表现为两个大端 u32 `<0x01 0x1e1a3000>` = 0x1_1E1A3000 = 4,800,000,000。
+**按 32 位读成 505 MHz 是错的。**
+
+---
+
+## E-16 6.12 内核本身没有 uniphy PCS / ipq5018 DWMAC（线上核实）
+
+**[外部代码]** `v6.12.112` 的 `drivers/net/pcs/Kconfig` 尾（git.kernel.org plain view）：
+```
+config PCS_RZN1_MIIC
+	tristate "Renesas RZ/N1 MII converter"
+	...
+endmenu
+```
+—— 没有 `PCS_QCA_UNIPHY`；`arch/arm64/boot/dts/qcom/ipq5018.dtsi`（399 行）也没有任何
+`ethernet@` / `ethernet-pcs@` / `mdio@` 节点。
+URL: https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/drivers/net/pcs/Kconfig?h=v6.12.112
+
+⇒ 有线能力**完全来自 OpenWrt 的 files/ + patches**，不在内核本体里。这也解释了为什么
+25.12.6 分支要等上游 conversion commit 才有主线以太网。

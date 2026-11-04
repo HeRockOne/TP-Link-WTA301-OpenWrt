@@ -23,17 +23,17 @@
 | # | 模块 | 三方一致? | 状态 | 记录 |
 |---|---|---|---|---|
 | **M1** | NAND 控制器 / ECC 参数 | ❌ **不一致（ECC 4 vs 8）** | ✅ 已核对 | `docs/M01-NAND-ECC.md` |
-| **M2** | 分区表 | ⚠ 原厂无节点，S7 硬编码 14 项 | 🔄 待做 | — |
-| **M3** | 以太网 / MDIO / PHY / 交换机 | ❌ 完全不同（QSDK ESS vs 上游 DSA） | 🔄 部分 | `docs/M03-ETHERNET.md` |
-| **M4** | Wi-Fi（IPQ5018 2.4G + QCN6122 5G） | ⚠ 源 dts ≠ 实际 DTB | 🔄 待做 | — |
-| **M5** | GPIO / LED / 按键 / pinctrl | ⬜ 待做 | ⬜ | — |
-| **M6** | 时钟 / PLL / uniphy | ⬜ 待做 | ⬜ | — |
-| **M7** | 内存 / reserved-memory | ⬜ 待做 | ⬜ | — |
-| **M8** | 引导链 / chosen / bootargs | ⬜ 待做 | ⬜ | — |
-| **M9** | USB / PCIe / SDCC / 其它外设 | ⬜ 待做 | ⬜ | — |
-| **M10** | MAC 地址 / ART / caldata 来源 | ⬜ 待做 | ⬜ | — |
+| **M2** | 分区表 | ⚠ 原厂无节点，S7 硬编码 14 项 | ✅ 已核对 | `docs/M02-PARTITIONS.md` |
+| **M3** | 以太网 / MDIO / PHY / 交换机 | ❌ 完全不同（QSDK ESS vs 上游 DSA） | ✅ 已核对 + **R14 缺口已解** | `docs/M03-ETHERNET.md` · `docs/M06-CLOCK-UNIPHY.md` §4–§6 |
+| **M4** | Wi-Fi（IPQ5018 2.4G + QCN6122 5G） | ⚠ 源 dts ≠ 实际 DTB | ✅ 已核对 | `docs/M04-WIFI-DRIVER.md` |
+| **M5** | GPIO / LED / 按键 / pinctrl | ⚠ 原厂只给 15/26/27，其余来自运行时 | ✅ 已核对 | `docs/M05-GPIO-LED-KEYS.md` |
+| **M6** | 时钟 / PLL / uniphy | ⚠ 25.12.6 缺 uniphy0 + 整个主线以太网栈 | ✅ 已核对（含 R14 解决方案 + 补丁集验证） | `docs/M06-CLOCK-UNIPHY.md` |
+| **M7** | 内存 / reserved-memory | ❌ 上游 tz 2 MiB 会踩踏 TZ；memory size=0 | ✅ 已核对 | `docs/M07-MEMORY.md` |
+| **M8** | 引导链 / chosen / bootargs | ⚠ vendor 有 `init=/init`，我们必须去掉 | ✅ 已核对 | `docs/M08-BOOT-CHAIN.md` |
+| **M9** | USB / PCIe / SDCC / 其它外设 | ⬜ 待做 | 🔄 下一个 | — |
+| **M10** | MAC 地址 / ART / caldata 来源 | ⚠ 原厂 ART 无 MAC；真 MAC 在 factory_info | ⚠ 基本已覆盖（详见 M12/M5） | — |
 | **M11** | 温度 / 电源 / 稳压器 | ⬜ 待做 | ⬜ | — |
-| **M12** | 无线固件 / BDF 加载路径 | ⬜ 待做 | ⬜ | — |
+| **M12** | 无线固件 / BDF 加载路径 | ❌ bdwlan ≠ cal；包不含 board-2.bin | ✅ 已核对 | `docs/M12-FIRMWARE-BDF.md` |
 
 **优先级顺序**（按「会挡住启动」排序）：M1 → M2 → M3 → M8 → M7 → M4 → M12 → M5 → M6 → M10 → M9 → M11
 
