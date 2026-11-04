@@ -1,0 +1,57 @@
+# P5 包集对齐（LuCI + zram）
+
+**目的**：把 P3 那版"故意不带 Web UI"的镜像补齐到与 S7 可用性等价的包集，
+仍然遵守 **单一变量**：只加包，不碰内核配置、不碰 DTS、不碰以太网栈。
+
+## 1. 差异清单（S7 178 包 vs P3 147 包）
+
+真实差异只有两组（其余 100+ 条是 lib ABI 改名，同一个库换了 soname 版本）：
+
+| 组 | 包 | 来源 |
+|---|---|---|
+| Web UI | `luci` `luci-ssl` `luci-theme-bootstrap` `luci-app-firewall` `luci-app-package-manager` `cgi-io` | feeds/luci + feeds/packages |
+| 内存 | `zram-swap`（自动拉 `kmod-zram`） | core（`package/system/zram-swap`） |
+
+清单固化在 `deliver/s7-parity-packages.txt`，S7 侧完整包表在 `pin/s7-packages.txt`。
+
+## 2. 构建动作
+
+```sh
+cp .config /root/config-p3.bak           # 留退路（P3 那份可随时回去）
+printf 'CONFIG_PACKAGE_luci=y\n...' >> .config
+make defconfig
+FORCE_UNSAFE_CONFIGURE=1 make -j8        # 只此一条，别并发第二个 make
+```
+
+feeds 必须先装全：`scripts/feeds update -a && scripts/feeds install -a`
+（P3 时只装了 `base`，所以 147 包里没有 LuCI。）
+
+## 3. 验收（三条硬指标）
+
+| 指标 | 判据 | 怎么查 |
+|---|---|---|
+| 镜像出来了 | `bin/targets/qualcommax/ipq50xx/*tplink_wta301*squashfs-sysupgrade.bin` 时间戳晚于本次构建 | `ls -lt` |
+| LuCI 真在里面 | manifest 里出现 `luci-base` / `uhttpd` / `luci-theme-bootstrap` | `grep -c luci *manifest` |
+| **rootfs 不超槽** | squashfs 实际长度 ≤ `0xbc0000`（12,320,768 B），否则用 `mk_op_pack.py --rlen 0xc00000` | `make-release.sh` 第 3 步会硬报错 |
+
+> 槽位规则见 `docs/P3-PACK-CONTRACT.md` §10。P3 的 squashfs 是 8,244,224 B，
+> 余量 4.1 MB；LuCI 全家桶通常 +3～4 MB，**贴边风险**是 P5 唯一的技术风险点（R12 变体）。
+
+## 4. 重打包与复核
+
+```sh
+wsl -d Ubuntu2404 -u root bash /root/make-release.sh     # 自动：解包→mk_op_pack→UBI→flash_cmds→指纹
+```
+
+产出仍落在 `work/images/v25.12.6-P3/`（目录名沿用 P3；文件名里的长度会随 `--rlen` 变）。
+复核项与 P3 完全一致：
+
+- `+0x90` = md5(mtd4)，`+0xa0` = md5(kernel[0:0x480000] ‖ rootfs[0:RVERIFY])，
+- UBI 卷名必须是 `rootfs_data`、15 PEB、`reserved_pebs 13`、autoresize，
+- `ath11k/{IPQ5018,QCN6122}/hw1.0/board-2.bin` 的 md5 必须仍等于 S7 的 `78f5b21b…` / `e4904f13…`。
+
+## 5. 不做的事
+
+- 不加 `ipq-wifi-*`（会覆盖我们的 board-2.bin；本板 BDF 与 S7 逐字节一致，直接复用）。
+- 不加 `kmod-qca-nss-dp`（已决定纯 CPU 转发，见 R14）。
+- 不在 P5 顺手改 DTS/bootargs（单一变量：P4 首验通过之后再谈优化）。
