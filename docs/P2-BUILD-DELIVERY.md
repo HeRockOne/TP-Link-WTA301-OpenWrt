@@ -294,3 +294,17 @@ cpp OK → 1921 行；dtc OK → 25,918 B（S7 实跑 DTB 25,978 B）
 | 分区表 / bootargs / wifi / memory / nand-ecc | **零差异** |
 
 ⇒ 板级 DTB 已与 S7 运行态结构等价，剩余差异全部可解释。
+
+## 7. feeds 现状（决定第一版包集）
+
+`/root/ow2512/feeds/` 只有 **`base`** 一个 feed。`luci` / `packages` / `routing` / `telephony` 都没安装
+⇒ 本 build 出 149 包、**无 LuCI**，这是**第一版故意的**（P4 单一变量：只验启动/有线/Wi-Fi 射频，
+不把 Web UI 的 30+ 依赖混进首次真机验证）。
+
+P5 补包集的准确动作（未执行）：
+```bash
+cd /root/ow2512 && ./scripts/feeds update -a && ./scripts/feeds install -a
+# 然后 echo 目标包进 .config 再 make -j8（增量，只需编 luci 一族）
+```
+已确认 `package/system/zram-swap` 在 core 里（不需要 feeds）；`cgi-io`/`kmod-zram` 来自 `packages` feed，
+`luci*` 来自 `luci` feed，三者都要等 `feeds update` 之后才可见。

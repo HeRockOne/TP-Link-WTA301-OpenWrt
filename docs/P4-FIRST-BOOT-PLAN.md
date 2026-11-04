@@ -78,3 +78,25 @@ iw dev ; iw phy | head -60
 cat /proc/meminfo | head ; cat /proc/interrupts | grep -iE "gmac|mdio|wcss|q6"
 ls -l /lib/firmware/ath11k/*/hw1.0/ | head -30
 ```
+
+## 9. 待执行（P3 产物已就绪，等用户在场）
+
+产物：`work/images/v25.12.6-P3/`（四件套 + `flash_cmds.txt` + `FINGERPRINT.json` + `SHA256SUMS`）
+
+### 9.1 先演练回退（必做，P4-a）
+B 槽（`mtd10_kernel_bak`/`mtd11_rootfs_bak`）与一级 u-boot 全程不动 ⇒ 新 A 槽校验失败会自动落 B 槽。
+演练判据：串口确认 `boot_flag`/槽位选择逻辑可读，`rescue.py setflag --value 2` 可用，串口 7001 通道稳定。
+
+### 9.2 刷写（顺序不可变）
+`kernel 0x4880000/0x480000 → rootfs 0x4fc0000/0xbc0000 → ubi 0x1bc0000(擦 0x2440000) → tphdr 0x4800000/0x20000`，
+RAM 分别 `0x44000000 / 0x45000000 / 0x44000000 / 0x46000000`，校验址 `0x43000000`，每条命令前缀 `printenv ;`。
+刷完 `boot_flag=2`。
+
+### 9.3 首启必须观察的 5 个点
+1. 内核版本 `6.12.112`，`DISTRIB_REVISION` 为 25.12.6
+2. `ipq5018-gmac-dwmac 39d00000.ethernet` 起来 + `rtl8365mb-mdio 90000.mdio-1:1d: found an RTL8367S`
+3. `Link is Up - 1Gbps/Full` + lan1-5 全进 br-lan（`swconfig`/`bridge link`）
+4. 双射频 `phy0-ap0`(2.4G) / `phy1-ap0`(5G) 起、`ath11k` 无 cal/board 报错
+5. overlay `ubi0_0` 挂载、`/dev/ubi0_0` 可用空间 ≈26MB
+
+任一条不符：先留串口全文（乱码则该轮作废），再决定回退 S7 冻结四件套。

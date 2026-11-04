@@ -78,3 +78,22 @@
 | FIT/ITB kernel | `build_dir/target-aarch64_cortex-a53_musl/linux-qualcommax_ipq50xx/image-ipq5018-wta301/` 下的 itb（`FitImageLzma` 生成）；`DEVICE_DTS_CONFIG` 必须与 u-boot 期待的 config 名一致 |
 | rootfs squashfs | 同目录 `root.squashfs`（未 strip 版）；或 `bin/targets/.../*-squashfs-sysupgrade.bin` 拆包 |
 | tphdr | 用 `work/op-build/mk_op_pack.py` 现生成（它按 §1 的几何写死并算 `+0xa0`） |
+
+## 9. P3 实际产物（2026-11-05，`work/images/v25.12.6-P3/`）
+
+| 文件 | 大小 | crc32 | md5 / sha256 |
+|---|---|---|---|
+| `op_kernel_0x480000.bin` | 4,718,592 | 7678e6d7 | md5 `dd6c716107be490c3606e7ec28126da2` |
+| `op_rootfs_0xbc0000.bin` | 12,320,768 | 9dd9d9d3 | md5 `6bd248c27dfbae75dd57b50b985ed41d` |
+| `op_tphdr_0x20000.bin` | 131,072 | 5a8b3e89 | md5 `b9e0858537eb6338409ce7131929ec6c` |
+| `ubi_rootfs_data3_wta301data.img` | 1,966,080 | e850127a | 冻结复用（crc32 与 S7 完全一致） |
+
+来源 sysupgrade：`openwrt-qualcommax-ipq50xx-tplink_wta301-squashfs-sysupgrade.bin` 12,534,037 B
+（内 `kernel` ITB 4,276,536 B / `root` squashfs4 8,244,224 B）
+
+**独立复核（不只信打包器）全部 PASS**：tphdr 八字段 = S7 契约值；`+0x90` = md5(mtd4) = `94867ec5c85a92567405516651935691`；
+`+0xa0` = 本地重算 md5(kernel‖rootfs) = `8a45889a2355038fbec1f65f95a23602`；kernel 文件 = FIT(4,276,536) + 全 `0xFF` 补齐到 0x480000；
+rootfs `hsqs` v4.0；FIT 内含 `TP-Link-WTA301` 与 `config@mp02.1`。
+
+**`--kblk 0x480000` 是硬要求**：内核区必须按整区长度补齐（不是只对齐 0x20000 擦除块）。若只写 0x420000，
+NAND 尾部 0x60000 残留旧数据而 `+0x5c KERNEL_LEN` 仍为 0x480000 ⇒ u-boot 的 md5 校验必然失败 ⇒ 落 B 槽。

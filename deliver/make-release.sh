@@ -41,7 +41,11 @@ PY
 [ $? -eq 0 ] || die "形状校验不通过"
 
 echo "== 4. 打包（mk_op_pack.py，带 u-boot 槽让 +0x90 自洽）=="
+# --kblk 0x480000：内核区必须按 S7 的整区长度补齐，不能只对齐到 NAND 擦除块。
+# 依据：S7 tphdr +0x5c KERNEL_LEN=0x480000，且 +0xa0 = md5(kernel[0:0x480000] ‖ rootfs[0:0xbc0000])；
+# u-boot 按 KERNEL_LEN 从 NAND 读该长度算 md5，若只写 0x420000 则尾部残留旧数据 => 校验必失败。
 python3 $W/work/op-build/mk_op_pack.py --kernel "$K" --root "$R" --outdir $OUT/pack \
+        --kblk 0x480000 \
         --uboot $W/work/backup/mtd4_normal_boot.bin || die "mk_op_pack 失败"
 
 echo "== 5. UBI overlay：直接复用冻结的 S7 镜像 =="
