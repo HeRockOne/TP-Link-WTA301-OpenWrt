@@ -31,8 +31,8 @@
 | **M7** | 内存 / reserved-memory | ❌ 上游 tz 2 MiB 会踩踏 TZ；memory size=0 | ✅ 已核对 | `docs/M07-MEMORY.md` |
 | **M8** | 引导链 / chosen / bootargs | ⚠ vendor 有 `init=/init`，我们必须去掉 | ✅ 已核对 | `docs/M08-BOOT-CHAIN.md` |
 | **M9** | USB / PCIe / SDCC / 其它外设 | ⚪ 本板全关；★ QCN6122 不是 PCIe 设备 | ✅ 已核对 | `docs/M09-PERIPHERALS.md` |
-| **M10** | MAC 地址 / ART / caldata 来源 | ⚠ 原厂 ART 无 MAC；真 MAC 在 factory_info | ⚠ 基本已覆盖（详见 M12/M5） | — |
-| **M11** | 温度 / 电源 / 稳压器 | ⬜ 待做 | ⬜ | — |
+| **M10** | MAC 地址 / ART / caldata 来源 | ⚠ 原厂 ART 无 MAC；真 MAC 在 factory_info@0x1c；S7 实际没设 MAC | ✅ 已核对 | `docs/M10-MAC-ART.md` |
+| **M11** | 温度 / 电源 / 稳压器 | ⚪ 零动作：thermal 三源一致、无 PMIC | ✅ 已核对 | `docs/M11-THERMAL-POWER.md` |
 | **M12** | 无线固件 / BDF 加载路径 | ❌ bdwlan ≠ cal；包不含 board-2.bin | ✅ 已核对 | `docs/M12-FIRMWARE-BDF.md` |
 
 **优先级顺序**（按「会挡住启动」排序）：M1 → M2 → M3 → M8 → M7 → M4 → M12 → M5 → M6 → M10 → M9 → M11
