@@ -1,0 +1,93 @@
+# 原厂 DTB 提取过程
+# 日期：2026-11-05
+# 目的：为「逐模块比对 原厂 / S7 / 25.12.6」建立原厂侧数据源
+
+## 一、原厂 FIT 在哪
+
+扫描所有备份镜像的 FDT magic（0xd00dfeed）：
+
+  work/backup/mtd10_kernel_bak.bin   4194304 B  → 4 个 FDT 命中
+      @0x0        2,645,624 B  ← FIT 容器（原厂 B 槽）
+      @0x25afc4      59,125 B  ← DTB mp03.3
+      @0x2697c8      57,551 B  ← DTB mp03.1
+      @0x2779a4      57,673 B  ← DTB mp02.1
+  work/backup/mtd8_firmware.bin    39976960 B  → 同样的 3 个 DTB（+ 自己的 FIT 头）
+  work/backup/mtd13_firmware_bak.bin         → 同上
+  work/backup/mtd11_rootfs_bak.bin           → 无 FDT
+
+⇒ 原厂 NAND 里**没有 WTA301 专属 DTB**，只有高通参考板的 3 个。
+
+## 二、FIT 结构
+
+解析 mtd10 的 FIT（0x0，2,645,624 B）：
+
+  /images/kernel@1      type=kernel   comp=lzma  arch=arm   desc="ARM OpenWrt Linux-4.4.60"
+                        load=0x41208000  entry=0x41208000
+  /images/fdt@mp03.3    type=flat_dt  comp=none  arch=arm   desc="ARM OpenWrt qcom-ipq50xx-mpxx device tree blob"
+  /images/fdt@mp03.1    同上
+  /images/fdt@mp02.1    同上
+  /configurations/config@mp03.3   kernel=kernel@1  fdt=fdt@mp03.3
+  /configurations/config@mp03.1   kernel=kernel@1  fdt=fdt@mp03.1
+  /configurations/config@mp02.1   kernel=kernel@1  fdt=fdt@mp02.1
+
+关键点：**内核是 4.4.60，arch=arm（32 位）** —— 原厂是 QSDK 4.4 体系。
+
+## 三、提取出的 3 个 DTB
+
+  fdt@mp03.3   59,125 B   md5 2b963921f0630a2363a4b12d054e4a81
+  fdt@mp03.1   57,551 B   md5 7b5f60d9818c248995c55ac33bf44f85
+  fdt@mp02.1   57,673 B   md5 a82f281822e4ddd9f808e967e9bb0e04
+
+反编译（WSL /usr/bin/dtc）：
+  fdt_mp03.3.dts  2,525 行 / 71,726 B
+  fdt_mp03.1.dts    69560 B
+  fdt_mp02.1.dts  2,441 行 / 69,810 B
+
+## 四、它们是谁
+
+  fdt_mp02.1: model = "Qualcomm Technologies, Inc. IPQ5018/AP-MP02.1"
+              compatible = "qcom,ipq5018-mp02.1\0qcom,ipq5018"
+  fdt_mp03.1: model = "Qualcomm Technologies, Inc. IPQ5018/AP-MP03.1"
+              compatible = "qcom,ipq5018-mp03.1\0qcom,ipq5018"
+  fdt_mp03.3: model = "Qualcomm Technologies, Inc. IPQ5018/AP-MP03.3"
+              compatible = "qcom,ipq5018-mp03.3\0qcom,ipq5018"
+
+⇒ 全是**高通公版参考平台**，不是 TP-Link WTA301 的板级描述。
+  （对应上游 QSDK 的 AP-MP0x.x 参考设计）
+
+## 五、u-boot 里的 DTB
+
+  work/backup/mtd4_normal_boot.uboot.bin  372,268 B → 11 个 FDT
+
+  @0x2b938   20,707 B  ← 控制 DTB（无 model，u-boot 自身 fdt）
+  @0x48070    3,942 B  model = "QCA, IPQ5018-EMULATION"
+  @0x48fe0    3,586 B  model = "QCA, IPQ5018-MP02.1"
+  @0x49df0    4,403 B  model = "QCA, IPQ5018-MP03.1-C2"
+  @0x4af30    3,893 B  model = "QCA, IPQ5018-MP03.3"
+  @0x4be70    4,601 B  model = "QCA, IPQ5018-MP03.3-C2"
+  @0x4dbe0    3,819 B  model = "QCA, IPQ5018/DB-MP03.1"
+  @0x4ead0    4,523 B  model = "QCA, IPQ5018/DB-MP03.1-C2"
+  @0x4fc80    3,748 B  model = "QCA, IPQ5018/DB-MP03.3"
+  @0x50b30    4,452 B  model = "QCA, IPQ5018/DB-MP03.3-C2"
+  @0x51ca0    3,695 B  model = "QCA, IPQ5018-MP03.1"
+
+  mtd9（备份槽）里的 11 个，md5 与 mtd4 **完全相同**。
+
+⇒ u-boot 也是按 QCA 参考板写死的，没有 TP-Link 板级 DTS。
+
+## 六、结论（会改变迁移策略）
+
+1. 原厂 DTB **不是**「WTA301 的硬件描述」，而是「QCA 参考板的硬件描述」。
+2. TP-Link 的板级差异（RTL8367S、14 项分区、MAC/caldata）全部在
+   **u-boot 代码 + config 分区**里，不在 DTB 里。
+3. 原厂 DTB 里**没有任何分区节点** —— 分区由 u-boot 用 `cmdlinepart.mtdparts` 传入。
+
+⇒ **不能用「和原厂 DTB 对齐」作为正确性判据**。
+   判据必须是 **S7 实际运行的 DTB + 板级实测**。
+   原厂 DTB 的用途是：查 SoC 级参数（时钟/ECC/DMA/uniphy 等），不是查板级配置。
+
+## 七、可用工具
+
+  work/scratch/fdtdiff.py <A.dtb> <B.dtb> <A名> <B名>
+      结构化输出：节点集差异 + 共有节点的属性值差异
+      （S7=174 节点 vs 原厂=307 节点；命名风格不同，需按功能角色比对）
