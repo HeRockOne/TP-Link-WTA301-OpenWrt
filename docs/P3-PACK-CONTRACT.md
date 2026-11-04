@@ -147,3 +147,15 @@ ubinize -o ubi.img -m 2048 -p 131072 -s 2048 -O 2048 ubinize.cfg
 
 **bootargs 里的 `fstools_overlay_name=wta301data` 保留不动**：对 25.12.6 是惰性字符串（没人解析），
 保留可让板级 DTS 与 S7 实跑 DTB 保持逐字一致（R16 教训：不要为"好看"去动已对拍一致的 DTS）。
+
+## 10. rootfs 槽位余量与 `--rlen`（LuCI 包集变大时的出口）
+
+`+0x64` 里写的 rootfs 长度（= `ROOTFS_VERIFY`，u-boot 拿它去 `md5(rootfs[0:N])`）默认 **0xbc0000**，
+而 DTB 里 `rootfs` 分区是 **0xc00000**。两者差 0x40000 是 S7 的历史口径，别随便动：
+u-boot 里还有一个下界检查（`VERIFY_MIN 0xB00000`），只允许在 `[0xb00000, 0xc00000]` 之间取值。
+
+- 已实测：P3 的 squashfs 8,244,224 B（余量 4.1 MB）。
+- P5 加 LuCI 后若 `> 0xbc0000`，用 `mk_op_pack.py --rlen 0xc00000` 重打（必须是 0x20000 整数倍，
+  且不得超过分区上限），`flash_cmds.txt` / 文件名 / 指纹都会自动跟着变，**不要手改常量**。
+- 回归验证：不带 `--rlen` 时三个产物的 crc32 与归档 P3 逐字节一致
+  （kernel `7678e6d7` / rootfs `9dd9d9d3` / tphdr `5a8b3e89`）。
