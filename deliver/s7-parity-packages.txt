@@ -1,0 +1,14 @@
+# 第二次构建要补的包（S7 178 包 vs 25.12.6 默认集的真实差异）
+# 差异只集中在 Web UI 一族 + zram —— 其余 100+ 条只是库的 ABI 版本改名
+# (libubox → libubox20260721 之类)，不是功能缺失。
+#
+# 用法：追加到 image/ipq50xx.mk 的 Device/tplink_wta301 的 DEVICE_PACKAGES 里。
+luci luci-ssl luci-theme-bootstrap
+cgi-io
+zram-swap kmod-zram
+# 说明：
+#  - luci 会按依赖拉齐 luci-base/light/mod-{network,status,system,admin-full}/proto-{ipv6,ppp}
+#    + uhttpd + rpcd(+mod-file/iwinfo/luci/rrdns/ucode) + ucode-mod-html/log + px5g-mbedtls
+#  - zram：S7 的 49 MB swap 就是它（178 MB RAM 的板子需要）
+#  - 第一次构建故意不带这些：首验只管 启动/有线/Wi-Fi，"能不能上网" 与 Web UI 无关，
+#    少一个变量。P5 再上。
