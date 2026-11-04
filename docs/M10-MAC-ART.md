@@ -106,7 +106,18 @@ caldata 里出厂 MAC 是 `00:03:7f:12:34:56`（Qualcomm 保留 OUI），且
 | `etc/board.d/90_wta301` | 5 口全进 br-lan；br-lan/eth0/label 设 MAC；3 个 LED 绑 netdev | 无（逻辑与内核版本无关） |
 | `etc/hotplug.d/firmware/12-wta301-caldata` | 从 ART 解 `gzip(tar(virtual_art.bin))` 抽两段 caldata；写 MAC 和 macflag | 无（只依赖 `caldata.sh` 的 `caldata_from_file`/`ath11k_patch_mac`/`ath11k_set_macflag`，25.12.6 全有） |
 
-两个脚本都自带 `[ "$(board_name)" = "tplink,wta301" ] || exit 0` 护卫，对其它 5 个 profile 零影响（但脚本文件仍会进它们的 rootfs，是已知无宓）。
+两个脚本都自带 `[ "$(board_name)" = "tplink,wta301" ] || exit 0` 护卫，对其它 5 个 profile 零影响（脚本文件仍会进它们的 rootfs，已知无害）。
+
+**依赖已在 25.12.6 树里逐个核实存在**（不是假设）：
+
+| 来源 | 函数 | 命中 |
+|---|---|---|
+| `package/base-files/…/lib/functions/caldata.sh` | `caldata_from_file` `caldata_extract` `ath11k_patch_mac` `ath11k_set_macflag` `caldata_die` | 5/5 |
+| `…/lib/functions/system.sh` | `mtd_get_mac_binary` `macaddr_add` `macaddr_setbit_la` `find_mtd_chardev` | 4/4 |
+| `…/lib/functions/uci-defaults.sh` | `ucidef_set_interface_macaddr` `ucidef_set_label_macaddr` `ucidef_set_network_device_mac` `ucidef_set_led_netdev` `ucidef_set_interface_lan` | 5/5 |
+
+且 `ath11k_patch_mac` / `ath11k_set_macflag` 的函数体在 25.12.6 与 S7 树里**逐字相同**
+（`mac_id*0x6+0xe` 写 6 字节；`0x3e` 写 `0100`）⇒ caldata 补丁落点不会因版本变化而错位。
 
 ### 4.1 为什么不写成 `02_network` / `11-ath11k-caldata` 分支
 - 那两个是 subtarget 共享文件（38 个 device），改一次就背上一个补丁，每次 rebase 都可能静默丢掉（就是当年 dts 跑偏的成因）。
