@@ -186,6 +186,36 @@ define Device/Default
 
 ⇒ 唯一有理论风险的只有 0922（竞品是 backport 里的机械改动），其余 6 个都是干净应用面。
 
+## 2.99 第一次构建的实际结果（2026-11-05）
+
+| 阶段 | 结果 |
+|---|---|
+| tools/* | ✅ 全部过（`FORCE_UNSAFE_CONFIGURE=1` 之后） |
+| toolchain: gcc initial / kernel-headers / musl / gcc final / gdb / fortify-headers | ✅ 全部过（`toolchain-aarch64_cortex-a53_gcc-14.3.0_musl` 就绪） |
+| target/linux | ❌ → 已修，见下 |
+
+**失败原因不是补丁，是 Kconfig 少一个 NEW 符号**：
+
+```
+Qualcomm ETHQOS support (DWMAC_QCOM_ETHQOS) [Y/n/m/?] (NEW) make[7]: *** scripts/kconfig/Makefile:85: syncconfig Error 1
+```
+
+`CONFIG_STMMAC_ETH=y` 一开，`DWMAC_QCOM_ETHQOS` 就变成新符号（ipq806x/ETHQOS 用的，不是我们）。
+非交互构建里没有答案 ⇒ `syncconfig` 直接失败。**已在 `ipq50xx/config-default` 补一行**
+`# CONFIG_DWMAC_QCOM_ETHQOS is not set`（`apply-to-2512.sh` 同步更新），重跑后 `SYNC include/config/auto.conf.cmd` 正常。
+
+**补丁应用（R15 的第一关）已实证通过**——在 `linux-6.12.112` 树里逐个查到：
+
+| 检查项 | 结果 |
+|---|---|
+| `drivers/net/ethernet/stmicro/stmmac/dwmac-ipq5018.c` | 存在，4,964 B |
+| `drivers/net/pcs/pcs-qca-uniphy.c` | 存在，26,045 B |
+| `arch/arm64/boot/dts/qcom/ipq5018-gmac.dtsi` | 存在，2,039 B |
+| `ipq5018.dtsi` 里的 `uniphy0` | 6 处（0923 生效） |
+| `include/linux/stmmac.h` 里的 `get_interfaces` | 1 处（0924 生效） |
+
+⇒ 7 个补丁 + 5 个 files 在其应在的位置，无一被拒。剩下要看的只是**编译**结果。
+
 ## 3. 构建阶段要盯的量（P2.4–P2.6）
 
 | 项 | 判据 | 怎么查 |

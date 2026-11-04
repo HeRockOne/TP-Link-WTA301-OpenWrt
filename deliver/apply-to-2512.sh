@@ -32,6 +32,9 @@ cat >> $T/ipq50xx/config-default <<'EOF'
 # all; this board drives an RTL8367S over SGMII from gmac1 instead.
 # DWMAC_GENERIC must stay off or it grabs the "snps,dwmac" compatible first.
 # CONFIG_DWMAC_GENERIC is not set
+# DWMAC_QCOM_ETHQOS is a NEW symbol once STMMAC_ETH is on (ipq806x/ETHQOS, not us);
+# leaving it unset in a non-interactive build makes syncconfig prompt and abort.
+# CONFIG_DWMAC_QCOM_ETHQOS is not set
 CONFIG_DWMAC_IPQ5018=y
 CONFIG_PCS_QCA_UNIPHY=y
 CONFIG_STMMAC_ETH=y
