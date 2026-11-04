@@ -133,6 +133,18 @@ images: kernel-1 (type=kernel) / fdt-1 (type=flat_dt, arch=arm64, compression=no
 `ethernet@39c00000` disabled / `ethernet@39d00000` okay+sgmii+fixed-link、`wifi@b00a040` okay / `wifi@b00b040` disabled、
 5 个 LED（19/10/11/13/38）、`mdio-ahb-clk` —— 与本次 A1–A6 完全吻合。
 
+## 2.9 对上游树的四类偏离（记录在案，便于日后回退/上游化）
+
+| # | 偏离 | 影响面 | 回退方式 |
+|---|---|---|---|
+| D1 | `target/linux/qualcommax/Makefile` 的 `DEFAULT_PACKAGES` 去掉 `kmod-qca-nss-dp` | **会影响同 subtarget 的其它 5 个 profile**（它们的 ESS+NSS-DP 有线要靠这个 kmod） | 加回该包即可；我们不需要它（`ipq5018-gmac.dtsi` 走主线 stmmac） |
+| D2 | 新增 `files/…/ipq5018-gmac.dtsi`（不改名覆盖 `ipq5018-ess.dtsi`） | 无（新增文件） | 删文件 |
+| D3 | `ipq50xx/config-default` 追加 5 行 STMMAC/PCS config | 无（只是多编进主线以太网驱动） | 删 5 行 |
+| D4 | 新增 `Device/tplink_wta301` + 板级 dts + base-files | 无（纯新增） | 删块 |
+
+D1 是唯一会波及别人的偏离。我们不做上游提交，但**将来若要上游化**，正确做法是保留 `kmod-qca-nss-dp`
+并用 `DEVICE_PACKAGES` 的负号语法（`-kmod-qca-nss-dp`）在我们的 Device 块里摘掉，而不是从 DEFAULT_PACKAGES 全局删。
+
 ## 3. 构建阶段要盯的量（P2.4–P2.6）
 
 | 项 | 判据 | 怎么查 |
