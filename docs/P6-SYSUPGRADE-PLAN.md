@@ -94,8 +94,9 @@ tplink_wta301_do_upgrade() {
 ```
 
 要点：
-- **`+0xa0` 是 16 字节 ASCII**（md5 的 hex 文本），不是二进制 —— 与 S7 冻结产物一致
-  （`+0xa0` 实测值 `8a45889a…`，我们已在 P3 复核脚本里用同样写法复现）。
+- **`+0xa0`/`+0x90` 存的是 16 字节原始 md5**（不是 32 字符 ASCII）。
+  实测 S7/P3 两版都是原始字节，十六进制显示为 `8a45889a2355038fbec1f65f95a23602` /
+  `94867ec5c85a92567405516651935691`。离线判据固化在 `tools/verify_pack.py`（`--uboot` 可比对 +0x90）。
 - **不得改 `+0x90`**（那是 secondary u-boot 自己的 md5，对应 mtd4，不随系统升级变）。
 - **不得写 mtd0/mtd4/mtd12**（红线）。
 - overlay（mtd11 `rootfs_data3`）默认保留；`sysupgrade -n` 时是否清理由 `-n` 语义决定，
