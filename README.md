@@ -4,7 +4,19 @@
 **snapshot `r37669-6c9452a35b`** 迁到 **正式版 `v25.12.6`**，从而获得永久冻结的软件源、上游维护的
 无线驱动，以及正常的 `sysupgrade` 能力。
 
-**当前状态**：规划阶段。未产出任何固件，未向板子写入任何内容。
+**当前状态（2026-11-05 05:2x）**：**P1–P3 完成，P4 待真机**。离线产物已造好并逐项复核，
+**尚未向板子写入任何内容**（S7 原样运行中）。
+
+| 阶段 | 状态 | 落点 |
+|---|---|---|
+| P1 逐模块核对（12 个） | ✅ | `docs/M01..M12` |
+| P2 造 DTS + 编内核（6.12.112） | ✅ `target/linux` EXIT=0，`make -j8` EXIT=0 | `docs/P2-BUILD-DELIVERY.md` |
+| P3 四件套打包 + 独立复核 | ✅ kernel/rootfs/tphdr/ubi 全绿 | `docs/P3-PACK-CONTRACT.md` · `../work/images/v25.12.6-P3/` |
+| P4 真机首验 | ⏸ **等板子上电 + 串口**（机箱网卡无 192.168.1.x、串口通道未起） | `docs/P4-FIRST-BOOT-PLAN.md` |
+| P5 LuCI/包集对齐 | 🔄 构建中 | `deliver/s7-parity-packages.txt` |
+
+**一句话下一步**：插上串口 + 网线、给板子上电，然后按 `docs/P4-FIRST-BOOT-PLAN.md` §9.1 先做回退演练，
+再照着 `../work/images/v25.12.6-P3/flash_cmds.txt` 四区顺序刷写（每区都有 `crc32` 期望值）。
 
 ---
 
