@@ -57,3 +57,24 @@
 1. `python work/out-final/verify_release.py --dir <outdir>` —— 四区 crc32 / md5 / 几何全查
 2. 手工再算一次 `md5(kernel‖rootfs) == tphdr[0xa0:0xb0]`
 3. `s3_check.py` 的 `check_ubifs()`（收 bytes）验 UBIFS superblock：必须带 `SPACE_FIXUP(0x04)`，不得有 `BIGLPT(0x02)`
+
+## 2.5 UBI（overlay）区：**直接复用冻结的 S7 镜像，不重建**
+
+`work/backup/FROZEN-S7-20261105/ubi_rootfs_data3_wta301data.img` = **1,966,080 B = 15 个 PEB**
+（PEB 128 KiB，LEB 126,976）。逐 PEB 看过：15 个块 EC 头全 `UBI#`，载荷只有 128–22,142 字节 ⇒
+就是「刚 `mkfs.ubifs -F` + `ubinize` 出来、还没写多少东西」的空 overlay（卷名 `wta301data`）。
+
+这个镜像的内容**与新内核/新 rootfs 无关**（overlay 里只有空 ubifs 的骨架 + volume table），
+所以 P3 **不重新生成**：
+
+- 单一变量原则：S7 上这份镜像已实证能被 `ubiattach` + `fstools_overlay_name=wta301data` 正常挂载
+- 自己重跑 `mkfs.ubifs -F` + `ubinize` 只会引入「BIGLPT / vid 偏移 / 时间戳」这三个已知雷点
+- 刷写仍按红线擦 `0x2440000`（8 个 PEB 余量留给坏块与增长），只写前 0x1e0000
+
+## 3. 从源码构建产出取哪两个文件
+
+| 目标 | 源码构建里的来源 |
+|---|---|
+| FIT/ITB kernel | `build_dir/target-aarch64_cortex-a53_musl/linux-qualcommax_ipq50xx/image-ipq5018-wta301/` 下的 itb（`FitImageLzma` 生成）；`DEVICE_DTS_CONFIG` 必须与 u-boot 期待的 config 名一致 |
+| rootfs squashfs | 同目录 `root.squashfs`（未 strip 版）；或 `bin/targets/.../*-squashfs-sysupgrade.bin` 拆包 |
+| tphdr | 用 `work/op-build/mk_op_pack.py` 现生成（它按 §1 的几何写死并算 `+0xa0`） |
