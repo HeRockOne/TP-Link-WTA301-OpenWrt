@@ -102,6 +102,21 @@ keys(gpio17/20) + 5×LED(gpio19/10/11/13/**38**) + LED 别名 `led-19`、
 
 ---
 
+## 2.5 构建环境（踩过的坑）
+
+WSL 里以 **root** 身份构建时，`tools/tar` 的 configure 会直接拒绝：
+
+```
+configure: error: you should not run configure as root
+           (set FORCE_UNSAFE_CONFIGURE=1 in environment to bypass this check)
+```
+
+⇒ 必须 `FORCE_UNSAFE_CONFIGURE=1 make -j8`。
+另一个坑：`make -j8 2>&1 | tail -400` 会让日志**攒到结束才出现**，构建期间看不到进度，
+所以改成 `make -j8 > /root/build.log 2>&1` 再另开一个窗口 `tail -f`。
+
+---
+
 ## 3. 构建阶段要盯的量（P2.4–P2.6）
 
 | 项 | 判据 | 怎么查 |
