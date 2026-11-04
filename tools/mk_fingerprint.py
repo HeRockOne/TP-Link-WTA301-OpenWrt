@@ -20,7 +20,7 @@ import sys
 import zlib
 
 FILES = ['op_kernel_0x480000.bin', 'op_rootfs_0xbc0000.bin',
-         'op_tphdr_0x20000.bin', 'ubi_rootfs_data3_wta301data.img']
+         'op_tphdr_0x20000.bin', 'ubi_rootfs_data3_rootfs_data.img']
 
 
 def f(path):

@@ -118,11 +118,11 @@ printenv ;nand write 0x45000000 0x4fc0000 0xbc0000
 printenv ;nand read  0x43000000 0x4fc0000 0xbc0000
 printenv ;crc32 0x43000000 0xbc0000          # 期望 9dd9d9d3
 
-printenv ;tftpboot 0x44000000 ubi_rootfs_data3_wta301data.img
+printenv ;tftpboot 0x44000000 ubi_rootfs_data3_rootfs_data.img
 printenv ;nand erase 0x1bc0000 0x2440000
 printenv ;nand write 0x44000000 0x1bc0000 0x1e0000
 printenv ;nand read  0x43000000 0x1bc0000 0x1e0000
-printenv ;crc32 0x43000000 0x1e0000          # 期望 e850127a
+printenv ;crc32 0x43000000 0x1e0000          # 期望 c0f276a6
 
 printenv ;tftpboot 0x46000000 op_tphdr_0x20000.bin
 printenv ;nand erase 0x4800000 0x20000
@@ -135,6 +135,7 @@ printenv ;crc32 0x43000000 0x20000           # 期望 5a8b3e89
 因为必须把 S7 残留的 PEB 全部擦掉，否则 overlay 会残留旧 master node / 旧 LEB。
 
 **UBI 区为什么必须刷**：S7 的 overlay 里有 `/etc/config/*`（network/wireless/fstab），
-留着会让 25.12.6 首启读进 S7 的网络配置 ⇒ 有线可能起不来。冻结镜像 `e850127a` 是空 overlay。
+留着会让 25.12.6 首启读进 S7 的网络配置 ⇒ 有线可能起不来。新造的空卷（卷名 `rootfs_data`，crc32 `c0f276a6`）—— **不能**沿用 S7 冻结镜像的 `wta301data` 卷名，
+25.12.6 的 fstools 写死只认 `rootfs_data`（见 `P3-PACK-CONTRACT.md` §10）。
 
 **刷完**：`rescue.py setflag --value 2` 设 boot_flag，再断电重启。

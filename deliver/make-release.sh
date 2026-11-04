@@ -48,19 +48,38 @@ python3 $W/work/op-build/mk_op_pack.py --kernel "$K" --root "$R" --outdir $OUT/p
         --kblk 0x480000 \
         --uboot $W/work/backup/mtd4_normal_boot.bin || die "mk_op_pack 失败"
 
-echo "== 5. UBI overlay：直接复用冻结的 S7 镜像 =="
-cp $W/work/backup/FROZEN-S7-20261105/ubi_rootfs_data3_wta301data.img $OUT/pack/ || die "复制 UBI 失败"
+echo "== 5. UBI overlay：现造空卷，卷名必须是 rootfs_data =="
+# 为什么不能用冻结的 S7 镜像：它的卷名是 `wta301data`（S7 的 fstools 打过 fstools_overlay_name 补丁）。
+# 25.12.6 的 fstools 写死只认 `rootfs_data`（libfstools/rootdisk.c:166 strcmp(name,"rootfs_data")），
+# 且 ubi.c 里没有 volume_create ⇒ 卷名不对 = 首启无 overlay（只读系统）。
+# 几何必须与冻结镜像一致：2048/LEB 126976(0x1f000)/PEB 131072/subpage 2048，autoresize。
+HOSTBIN=/root/nss-edma/staging_dir/host/bin
+if [ -x "$HOSTBIN/mkfs.ubifs" ] && [ -x "$HOSTBIN/ubinize" ]; then
+    rm -rf $OUT/ubitmp && mkdir -p $OUT/ubitmp/empty
+    $HOSTBIN/mkfs.ubifs -m 2048 -e 126976 -c 289 -F -x zlib -r $OUT/ubitmp/empty \
+        -o $OUT/ubitmp/ubifs.img > /dev/null 2>&1 || die "mkfs.ubifs 失败"
+    printf '[rootfs_data]\nmode=ubi\nimage=%s\nvol_id=0\nvol_type=dynamic\nvol_name=rootfs_data\nvol_flags=autoresize\n' \
+        $OUT/ubitmp/ubifs.img > $OUT/ubitmp/ubinize.cfg
+    $HOSTBIN/ubinize -o $OUT/pack/ubi_rootfs_data3_rootfs_data.img \
+        -m 2048 -p 131072 -s 2048 -O 2048 $OUT/ubitmp/ubinize.cfg > /dev/null 2>&1 \
+        || die "ubinize 失败"
+    rm -rf $OUT/ubitmp
+    echo "  已生成 ubi_rootfs_data3_rootfs_data.img  $(stat -c%s $OUT/pack/ubi_rootfs_data3_rootfs_data.img) B"
+else
+    die "找不到 mkfs.ubifs/ubinize（$HOSTBIN）"
+fi
 
 # 把 UBI 区补进刷写序列：mk_op_pack 只产 kernel/rootfs/tphdr 三区，
 # 但 overlay 区必须一起刷（否则仍是 S7 的 /etc/config，会污染首启网络与无线配置）。
 # 顺序：kernel -> rootfs -> ubi -> tphdr（tphdr 最后，头一改校验就变）。
-UBILEN=$(stat -c%s $OUT/pack/ubi_rootfs_data3_wta301data.img)
+UBIIMG=ubi_rootfs_data3_rootfs_data.img
+UBILEN=$(stat -c%s $OUT/pack/$UBIIMG)
 UBILENHEX=$(printf '0x%x' $UBILEN)
-python3 - "$OUT/pack/flash_cmds.txt" "$UBILENHEX" <<'PYEOF'
+python3 - "$OUT/pack/flash_cmds.txt" "$UBILENHEX" "$UBIIMG" <<'PYEOF'
 import sys
-path, ublen = sys.argv[1], sys.argv[2]
+path, ublen, ubimg = sys.argv[1], sys.argv[2], sys.argv[3]
 lines = open(path, encoding='utf-8').read().splitlines()
-ubi = ['printenv ;tftpboot 0x44000000 ubi_rootfs_data3_wta301data.img',
+ubi = ['printenv ;tftpboot 0x44000000 ' + ubimg,
        'printenv ;nand erase 0x1bc0000 0x2440000',
        'printenv ;nand write 0x44000000 0x1bc0000 ' + ublen]
 # 插在 tphdr 三条之前

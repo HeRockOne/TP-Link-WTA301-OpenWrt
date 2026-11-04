@@ -97,3 +97,53 @@ rootfs `hsqs` v4.0；FIT 内含 `TP-Link-WTA301` 与 `config@mp02.1`。
 
 **`--kblk 0x480000` 是硬要求**：内核区必须按整区长度补齐（不是只对齐 0x20000 擦除块）。若只写 0x420000，
 NAND 尾部 0x60000 残留旧数据而 `+0x5c KERNEL_LEN` 仍为 0x480000 ⇒ u-boot 的 md5 校验必然失败 ⇒ 落 B 槽。
+
+## 10. ★ UBI 卷名必须是 `rootfs_data`（不能用 S7 的冻结镜像）
+
+**发现（读 25.12.6 源码，非猜测）**：`fstools-2026.05.23~16718b6e/libfstools/rootdisk.c:166`
+
+```c
+static struct volume *rootdisk_volume_find(char *name)
+{
+	if (strcmp(name, "rootfs_data") != 0)
+		return NULL;
+```
+
+且全树 `grep -rn 'fstools_overlay_name\|overlay_name'` **零命中**，`libfstools/ubi.c` 里**没有** `volume_create`。
+
+⇒ 后果链：
+1. S7 的冻结镜像卷名是 `wta301data`（S7 的 fstools 打了 `fstools_overlay_name` 补丁，与 bootargs 里那行配套）；
+2. 25.12.6 **不认**这个补丁，也不会自己造卷；
+3. 卷名不对 ⇒ `volume_find("rootfs_data")` 返回 NULL ⇒ **首启没有 overlay**（只读系统、配置写不进、`sysupgrade` 保留配置失效）。
+
+**解决**：现造空卷，卷名 `rootfs_data`，几何与冻结镜像**逐字段一致**（只差名字）：
+
+| 字段 | 冻结镜像 | 新镜像 |
+|---|---|---|
+| 大小 / PEB 数 | 1,966,080 / 15 | 同 |
+| `reserved_pebs` | 13 | 13 |
+| `alignment` / `data_pad` | 1 / 0 | 同 |
+| `vol_type` / `flags` | 1(dynamic) / 1(autoresize) | 同 |
+| `name_len` / `name` | 10 / `wta301data` | **11 / `rootfs_data`** |
+
+生成命令（在 `deliver/make-release.sh` §5 里，可复现）：
+
+```bash
+mkfs.ubifs -m 2048 -e 126976 -c 289 -F -x zlib -r <空目录> -o ubifs.img
+printf '[rootfs_data]
+mode=ubi
+image=%s
+vol_id=0
+vol_type=dynamic
+vol_name=rootfs_data
+vol_flags=autoresize
+'     ubifs.img > ubinize.cfg
+ubinize -o ubi.img -m 2048 -p 131072 -s 2048 -O 2048 ubinize.cfg
+```
+
+**vtbl CRC 校验公式**（离线可验，两镜像都通过）：
+`crc = zlib.crc32(vtbl_rec[0:168], 0) ^ 0xFFFFFFFF`，记录在 PEB0 + `0x1000`，长 172 B，`crc` 为末尾 BE32。
+（注意：**不是** zlib 默认那套 init=0/xor=0，也不是 `crc32(data, ~0)`。）
+
+**bootargs 里的 `fstools_overlay_name=wta301data` 保留不动**：对 25.12.6 是惰性字符串（没人解析），
+保留可让板级 DTS 与 S7 实跑 DTB 保持逐字一致（R16 教训：不要为"好看"去动已对拍一致的 DTS）。
