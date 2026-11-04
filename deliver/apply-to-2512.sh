@@ -36,7 +36,16 @@ cat >> $T/ipq50xx/config-default <<'EOF'
 # leaving it unset in a non-interactive build makes syncconfig prompt and abort.
 # CONFIG_DWMAC_QCOM_ETHQOS is not set
 CONFIG_DWMAC_IPQ5018=y
-CONFIG_PCS_QCA_UNIPHY=y
+# PCS_QCA_UNIPHY must stay OFF: the upstream pcs-qca-uniphy.c calls
+# clk_hw_recalc_rate(), which does not exist in 6.12 (nor in 6.18) - the file is
+# latent-broken upstream because the 5 shipped ipq50xx profiles never build it.
+# S7's own boot log proves the board runs without it:
+#   ipq5018-gmac-dwmac 39d00000.ethernet: ... Ring mode enabled
+#   rtl8365mb-mdio 90000.mdio-1:1d: configuring for fixed/sgmii link mode
+#   rtl8365mb-mdio 90000.mdio-1:1d: Link is Up - 1Gbps/Full
+# and dwmac-ipq5018.c returns 0 when the PCS is absent (fixed-link path).
+# CONFIG_PCS_QCA_UNIPHY is not set
+
 CONFIG_STMMAC_ETH=y
 CONFIG_STMMAC_PLATFORM=y
 EOF

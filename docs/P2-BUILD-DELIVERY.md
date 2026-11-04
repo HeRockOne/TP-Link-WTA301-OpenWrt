@@ -216,6 +216,41 @@ Qualcomm ETHQOS support (DWMAC_QCOM_ETHQOS) [Y/n/m/?] (NEW) make[7]: *** scripts
 
 ⇒ 7 个补丁 + 5 个 files 在其应在的位置，无一被拒。剩下要看的只是**编译**结果。
 
+## 2.999 R15 落地：pcs-qca-uniphy.c 在 6.12 编不过 ⇒ 按 S7 实证关掉它
+
+**错误原文**（`/root/tl3.log`，`target/linux/compile`）：
+
+```
+drivers/net/pcs/pcs-qca-uniphy.c:567:9: error: implicit declaration of function 'clk_hw_recalc_rate';
+                                          did you mean 'clk_hw_round_rate'?
+drivers/net/pcs/pcs-qca-uniphy.c:985:16: error: returning 'struct fwnode_pcs_provider *'
+                                          from a function with return type 'int'
+```
+
+**查证链**（每条都可复现）：
+
+1. `clk_hw_recalc_rate` 在 **6.12.112 没有**，在 **6.18.55 也没有**（`grep -rln` 全树：只有 pcs-qca-uniphy.c 自己引用）。
+2. 我们的 `pcs-qca-uniphy.c` = 上游 `16ac5736c178…` 原版（26,045 B，md5 `d4918287…`，与 GitHub raw 下载逐字节一致）。
+3. 25.12.6 的 5 个 ipq50xx profile 走 ESS+NSS-DP，**从不打开 `CONFIG_PCS_QCA_UNIPHY`，这个文件在上游是死代码**——所以没人发现它编不过。
+4. **S7 实跑日志（`work/evidence/V3-boot.log`）证明本板不需要它**：
+   ```
+   ipq5018-gmac-dwmac 39d00000.ethernet: Ring mode enabled
+   rtl8365mb-mdio 90000.mdio-1:1d: configuring for fixed/sgmii link mode
+   rtl8365mb-mdio 90000.mdio-1:1d: Link is Up - 1Gbps/Full - flow control off
+   ```
+   全文无 uniphy/PCS 字样；S7 的 `.config` 里 `CONFIG_FWNODE_PCS=y` / `CONFIG_PCS_XPCS=y`，
+   但 `drivers/net/pcs/*.o` 里**没有** `pcs-qca-uniphy.o`，`System.map` 里**没有** `qca_uniphy` 符号。
+5. `dwmac-ipq5018.c` 对缺失 PCS 是**优雅降级**：`pcs = fwnode_pcs_get(...); if (!pcs) return 0; ... -ENOENT → return 0;`
+   ⇒ 没有 PCS 就走 `fixed-link`，与 S7 的行为逐条一致。
+
+**动作**：`ipq50xx/config-default` 改成 `# CONFIG_PCS_QCA_UNIPHY is not set`（原来误设为 =y）。
+DTS 里的 `pcs-handle = <&uniphy0>` 与 `uniphy0` 节点**保持**（与 S7 的 DTB 逐字一致，只是 provider 不注册）。
+
+**为什么不是「把驱动移植到 6.12」**：
+- 单变量原则——S7 在这块板子上验证过的就是「无 PCS + fixed-link」，移植版是**未验证组件**（AGENTS §2.2 明令禁止叠加）
+- 上游这份文件本身是坏的，移植等于替上游修 bug，风险与收益不成比例
+- 若将来真要走 SGMII 自协商（而非 fixed-link），再单独做 PCS 移植，并单独验证
+
 ## 3. 构建阶段要盯的量（P2.4–P2.6）
 
 | 项 | 判据 | 怎么查 |
