@@ -1,0 +1,56 @@
+# S7 板上实测：内存与 ath11k 状态
+# 采集时间：2026-11-05
+# 方法：串口 socket://127.0.0.1:7001（经三星机 COM5 桥），板在 Linux 下
+# 板：WTA301，S7 (v19-fix10.1-S7)，uptime 3:50
+
+=== free -m ===
+              total        used        free      shared  buff/cache   available
+Mem:         177652       98212       37832         280       41608       63940
+Swap:         49148           0       49148
+
+=== lsmod | grep -E 'ath11k|qmi|mac80211|cfg80211' ===
+ath11k                483328  1 ath11k_ahb
+ath11k_ahb             24576  0
+cfg80211              401408  2 ath11k,mac80211
+compat                 16384  3 ath11k_ahb,mac80211,cfg80211
+mac80211              749568  1 ath11k
+qmi_helpers            20480  1 ath11k
+
+=== ls /sys/class/ieee80211/ ===
+phy0  phy1
+
+=== dmesg | grep -i ath11k ===
+[   16.180340] ath11k c000000.wifi: ipq5018 hw1.0
+[   16.180392] ath11k c000000.wifi: FW memory mode: 2
+[   16.339558] remoteproc remoteproc1: Booting fw image ath11k/IPQ5018/hw1.0/q6_fw.mdt, size 1820
+[   16.347187] remoteproc remoteproc0: Booting fw image ath11k/IPQ5018/hw1.0/q6_fw.mdt, size 1820
+[   21.091007] ath11k b00a040.wifi: Multipd architecture - userpd: 2
+[   21.100035] ath11k b00a040.wifi: qcn6122 hw1.0
+[   21.105477] ath11k b00a040.wifi: FW memory mode: 2
+[   21.123207] ath11k c000000.wifi: chip_id 0x0 chip_family 0x4 board_id 0xff soc_id 0xffffffff
+
+=== dmesg | grep fw_version ===
+[   21.123273] ath11k c000000.wifi: fw_version 0x270206d0 fw_build_timestamp 2022-08-04 13:28 fw_build_id WLAN.HK.2.7.0.1-01744-QCAHKSWPL_SILICONZ-1
+[   21.292325] ath11k b00a040.wifi: fw_version 0x270206d0 fw_build_timestamp 2022-08-04 13:28 fw_build_id WLAN.HK.2.7.0.1-01744-QCAHKSWPL_SILICONZ-1
+
+=== iwinfo ===
+phy0-ap0 ESSID: "OpenWrt-WTA301"
+         Access Point: 00:03:7f:12:df:df
+         Mode: Master  Channel: 6 (2.437 GHz)  HT Mode: HT40
+         Tx-Power: 24 dBm  Link Quality: 70/70
+         Encryption: WPA-PSK (CCMP)
+         HW Mode(s): 802.11ax/n/g/b
+
+=== 结论 ===
+两个射频都在跑（phy0 + phy1），FW memory mode = 2（最省内存档），
+DP ring 用的是上游默认尺寸（32768/4096/1024/4096/2048，见 dp.h 实测），
+可用内存 63 MB，无 OOM。
+
+注意：这是 6.18.55 的观测。25.12.6 是 6.12.112，需重验。
+
+=== 附：dp.h 默认 ring 尺寸（nss-edma 树下 6.18.55 实测）===
+209:#define DP_TX_COMP_RING_SIZE		32768
+220:#define DP_RXDMA_BUF_RING_SIZE		4096
+223:#define DP_RXDMA_MON_STATUS_RING_SIZE	1024
+224:#define DP_RXDMA_MONITOR_BUF_RING_SIZE	4096
+225:#define DP_RXDMA_MONITOR_DST_RING_SIZE	2048

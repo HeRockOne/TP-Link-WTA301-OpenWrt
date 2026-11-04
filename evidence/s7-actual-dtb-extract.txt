@@ -1,0 +1,51 @@
+# 从 S7 的 op_kernel_0x480000.bin 中提取实际 DTB
+# 采集时间：2026-11-05
+
+源文件：work/images/out-op-v19-fix10.1-S7/op_kernel_0x480000.bin（4,718,592 B）
+提取工具：Python 扫描 FDT magic 0xd00dfeed，宿主机执行（避免 /mnt/c 逐字节读）
+
+=== 找到 2 个 FDT ===
+[0] off=0x00000000 size=4,674,316 md5 fca657cc05e7f616a36771ed0a068a4b   ← FIT (ITB) 容器本身
+[1] off=0x0046eb48 size=25,978    md5 dff6e3c9168e168a0b12c1c2c685cbfc   ← 真正的 DTB
+
+=== 反编译 [1] ===
+命令：dtc -I dtb -O dts s7-actual-dtb.dtb -o s7-actual-dtb.dts
+结果：1,289 行，2 条 warning（avoid_unnecessary_addr_size / unique_unit_address，无害）
+
+=== 关键节点 ===
+model = "TP-Link WTA301";
+
+wifi@c000000 {                                  ← IPQ5018 内置 2.4G
+    compatible = "qcom,ipq5018-wifi";
+    status = "okay";
+    qcom,rproc = <0x2e>;
+    qcom,ath11k-fw-memory-mode = <0x02>;
+    qcom,ath11k-calibration-variant = "TP-Link-WTA301";
+    qcom,bdf-addr = "L@";        (0x4c400000)
+};
+
+wifi@b00a040 {                                  ← QCN6122 5G
+    compatible = "qcom,qcn6122-wifi";
+    status = "okay";
+    qcom,rproc = <0x34>;
+    qcom,userpd-subsys-name = "q6v5_wcss_userpd2";
+    qcom,ath11k-fw-memory-mode = <0x02>;
+    qcom,ath11k-calibration-variant = "TP-Link-WTA301";
+    qcom,bdf-addr = "M0";        (0x4d100000)
+    qcom,m3-dump-addr = "N ";    (0x4e000000)
+};
+
+wifi@b00b040 {                                  ← 第二个 QCN6122，本板没有，正确禁用
+    compatible = "qcom,qcn6122-wifi";
+    status = "disabled";
+};
+
+=== 与仓库源 dts 的差异（源 = wta301-s7/rootfs/ib-patches/ipq5018-wta301.dts）===
+| 项 | 源 dts | 实际 DTB |
+|---|---|---|
+| &wifi  fw-memory-mode | 1 | **2** |
+| &wifi1 fw-memory-mode | 1（且 status=disabled） | **2**（且 status=okay） |
+| &wifi1 status | disabled | **okay** |
+
+结论：实际 DTB 是另一次改动的产物，未回写源 dts。
+迁移必须以实际 DTB 为基线，不得信任源 dts。

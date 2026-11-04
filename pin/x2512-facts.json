@@ -1,0 +1,71 @@
+{
+  "target_release": {
+    "version": "25.12.6",
+    "tag_commit": "64900e75",
+    "tag_date": "2026-10-18T02:11:00Z",
+    "source": "https://downloads.openwrt.org/releases/25.12.6/targets/qualcommax/ipq50xx/",
+    "target": "qualcommax",
+    "subtarget": "ipq50xx"
+  },
+  "kernel": {
+    "version": "6.12.112",
+    "kmods_dir_hash": "175dffd337a18721108278990fd69f67",
+    "kmods_dir_name": "6.12.112-1-175dffd337a18721108278990fd69f67"
+  },
+  "toolchain": "gcc-14.3.0_musl",
+  "earliest_release_with_ipq50xx": {
+    "version": "25.12.0",
+    "date": "2026-03-03",
+    "kernel": "6.12.71",
+    "kmods_dir_name": "6.12.71-1-592d0ef77704694d198540593694c92c"
+  },
+  "no_ipq50xx_in": {
+    "series": "24.10.x",
+    "subtargets_present": ["ipq807x"],
+    "note": "24.10.0 through 24.10.8 only have ipq807x under qualcommax"
+  },
+  "profiles_in_25_12_6": [
+    "cmcc_mr3000d-ci",
+    "linksys_mx6200",
+    "linksys_spnmx56",
+    "yuncore_ax830",
+    "yuncore_ax850"
+  ],
+  "tplink_device_present": false,
+  "same_hardware_dts": [
+    {"dts": "ipq5018-gl-b3000.dts",        "switch": "qca8337", "wifi5g": "qcn6122", "wifi_status": "okay/okay",     "note": "KERNEL_IN_UBI=1, boot-args commented out"},
+    {"dts": "ipq5018-mr3000d-ci.dts",      "switch": "qca8337", "wifi5g": "qcn6122", "wifi_status": "okay/okay"},
+    {"dts": "ipq5018-mx2000.dts",          "switch": "qca8337", "wifi5g": "qcn6122", "wifi_status": "okay/okay"},
+    {"dts": "ipq5018-pz-l8.dts",           "switch": "qca8337", "wifi5g": "qcn6122", "wifi_status": "not set"},
+    {"dts": "ipq5018-scr50axe.dts",        "switch": "qca8337", "wifi5g": "qcn6122", "wifi_status": "okay/okay",     "note": "two QCN6122"},
+    {"dts": "ipq5018-wn-dax3000gr.dts",    "switch": "qca8337", "wifi5g": "qcn6122", "wifi_status": "okay/okay"},
+    {"dts": "ipq5018-wrc-x3000gs2.dts",    "switch": "qca8337", "wifi5g": "qcn6122", "wifi_status": "disabled/disabled", "note": "256MiB, official choice: wired only"}
+  ],
+  "ath11k_qcn6122_patches": [
+    "920-wifi-ath11k-add-hw-params-for-QCN6122.patch",
+    "921-wifi-ath11k-add-hal-regs-for-QCN6122.patch",
+    "922-wifi-ath11k-add-hw-ring-mask-for-QCN6122.patch",
+    "923-wifi-ath11k-update-hif_and-pci_ops-for-QCN6122.patch",
+    "924-wifi-ath11k-add-multipd-support-for-QCN6122.patch",
+    "925-wifi-ath11k-add-QCN6122-device-support.patch",
+    "931-wifi-ath11k-Support-to-assign-m3-dump-memory.patch",
+    "947-wifi-ath11k-fix-rssi-station-dump-for-IPQ5018-and-QC.patch"
+  ],
+  "ath11k_low_memory_patch_present": false,
+  "ath11k_dp_ring_defaults": {
+    "DP_TX_COMP_RING_SIZE": 32768,
+    "DP_RXDMA_BUF_RING_SIZE": 4096,
+    "DP_RXDMA_MON_STATUS_RING_SIZE": 1024,
+    "DP_RXDMA_MONITOR_BUF_RING_SIZE": 4096,
+    "DP_RXDMA_MONITOR_DST_RING_SIZE": 2048
+  },
+  "ath11k_dp_ring_low_mem_profile": {
+    "DP_TX_COMP_RING_SIZE": 2048,
+    "DP_RXDMA_BUF_RING_SIZE": 1024,
+    "DP_RXDMA_MON_STATUS_RING_SIZE": 512,
+    "DP_RXDMA_MONITOR_BUF_RING_SIZE": 128,
+    "DP_RXDMA_MONITOR_DST_RING_SIZE": 128,
+    "source": "https://lore-kernel.gnuweeb.org/ath11k/20260930165052.4998-1-eduard.hart@etik.com/"
+  },
+  "kbuild_note": "EXTRA_CFLAGS is honoured on 6.12 but NOT on 6.18+; use KCPPFLAGS for portability"
+}

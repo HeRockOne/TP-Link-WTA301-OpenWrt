@@ -1,0 +1,43 @@
+{
+  "name": "S7 (v19-fix10.1-S7)",
+  "role": "回退基线，迁移期间不动",
+  "openwrt": {
+    "revision": "r37669-6c9452a35b",
+    "built_at": "2026-10-25T20:35:35Z",
+    "release": "SNAPSHOT",
+    "target": "qualcommax/ipq50xx",
+    "arch": "aarch64_cortex-a53",
+    "kernel": "6.18.55"
+  },
+  "firmware_fingerprint": {
+    "kernel_crc32": "53bd0490",
+    "rootfs_crc32": "c2e227c6",
+    "tphdr_crc32": "3ccbcfc4",
+    "ubi_crc32": "e850127a",
+    "web_package_crc32": "af302ddb"
+  },
+  "board_verified_md5": {
+    "kernel_mtd5_0x400000": "34676839ed74491d65ddb85099e9153f",
+    "rootfs_mtd6_0xBC0000": "d5b81e16c569ba146d30ae6496c69881"
+  },
+  "actual_dtb": {
+    "inside_op_kernel_offset": "0x46eb48",
+    "size": 25978,
+    "md5": "dff6e3c9168e168a0b12c1c2c685cbfc",
+    "reconstructed_dts": "patches/s7-actual-dtb.dts",
+    "wifi_nodes": {
+      "wifi@c000000": {"role": "IPQ5018 2.4G", "status": "okay", "fw_memory_mode": 2},
+      "wifi@b00a040": {"role": "QCN6122 5G",   "status": "okay", "fw_memory_mode": 2, "rproc": "q6_wcss_pd2"},
+      "wifi@b00b040": {"role": "2nd QCN6122 (unused)", "status": "disabled"}
+    }
+  },
+  "wifi_runtime_evidence": {
+    "phys_present": ["phy0", "phy1"],
+    "fw_memory_mode_both": 2,
+    "fw_build_id": "WLAN.HK.2.7.0.1-01744-QCAHKSWPL_SILICONZ-1",
+    "free_available_kb": 63940,
+    "oom_observed": false
+  },
+  "archive": "../work/backup/FROZEN-S7-20261105",
+  "frozen_doc": "../work/docs/FROZEN-S7.md"
+}

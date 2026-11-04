@@ -1,0 +1,15 @@
+# 构建输出
+/build/
+/build-*/
+*.log
+
+# 大二进制（固件镜像、ImageBuilder tarball、apk 缓存）
+*.bin
+*.img
+*.itb
+*.squashfs
+*.tar.zst
+*.apk
+
+# 证据日志保留
+!docs/evidence/*.txt
