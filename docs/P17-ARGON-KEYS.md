@@ -71,6 +71,20 @@ rootfs 预算：分区 `0xC00000`（12 MiB）− squashfs 本体 ≈ 3.5 MiB 余
 `.config` 里只写了总开关 `CONFIG_LUCI_LANG_zh_Hans=y`，Kconfig 自动选中它
 （实测 `make defconfig` 后 `.config` 里出现 `CONFIG_PACKAGE_luci-i18n-argon-config-zh-cn=y`）。
 
+⚠️ **但 `luci-app-argon-config` 这个包在 v3.1.0 里不存在**（实测
+`ls package/luci-app-argon-config` → 无此目录）。设置界面已折进主题自己的
+`30_luci-theme-argon`（写 `argon.@global[0]` 的 `login_style` / `primary` /
+`dark_primary` / `blur` / `transparency` / `mode` / `online_wallpaper`）。
+所以这个 `=y` 只会落下一个**孤立 ~2 KiB 的 `.lmo`**（
+`/usr/lib/lua/luci/i18n/argon-config.zh-cn.lmo`），没有任何消费者。
+无害，但属于冗余；后续清理时显式关掉即可：
+
+```sh
+del_pkg_sym CONFIG_PACKAGE_luci-i18n-argon-config-zh-cn
+```
+
+不为了这 2 KiB 重开一轮构建 —— AGENTS §2「一次只改一个变量」。
+
 ## 2. 默认主题怎么生效（读 Argon 源码）
 
 `root/etc/uci-defaults/30_luci-theme-argon`（节选）：
