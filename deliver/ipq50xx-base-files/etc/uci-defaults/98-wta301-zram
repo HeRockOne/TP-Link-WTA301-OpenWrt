@@ -1,0 +1,23 @@
+#!/bin/sh
+#
+# TP-Link WTA301 -- cap zram at 48 MiB.
+#
+# /etc/init.d/zram defaults to "half of RAM, up to 1/2 of RAM" via
+# ram_size/2048 => 178672/2048 = 87 MiB on this board.  That swap file is
+# never touched in normal operation (measured: 256 kB of 89 MiB used, load
+# 0.0-0.06), so 48 MiB gives the same safety net for 40 MiB less kernel
+# bookkeeping.
+#
+# The validated build of this board (openwrt snapshot r37669) carries
+#   config system 'system' ... option zram_size_mb '48'
+# in its /etc/config/system; we generate that file at runtime from
+# board.d/90_wta301 instead, so the knob has to be set here -- a plain
+# /etc/config/system in the rootfs would be overwritten by config_generate.
+#
+# See wta301-2512/docs/P14-MEMORY-THREE-WAY.md
+[ "$(board_name)" = "tplink,wta301" ] || exit 0
+
+uci -q get system.@system[0] >/dev/null || exit 0
+uci -q set system.@system[0].zram_size_mb='48'
+uci -q commit system
+exit 0

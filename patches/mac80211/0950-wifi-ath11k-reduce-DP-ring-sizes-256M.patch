@@ -1,0 +1,85 @@
+From: WTA301 port <port@localhost>
+Subject: [PATCH] wifi: ath11k: reduce DP ring sizes to the 256 MiB profile
+
+Why this patch exists
+---------------------
+This board is IPQ5018 (2.4 GHz, pd-1) + QCN6122 (5 GHz, pd-2) with 256 MiB
+of DDR, and both radios run at the same time:
+
+    nand 128 MiB / DDR 256 MiB (MemTotal 178672 kB after the WCSS carve-out)
+
+ath11k's default data-path rings are sized for systems with plenty of RAM.
+Measured on this board with the default values: `rmmod ath11k_ahb` releases
+about 101 MiB of MemFree that is invisible in every meminfo counter
+(dev_alloc_skb page-fragment cache + coherent ring memory), i.e. the two
+radios pin roughly 60 % of usable RAM.  With both APs up the board sat at
+5-8 MiB MemAvailable and only stayed alive because of zram swap.
+
+The same symptom, the same driver and the same fix were reported for a
+sibling IPQ5018 board (MX4200, 256 MiB) in OpenWrt issue #24154:
+"Stopping Wi-Fi did not reclaim memory, while unloading ath11k_ahb/ath11k
+raised MemAvailable from 22,756 kB to 291,892 kB", mitigated by halving the
+RX/monitor rings.  Upstream is moving the same way with a RAM-conditioned
+profile ([PATCH ath-next] wifi: ath11k: use smaller DP rings on low-memory
+systems, Eduard Hart), whose low-memory numbers are 2048/1024/512/128/128.
+
+Values chosen here
+------------------
+They are not invented: they are byte-for-byte the values carried by the
+previously validated build of this very board (openwrt snapshot r37669,
+kernel 6.18.55, mac80211 backports-7.2).  `diff` of that tree's ath11k
+against backports-6.18.55 differs in *exactly* these five constants -
+hal.h, dp_rx.c, dp_tx.c, hal.c are identical - so this patch restores
+parity with a build that ran both radios on this board for weeks:
+
+    DP_TX_COMP_RING_SIZE          32768 -> 8192
+    DP_RXDMA_BUF_RING_SIZE         4096 -> 2048
+    DP_RXDMA_MON_STATUS_RING_SIZE  1024 ->  512
+    DP_RXDMA_MONITOR_BUF_RING_SIZE 4096 ->  128
+    DP_RXDMA_MONITOR_DST_RING_SIZE 2048 ->  128
+
+Expected saving, two radios: RX refill 4 MiB/radio, monitor buffer
+7.75 MiB/radio, monitor dest 3.75 MiB/radio, monitor status 1 MiB/radio,
+TX completion ~0.2 MiB/radio  =>  ~33 MiB.
+
+Notes
+-----
+* DP_RXDMA_REFILL_RING_SIZE is deliberately left at 2048.  It is *not* a ring
+  depth: it is passed as `rx_buf_size` to ath11k_dp_tx_htt_rx_filter_setup().
+  Lowering it would advertise a 1024-byte buffer while the host still
+  allocates 2048 (caught in review of the MX4200 follow-up patch).
+* DP_TX_IDR_SIZE and ATH11K_TX_COMPL_NEXT() both derive from
+  DP_TX_COMP_RING_SIZE, so the tx_status FIFO and the idr wrap stay
+  consistent without further edits.
+* Monitor-mode rings only matter for radiotap sniffing, which this target
+  does not enable (no CONFIG_ATH11K_DEBUGFS / no monitor vif).
+
+diff --git a/drivers/net/wireless/ath/ath11k/dp.h b/drivers/net/wireless/ath/ath11k/dp.h
+--- a/drivers/net/wireless/ath/ath11k/dp.h
++++ b/drivers/net/wireless/ath/ath11k/dp.h
+@@ -206,7 +206,7 @@
+ #define DP_WBM_RELEASE_RING_SIZE	64
+ #define DP_TCL_DATA_RING_SIZE		512
+ #define DP_TCL_DATA_RING_SIZE_WCN6750	2048
+-#define DP_TX_COMP_RING_SIZE		32768
++#define DP_TX_COMP_RING_SIZE		8192
+ #define DP_TX_IDR_SIZE			DP_TX_COMP_RING_SIZE
+ #define DP_TCL_CMD_RING_SIZE		32
+ #define DP_TCL_STATUS_RING_SIZE		32
+@@ -217,12 +217,12 @@
+ #define DP_REO_EXCEPTION_RING_SIZE	128
+ #define DP_REO_CMD_RING_SIZE		256
+ #define DP_REO_STATUS_RING_SIZE		2048
+-#define DP_RXDMA_BUF_RING_SIZE		4096
++#define DP_RXDMA_BUF_RING_SIZE		2048
+ #define DP_RXDMA_REFILL_RING_SIZE	2048
+ #define DP_RXDMA_ERR_DST_RING_SIZE	1024
+-#define DP_RXDMA_MON_STATUS_RING_SIZE	1024
+-#define DP_RXDMA_MONITOR_BUF_RING_SIZE	4096
+-#define DP_RXDMA_MONITOR_DST_RING_SIZE	2048
++#define DP_RXDMA_MON_STATUS_RING_SIZE	512
++#define DP_RXDMA_MONITOR_BUF_RING_SIZE	128
++#define DP_RXDMA_MONITOR_DST_RING_SIZE	128
+ #define DP_RXDMA_MONITOR_DESC_RING_SIZE	4096
+ 
+ #define DP_RX_RELEASE_RING_NUM	3

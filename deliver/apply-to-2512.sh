@@ -120,14 +120,33 @@ echo "PCS_QCA_UNIPHY => $(grep -n 'PCS_QCA_UNIPHY' $T/ipq50xx/config-default)"
 # 三方实情（docs/M05-KEYS-THREE-WAY.md）：原厂走私有 slp_gpio 字符设备；
 # S7 的 .config 有 INPUT=m 但 rootfs 一个 input 模块都没有 ⇒ S7 按键也从未工作。
 # 所以这里是「超越基线的改进」（用户已明确选 B），不是恢复基线。
-for sym in CONFIG_INPUT=y CONFIG_INPUT_EVDEV=y CONFIG_KEYBOARD_GPIO=y CONFIG_INPUT_MISC=y; do
-	name=${sym%%=*}
-	if ! grep -q "^${name}=y$" $T/ipq50xx/config-default; then
-		sed -i "/^# ${name} is not set$/d" $T/ipq50xx/config-default
-		echo "$sym" >> $T/ipq50xx/config-default
-	fi
-done
-echo "KEY/INPUT => $(grep -cE '^CONFIG_(INPUT|INPUT_EVDEV|KEYBOARD_GPIO|INPUT_MISC)=y$' $T/ipq50xx/config-default)/4"
+# 开关：WITH_KEYS=1 才把 input 子系统编进内核。默认 0（= 与 P11 基线一致）。
+# 实测教训（2026-11-05，P15 第一轮构建）：这 4 行只生效了 3 行
+#   CONFIG_INPUT=y / INPUT_EVDEV=y / INPUT_MISC=y 进了 .config，
+#   CONFIG_KEYBOARD_GPIO 没有 ⇒ 没有 gpio-keys 驱动 ⇒ 按键照样不工作，
+#   却让内核 Image 长大 65536 B（P11 4131c6d0 → bb0c8667），白多一个变量。
+# 所以按键这事必须单独一轮（WITH_KEYS=1）现场调通 KEYBOARD_GPIO，
+# 不能挂在「省内存」这轮上（AGENTS §2：一次只改一个变量）。
+if [ "${WITH_KEYS:-0}" = 1 ]; then
+	for sym in CONFIG_INPUT=y CONFIG_INPUT_EVDEV=y CONFIG_INPUT_KEYBOARD=y \
+	           CONFIG_KEYBOARD_GPIO=y CONFIG_INPUT_MISC=y; do
+		name=${sym%%=*}
+		if ! grep -q "^${name}=y$" $T/ipq50xx/config-default; then
+			sed -i "/^# ${name} is not set$/d" $T/ipq50xx/config-default
+			echo "$sym" >> $T/ipq50xx/config-default
+		fi
+	done
+else
+	# 显式关掉：merge_config 只"写入"，不会因为 symbol 缺失就回退，
+	# 旧 .config 里的 =y 会一直保留（本轮已踩：去掉 4 行后 .config 仍是 =y）。
+	# 必须写 "# CONFIG_X is not set" 才能让它真的变回 n。
+	for name in CONFIG_INPUT CONFIG_INPUT_EVDEV CONFIG_INPUT_KEYBOARD \
+	            CONFIG_KEYBOARD_GPIO CONFIG_INPUT_MISC; do
+		sed -i "/^${name}=[ym]$/d;/^# ${name} is not set$/d" $T/ipq50xx/config-default
+		echo "# ${name} is not set" >> $T/ipq50xx/config-default
+	done
+fi
+echo "KEY/INPUT => $(grep -cE '^CONFIG_(INPUT|INPUT_EVDEV|INPUT_KEYBOARD|KEYBOARD_GPIO|INPUT_MISC)=[ym]$' $T/ipq50xx/config-default) (WITH_KEYS=${WITH_KEYS:-0})"
 
 # 幂等强制：软件包 feed + 中文界面 + 家用 QoS（见 docs/P12-PACKAGE-FEED-STATUS.md）。
 # 缺口 A：25.12.6 的 include/feeds.mk:49-59 FeedSourcesAppendAPK 里
@@ -230,6 +249,38 @@ M=$(grep -c 'volume_find(dataname)' /root/ow2512/build_dir/target-*/fstools-*/fa
 if [ "$N" != "2" ] || [ "$M" != "1" ]; then
 	echo "fstools 源码尚未含补丁 (mount_root x$N / factoryreset x$M) -> clean 以便重新应用"
 	( cd /root/ow2512 && make package/system/fstools/clean >/dev/null 2>&1 )
+fi
+
+echo "== 5c. mac80211/ath11k 补丁：把 DP ring 降到 256 MiB 档（对齐 S7 backports-7.2）=="
+# 实测（P14/P15）：两个射频同时开时，ath11k 默认 ring 在 256 MiB 板上占掉
+# 约 101 MiB 的 MemFree，而 meminfo 的任何计数器都看不到它（dev_alloc_skb
+# 的 page-fragment cache + coherent ring）。表现：MemAvailable 只有 5~8 MiB，
+# 靠 zram 兜着；`rmmod ath11k_ahb` 立刻回 108 MiB。
+#
+# 三轮证据：
+#  1) 离线三方：S7 的 ath11k（backports-7.2）与我们的（backports-6.18.55）
+#     逐文件 diff —— dp.h 只差这 5 个常量，hal.h/dp_rx.c/dp_tx.c/hal.c 全同；
+#     S7 的值 8192/2048/512/128/128，我们的 32768/4096/1024/4096/2048。
+#  2) 外部：OpenWrt issue #24154（MX4200，同为 IPQ5018+QCN6122 256 MiB）
+#     同样症状「stop wifi 不回收、rmmod ath11k 从 22 MB 回到 291 MB」，
+#     解法就是减半 RX/monitor ring；上游 ath-next 同名补丁正在推按 RAM 选档。
+#  3) 字节：两射频合计预期省 ~33 MiB。
+# 详见 wta301-2512/docs/P15-ATH11K-RINGS.md
+mkdir -p /root/ow2512/package/kernel/mac80211/patches/ath11k
+cp -f $SRC/patches/mac80211/0950-wifi-ath11k-reduce-DP-ring-sizes-256M.patch       /root/ow2512/package/kernel/mac80211/patches/ath11k/
+ls -l /root/ow2512/package/kernel/mac80211/patches/ath11k/0950-*.patch
+
+# OpenWrt 不会因为 patches/ 变动自动重编 mac80211；判据看解包源里的常量。
+DPH=$(ls -d /root/ow2512/build_dir/target-*/linux-qualcommax_ipq50xx/mac80211-regular/backports-*/drivers/net/wireless/ath/ath11k/dp.h 2>/dev/null | head -1)
+if [ -n "$DPH" ]; then
+	V=$(awk '/^#define DP_TX_COMP_RING_SIZE/{print $3}' "$DPH")
+	echo "  解包源 DP_TX_COMP_RING_SIZE=$V ($DPH)"
+	if [ "$V" != "8192" ]; then
+		echo "  未含补丁 -> clean mac80211 以便重新应用"
+		( cd /root/ow2512 && make package/kernel/mac80211/clean >/dev/null 2>&1 )
+	fi
+else
+	echo "  解包源尚未存在（首次构建）-> 无需 clean"
 fi
 
  echo "== DONE =="
