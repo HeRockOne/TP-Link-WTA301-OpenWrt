@@ -1,0 +1,75 @@
+#!/bin/sh
+# 99-wta301-wireless —— 首启把无线配置落到与 S7 基线一致，并真正启用。
+#
+# 为什么必须有这个脚本
+# --------------------
+# 25.12 的 /etc/init.d/boot 第 48 行会执行
+#     [ -f /etc/board.json ] && /sbin/wifi config
+# 而 wifi-scripts 的 mac80211 后端按"安全默认"生成 default_radioN，
+# 并**显式**写入 `option disabled '1'`。于是出厂镜像首启后两个射频都是
+# 关的（实测 /etc/config/wireless 里 default_radio0/1 都有 disabled '1'，
+# 板子上 `iw dev` 无任何接口），必须 ssh/串口进去手工 uci set 才有 Wi-Fi。
+# 对"长期稳定家用"不可接受 —— 刷完机就该能直接连。
+#
+# 配置来源
+# --------
+# 完全对齐 S7 基线（/root/lp/tree/etc/config/wireless，即这块板上长期
+# 运行的配置）：SSID / 密码 / 国家码 / 信道 / 带宽都一致，这样家里已经
+# 配对过的手机、电视、摄像头升级后**不用重新配网**。
+#   radio0 (2g): ssid OpenWrt-WTA301     ch6  HT40  country CN
+#   radio1 (5g): ssid OpenWrt-WTA301-5G  ch36 HE80  country CN
+#   两个 iface : mode ap / network lan / encryption psk2 / key 123456789
+#
+# 安全提示（务必让用户知道）
+# --------------------------
+# 默认 PSK 与 S7 基线相同，属于"已知密码"。首次登录后应改成自己的：
+#     uci set wireless.default_radio0.key='新密码'
+#     uci set wireless.default_radio1.key='新密码'
+#     uci commit wireless && wifi reload
+#
+# 幂等：只在首启执行一次（uci-defaults 语义），重复设置同一值无副作用。
+
+[ -f /etc/config/wireless ] || exit 0
+
+KEY='123456789'
+
+# 找出 device == $1 的 wifi-iface 段名
+ifaces_for() {
+	local i
+	for i in $(uci show wireless | sed -n 's/^wireless\.\([^.=]*\)=wifi-iface$/\1/p'); do
+		[ "$(uci -q get "wireless.$i.device")" = "$1" ] && echo "$i"
+	done
+}
+
+apply_radio() {
+	local sec="$1" band="$2" chan htmode ssid i
+
+	case "$band" in
+	2g) chan=6;  htmode='HT40'; ssid='OpenWrt-WTA301' ;;
+	5g) chan=36; htmode='HE80'; ssid='OpenWrt-WTA301-5G' ;;
+	*)  return 0 ;;
+	esac
+
+	uci set "wireless.$sec.disabled=0"
+	uci set "wireless.$sec.country=CN"
+	uci set "wireless.$sec.channel=$chan"
+	uci set "wireless.$sec.htmode=$htmode"
+
+	for i in $(ifaces_for "$sec"); do
+		uci set "wireless.$i.disabled=0"
+		uci set "wireless.$i.network=lan"
+		uci set "wireless.$i.mode=ap"
+		uci set "wireless.$i.ssid=$ssid"
+		uci set "wireless.$i.encryption=psk2"
+		uci set "wireless.$i.key=$KEY"
+	done
+}
+
+for s in $(uci show wireless | sed -n 's/^wireless\.\([^.=]*\)=wifi-device$/\1/p'); do
+	band=$(uci -q get "wireless.$s.band")
+	[ -n "$band" ] || band=2g
+	apply_radio "$s" "$band"
+done
+
+uci commit wireless
+exit 0
