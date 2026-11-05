@@ -69,6 +69,21 @@ static const struct clk_ops qca_uniphy_clk_ops = {
 	.recalc_rate = qca_uniphy_clk_recalc_rate,
 };
 
+/*
+ * WTA301: v6.18 has clk_hw_recalc_rate(); v6.12 does not.
+ *
+ * Every clock registered by this driver carries CLK_GET_RATE_NOCACHE, and
+ * clk_core_get_rate_nolock() honours that flag by re-deriving the rate from
+ * the UNIPHY registers (drivers/clk/clk.c: clk_core_get_rate_recalc() ->
+ * __clk_recalc_rates(core, false, 0)).  clk_hw_get_rate() therefore performs
+ * exactly the refresh clk_hw_recalc_rate() was added for, on both 6.12 and
+ * 6.18, without patching drivers/clk/clk.c.
+ */
+static void qca_uniphy_sync_rate(struct clk_hw *hw)
+{
+	clk_hw_get_rate(hw);
+}
+
 static int qca_uniphy_clk_register(struct qca_uniphy *uniphy,
 				   struct qca_uniphy_clk *uclk,
 				   const char *name)
@@ -564,8 +579,8 @@ static int qca_uniphy_pcs_config_mode(struct phylink_pcs *pcs,
 	}
 
 	/* Trigger UNIPHY ref clock to recal rate */
-	clk_hw_recalc_rate(&uniphy->rx_clk.hw);
-	clk_hw_recalc_rate(&uniphy->tx_clk.hw);
+	qca_uniphy_sync_rate(&uniphy->rx_clk.hw);
+	qca_uniphy_sync_rate(&uniphy->tx_clk.hw);
 
 	/* As last step enable PHY clock... */
 	clk_enable(uniphy->clks[port_rx_clk_idx(upcs)].clk);
@@ -579,7 +594,7 @@ static int qca_uniphy_pcs_config_mode(struct phylink_pcs *pcs,
 		return 0;
 
 	/* Trigger UNIPHY ref output clock to recalc rate */
-	clk_hw_recalc_rate(&uniphy->ref_clk.hw);
+	qca_uniphy_sync_rate(&uniphy->ref_clk.hw);
 	/* Trigger assigned-clock-rates in DT to be applied */
 	of_clk_set_defaults(uniphy->dev->of_node, true);
 	if (!qca_uniphy_refclk_is_enabled(&uniphy->ref_clk.hw))
@@ -926,6 +941,7 @@ static const struct regmap_config uniphy_regmap_cfg = {
 
 static int qca_uniphy_probe(struct platform_device *pdev)
 {
+	struct fwnode_pcs_provider *provider;
 	struct device *dev = &pdev->dev;
 	struct clk_bulk_data *clks;
 	struct qca_uniphy *uniphy;
@@ -982,8 +998,19 @@ static int qca_uniphy_probe(struct platform_device *pdev)
 
 	platform_set_drvdata(pdev, uniphy);
 
-	return fwnode_pcs_add_provider(dev_fwnode(dev), qca_uniphy_get,
-				       uniphy);
+	/*
+	 * WTA301: fwnode_pcs_add_provider() returns a pointer, not an int.
+	 * The stock copy returned it straight from an int function, which is
+	 * why this driver never compiled and stayed dead code upstream.
+	 * Use the devm variant so the provider is dropped on unbind.
+	 */
+	provider = devm_fwnode_pcs_add_provider(dev, dev_fwnode(dev),
+						qca_uniphy_get, uniphy);
+	if (IS_ERR(provider))
+		return dev_err_probe(dev, PTR_ERR(provider),
+				     "Failed to add PCS provider\n");
+
+	return 0;
 }
 
 static struct platform_driver qca_uniphy_driver = {

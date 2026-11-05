@@ -17,6 +17,9 @@ cp -f $SRC/patches/kernel-6.12/0842-*.patch     $T/patches-6.12/0923-arm64-dts-q
 cp -f $SRC/patches/kernel-6.12/0843-*.patch     $T/patches-6.12/0924-net-stmmac-add-get_interfaces-platform-method.patch
 cp -f $SRC/patches/kernel-6.12/0951-*.patch     $T/patches-6.12/0925-net-pcs-add-uniphy-pcs.patch
 cp -f $SRC/patches/kernel-6.12/0954-*.patch     $T/patches-6.12/0926-net-stmmac-introduce-qualcomm-ipq5018-dwmac.patch
+# 0927 已废弃：clk_hw_recalc_rate() 改为驱动内用 clk_get_rate() 等价实现（见 files/ 里的注释），
+# 不再需要改 drivers/clk/clk.c。若残留旧文件会被内核打补丁失败，显式删掉。
+rm -f $T/patches-6.12/0927-clk-add-clk-hw-recalc-rate.patch
 ls -1 $T/patches-6.12/092*
 
 echo "== 2. files/（驱动 + dt-binding + 板级 dts）=="
@@ -51,14 +54,24 @@ cat >> $T/ipq50xx/config-default <<'EOF'
 # leaving it unset in a non-interactive build makes syncconfig prompt and abort.
 # CONFIG_DWMAC_QCOM_ETHQOS is not set
 CONFIG_DWMAC_IPQ5018=y
-# PCS_QCA_UNIPHY must stay OFF: the upstream pcs-qca-uniphy.c calls
-# clk_hw_recalc_rate(), which does not exist in 6.12 (nor in 6.18) - the file is
-# latent-broken upstream because the 5 shipped ipq50xx profiles never build it.
-# S7's own boot log proves the board runs without it:
-#   ipq5018-gmac-dwmac 39d00000.ethernet: ... Ring mode enabled
-#   rtl8365mb-mdio 90000.mdio-1:1d: configuring for fixed/sgmii link mode
-#   rtl8365mb-mdio 90000.mdio-1:1d: Link is Up - 1Gbps/Full
-# and dwmac-ipq5018.c returns 0 when the PCS is absent (fixed-link path).
+# PCS_QCA_UNIPHY stays OFF, exactly like the S7 baseline
+# (/root/kf/linux-6.18.55/.config: "# CONFIG_PCS_QCA_UNIPHY is not set"), and
+# S7 has wired ethernet working (work/evidence/xfer3.txt: Linux ping, 0% loss).
+# So "off" is a *known-good* setting on this board, not a defect.
+#
+# Why it looked like a suspect: with it off nothing binds
+# qualcomm,ipq5018-uniphy, so the gcc parent clocks DT_UNIPHY_RX_CLK /
+# DT_UNIPHY_TX_CLK (patch 0923 points them at <&uniphy0 ...>) cannot resolve
+# and clk_summary reports gmac1_tx_clk_src = 0 Hz (gmac0 = 125 MHz) with every
+# gcc_uniphy_* clock at enable_cnt 0.  But 6.18 resolves them by .index and
+# still finds no provider, so S7 shows the same thing while shipping working
+# wired - i.e. this is shared noise, not the S7-vs-us difference.  See
+# docs/R18-WIRED-ETHERNET.md.
+#
+# The 6.12 copy of pcs-qca-uniphy.c also does not compile as shipped (it calls
+# clk_hw_recalc_rate(), a v6.18 helper, and returns a pointer from an int
+# function); files/drivers/net/pcs/pcs-qca-uniphy.c carries the minimal 6.12
+# fix so that turning it on later is one config line, not a porting job.
 # CONFIG_PCS_QCA_UNIPHY is not set
 
 CONFIG_STMMAC_ETH=y
@@ -66,6 +79,11 @@ CONFIG_STMMAC_PLATFORM=y
 EOF
 fi
 tail -12 $T/ipq50xx/config-default
+
+# 幂等强制：树里可能还留着 R18 时期的 "=y"
+sed -i 's|^CONFIG_PCS_QCA_UNIPHY=y$|# CONFIG_PCS_QCA_UNIPHY is not set|' $T/ipq50xx/config-default
+grep -q '^# CONFIG_PCS_QCA_UNIPHY is not set$' $T/ipq50xx/config-default || echo '# CONFIG_PCS_QCA_UNIPHY is not set' >> $T/ipq50xx/config-default
+echo "PCS_QCA_UNIPHY => $(grep -n 'PCS_QCA_UNIPHY' $T/ipq50xx/config-default)"
 
 echo "== 4. 去掉 kmod-qca-nss-dp（我们不用 NSS/EDMA，纯 CPU 转发）=="
 if grep -q 'kmod-qca-nss-dp' $T/Makefile; then
