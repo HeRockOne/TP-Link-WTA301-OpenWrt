@@ -13,7 +13,7 @@ secondary u-boot 的 `tpl_boot_one()` 每次都校验它。stock `sysupgrade` �
 都是 `nand_do_upgrade` + `CI_UBIPART=rootfs`，即 kernel 与 rootfs 都在 UBI 卷内。
 `tplink,wta301` 没有分支 ⇒ 会掉到文件末尾的默认分支，行为不适用本板。
 
-## 2. 本板 mtd 编号（从编译出的 FIT 内 DTB 解析，与 S7 实跑一致）
+## 2. 本板 mtd 编号（**现场实测**，S7 运行中的 `/proc/mtd` + `/sys/class/mtd/*`）
 
 | mtd | 分区 | 偏移 | 长度 | 说明 |
 |---|---|---|---|---|
@@ -24,16 +24,37 @@ secondary u-boot 的 `tpl_boot_one()` 每次都校验它。stock `sysupgrade` �
 | 4 | normal_boot | 0x4700000 | 0x40000 | 二级 u-boot（红线：不写） |
 | **5** | **kernel** | 0x4880000 | 0x400000 | 实际写 0x480000（跨出到空隙，S7 同） |
 | **6** | **rootfs** | 0x4fc0000 | 0xc00000 | `root=/dev/mtdblock6` |
-| 7 | rootfs_data2 | 0x6a00000 | 0x1600000 | 原厂 B 槽数据区（不用） |
-| 8 | normal_boot_bak | 0x0700000 | 0x40000 | |
-| 9 | kernel_bak | 0x0880000 | 0x400000 | 原厂回退内核 |
-| 10 | rootfs_bak | 0x0fc0000 | 0xc00000 | 原厂回退 rootfs |
-| **11** | **rootfs_data3** | 0x1bc0000 | 0x2440000 | 我们的 overlay（`ubi.mtd=rootfs_data3`） |
-| 12 | boot_flag | 0x4000000 | 0x20000 | 红线：不写不擦（改它走 `rescue.py setflag`） |
+| 7 | rootfs_data | 0x5b00000 | 0x00c0000 | **mtdsplit 自动生成**（见下） |
+| 8 | rootfs_data2 | 0x6a00000 | 0x1600000 | 原厂 B 槽数据区（不用） |
+| 9 | normal_boot_bak | 0x0700000 | 0x40000 | |
+| 10 | kernel_bak | 0x0880000 | 0x400000 | 原厂回退内核 |
+| 11 | rootfs_bak | 0x0fc0000 | 0xc00000 | 原厂回退 rootfs |
+| **12** | **rootfs_data3** | 0x1bc0000 | 0x2440000 | 我们的 overlay（`ubi.mtd=rootfs_data3`） |
+| 13 | boot_flag | 0x4000000 | 0x20000 | 红线：不写不擦（改它走 `rescue.py setflag`） |
 
-> 注意编号顺序 ≠ 物理顺序：`rootfs_data2` 排在 `normal_boot_bak` 之前，这是从原厂
-> RedBoot 表搬过来时保留的原始次序。**改动分区节点顺序会改 mtd 编号**
-> ⇒ `root=/dev/mtdblock6` 指错设备 ⇒ 直接不启动。
+### 重要：`rootfs_data`(mtd7) 不在 DTS 里，是内核自动切出来的
+
+现场 dmesg 原文（`work/evidence` 同款）：
+
+```
+[    1.127063] 1 squashfs-split partitions found on MTD device rootfs
+[    1.130582] 0x000005b00000-0x000005bc0000 : "rootfs_data"
+[    2.060737] ubi0: attached mtd12 (name "rootfs_data3", size 36 MiB)
+```
+
+`mtdsplit_squashfs` 在 `rootfs` 分区里找到 squashfs 后，**把尾部剩余空间自动注册成
+`rootfs_data`（插在父分区后面 ⇒ 之后所有编号 +1）**。
+
+两条推论，都影响 P6：
+1. **它的偏移/大小随 squashfs 实际长度变**：S7 的 squashfs 约 0xB40000 ⇒ 剩余 0xC0000；
+   我们的 P5 squashfs 8,713,216 B（0x84F000）⇒ `rootfs_data` 会是 `0x580f000` 长 `0x3b1000`。
+   **不要把这个长度写进任何脚本。**
+2. **静态分区编号必须按 14 项算**（13 个 DTS 节点 + 1 个 split 出来的）：
+   `rootfs=6`、`rootfs_data3=12`、`boot_flag=13`。之前文档写成 11/12 是漏算了 split，已更正。
+
+> 编号顺序 ≠ 物理顺序：`rootfs_data2` 排在 `normal_boot_bak` 之前，这是从原厂 RedBoot 表
+> 搬过来时保留的原始次序。**改动分区节点顺序会改 mtd 编号** ⇒ `root=/dev/mtdblock6`
+> 指错设备 ⇒ 直接不启动。钩子里一律用 `find_mtd_part <name>` 取，不写死编号。
 
 ## 3. DTS 需要两处改动（都是为了「Linux 侧可写」）
 
