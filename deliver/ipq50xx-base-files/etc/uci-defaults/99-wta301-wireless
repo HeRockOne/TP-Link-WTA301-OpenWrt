@@ -1,21 +1,32 @@
 #!/bin/sh
-# 99-wta301-wireless —— 首启把无线配置落到与 S7 基线一致，并真正启用。
+# 99-wta301-wireless —— 兜底：把无线配置落到与 S7 基线一致并启用。
 #
-# 为什么必须有这个脚本
-# --------------------
-# 25.12 的 /etc/init.d/boot 第 48 行会执行
-#     [ -f /etc/board.json ] && /sbin/wifi config
-# 而 wifi-scripts 的 mac80211 后端按"安全默认"生成 default_radioN，
-# 并**显式**写入 `option disabled '1'`。于是出厂镜像首启后两个射频都是
-# 关的（实测 /etc/config/wireless 里 default_radio0/1 都有 disabled '1'，
-# 板子上 `iw dev` 无任何接口），必须 ssh/串口进去手工 uci set 才有 Wi-Fi。
-# 对"长期稳定家用"不可接受 —— 刷完机就该能直接连。
+# ⚠ 首选机制不是本脚本，而是 base-files/etc/config/wireless（固化进 rootfs）。
+# 本脚本只是第二层保险（例如有人 rm /etc/config/wireless 后重启）。
+#
+# 为什么不能只靠 uci-defaults（本板实测，已踩过）
+# ----------------------------------------------
+# 25.12 的 /etc/init.d/boot 顺序是：
+#     48: [ -f /etc/board.json ] && /sbin/wifi config     ← 先
+#     52: uci_apply_defaults                              ← 后
+# 而 ath11k 是模块，dmesg 显示它 16~22 s 才 probe（`ath11k c000000.wifi:
+# ipq5018 hw1.0` / `ath11k b00a040.wifi: qcn6122 hw1.0`）。第 48 行跑的时候
+# 两个 phy 还不存在，`wifi config` 什么也不生成，`/etc/config/wireless` 此时
+# 根本不存在 ⇒ 本脚本首行 `[ -f /etc/config/wireless ] || exit 0` 直接退出，
+# 一个 uci set 都没执行。等 phy 出现后 hotplug 才补生成那份带
+# `option disabled '1'` 的配置（wifi-scripts 的安全默认）。
+# 实测证据：刷 P8 后 /etc/uci-defaults 已空（脚本被执行并删除）、
+# `sh -x /rom/etc/uci-defaults/99-wta301-wireless` 手工跑逐条 uci set 全成功，
+# 但冷启动后 /etc/config/wireless 里仍是 `option disabled '1'`。
+#
+# 所以固化版 base-files/etc/config/wireless 才是主机制（S7 也是 rootfs 固化，
+# 见 docs/DIVERGENCE-MATRIX.md 的 L6 行）。固化配置文件由 fstools 首启 seed 到
+# overlay，第 48 行的 `wifi config` 会按 option path 匹配到已有段，不重建。
 #
 # 配置来源
 # --------
-# 完全对齐 S7 基线（/root/lp/tree/etc/config/wireless，即这块板上长期
-# 运行的配置）：SSID / 密码 / 国家码 / 信道 / 带宽都一致，这样家里已经
-# 配对过的手机、电视、摄像头升级后**不用重新配网**。
+# 完全对齐 S7 基线（/root/lp/tree/etc/config/wireless）：SSID / 密码 / 国家码 /
+# 信道 / 带宽都一致，这样家里已配对过的手机、电视、摄像头升级后**不用重新配网**。
 #   radio0 (2g): ssid OpenWrt-WTA301     ch6  HT40  country CN
 #   radio1 (5g): ssid OpenWrt-WTA301-5G  ch36 HE80  country CN
 #   两个 iface : mode ap / network lan / encryption psk2 / key 123456789
@@ -27,7 +38,7 @@
 #     uci set wireless.default_radio1.key='新密码'
 #     uci commit wireless && wifi reload
 #
-# 幂等：只在首启执行一次（uci-defaults 语义），重复设置同一值无副作用。
+# 幂等：重复设置同一值无副作用。
 
 [ -f /etc/config/wireless ] || exit 0
 
