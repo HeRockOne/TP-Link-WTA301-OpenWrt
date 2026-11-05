@@ -14,9 +14,11 @@
 | # | 事实 | 证据 |
 |---|---|---|
 | F1 | **S7 的 Linux 有线是通的** | `work/evidence/xfer3.txt`（S7 控制台 `root@wta301`）：`ping -c 2 192.168.8.100` → `2 packets transmitted, 2 packets received, 0% packet loss` |
-| F2 | 我们的 25.12.6 有线不通 | `work/evidence/p6-dmesg-full.log` + 实测 `eth0` rx=0、`lan1` tx MIB 恒 0 |
+| F2 | 我们的 25.12.6 有线不通 | 冷启动实测（`work/evidence/r18-coldboot1.log`）：`ping -c 3 192.168.1.100` → `100% packet loss`；`eth0` rx_packets=0 tx=41 |
+| F5 | **`lan1` 的计数器是交换机硬件 MIB，不是软件计数** | rtl8365mb 提供 `.get_stats64`，DSA 用户口的 `/proc/net/dev` 取自交换机 MIB。冷启动 `lan1: rx=172(多播 139) tx=0` 只能说明「线缆/PHY 收到 172 个帧」，**不能**说明交换机把帧交给了 CPU（那是 `eth0 rx`）|
+| F6 | CPU 口 SerDes 时钟确实为 0 | 冷启动实测 `gmac1_tx_clk_src=0` / `gcc_uniphy_{ahb,sys,rx,tx}_clk en=0`，而同族 `gmac0_tx_clk_src=125000000`；`/sys/bus/platform/devices/` 有 `98000.ethernet-pcs` 但**无驱动绑定**（只有 `qcom-uniphy-pcie`）|
 | F3 | 两边 U-Boot 都成功初始化交换机和 SerDes | u-boot 原文：`rtk_switch_init ret = 0` · `Set RTL8367 SGMII 2.5Gbps` · `rtk_port_macForceLinkExt_set ret = 0` · `rtk_port_sgmiiNway_set ret = 0` |
-| F4 | `CONFIG_PCS_QCA_UNIPHY` **不是**变量 | S7 的 `/root/kf/linux-6.18.55/.config:2598` 也是 `# CONFIG_PCS_QCA_UNIPHY is not set`，而 S7 有线通（F1） |
+| F4 | `CONFIG_PCS_QCA_UNIPHY` 在两版 `.config` 里**都是 n** | S7 的 `/root/kf/linux-6.18.55/.config:2598` 也是 `# CONFIG_PCS_QCA_UNIPHY is not set` |
 
 ## 2. 三层差异表（只列差异行）
 
@@ -113,29 +115,36 @@ gcc_uniphy_{ahb,sys,rx,tx}_clk  en=0
 
 | 代号 | 候选 | 状态 |
 |---|---|---|
-| H1 | **之前的"不通"测量被我们自己的实验污染**：曾设 `bridge/vlan_filtering=1`、`unbind/bind` 驱动、`br-lan` 挂双 IP（192.168.8.1 + 192.168.1.1）、把 IP 直配 lan1。这些都可能把交换机留在坏状态，而软重启不重置交换机寄存器 | **未验证（最可疑）** |
-| H2 | 6.18 的 rtl8365mb 四文件 SerDes 驱动在 6.12 DSA 核心下 CPU 口 SerDes 未被正确编程（源码同、核心不同） | 未验证 |
-| H3 | 时钟父链（§3.2） | 不足以解释差异 |
+| H1 | 之前的"不通"测量被我们自己的实验污染（`vlan_filtering=1`、unbind/bind、br-lan 双 IP…） | **已排除**：2026-11-05 断电冷启动、未改任何配置，E0 仍 `100% packet loss`、`eth0 rx=0` / `lan1 tx=0`（`work/evidence/r18-coldboot1.log`） |
+| H2 | 6.18 的 rtl8365mb 四文件 SerDes 驱动在 6.12 DSA 核心下 CPU 口 SerDes 未被正确编程（源码同、核心不同） | 未验证。`net/dsa/switch.c` 的 VLAN/CPU-port 路径两版逐行相同（已比对），嫌疑下降 |
+| H3 | 时钟父链：`gmac1_{rx,tx}_clk_src` 父时钟解析不到 ⇒ SGMII 侧无 125 MHz ⇒ CPU 口物理上收发全死 | **当前主嫌**（F6 有硬件证据，与"交换机 MIB 收到 173 帧但 eth0 rx=0"一致）。PCS=y 的实验从未真跑过，见 E4 |
 
 ## 5. 板子回来后的实验序列（一次一个变量）
 
-**E0（先做，零风险）** 冷启动后**什么都不改**，直接测：
+**E0 — 已执行（2026-11-05）**：断电冷启动、未改任何配置：
 
-```sh
-# 板上
-cat /proc/net/dev | grep -E 'eth0|lan1'
-ping -c 2 -W 2 192.168.1.100            # 或 192.168.8.100
-cat /proc/net/dev | grep -E 'eth0|lan1'
 ```
-判据：`eth0` rx > 0 且 `lan1` tx > 0 ⇒ 有线本来就是通的，H1 成立，
-之前一切"不通"都是实验污染。若仍为 0 ⇒ H1 排除，进 E1。
+eth0:  rx 0        tx 41
+lan1:  rx 172(多播139)  tx 0      # 交换机硬件 MIB
+ping -c 3 192.168.1.100 -> 100% packet loss
+```
 
-**E1（区分内核/用户态，不写 flash）** U-Boot 里
-`tftpboot 0x44000000 s7k.bin ; bootm 0x44000000`
-（S7 内核 + 我们 rootfs；TFTP 根已放好 `s7k.bin` = 冻结的 S7 kernel ITB）。
-起来后读同一份 `clk_summary` 与 `/proc/net/dev`，再 ping。
-- S7 内核 + 我们 rootfs **通** ⇒ 差异在内核 ⇒ 进 E2 定位（H3/H2）
-- **不通** ⇒ 差异在 rootfs/userspace（H1 的一种）⇒ 进 E3
+⇒ H1 排除；`lan1 rx` 不能证明"交换机→CPU 通"（它是交换机 MIB，见 F5）。
+
+**E4（下一步，零 flash 写入）**：用 `CONFIG_PCS_QCA_UNIPHY=y` 重编内核，
+把生成的 **initramfs ITB** 放 TFTP 根，U-Boot 里 `tftpboot 0x46000000 …; bootm 0x46000000`。
+判据（三条，逐条看）：
+1. dmesg 出现 `qca-uniphy` probe 成功、`98000.ethernet-pcs` 绑上驱动
+2. `clk_summary` 里 `gmac1_tx_clk_src` 从 0 变 125000000、`gcc_uniphy_*` en>0
+3. `ping 192.168.1.100` 通、`eth0 rx` 开始涨
+三条全成立 ⇒ H3 定案，把它合入正式构建（并同步三处：config-default、apply-to-2512.sh、
+`files/pcs-qca-uniphy.c` 的 6.12 补丁，后者已在仓库里）。
+若不成立 ⇒ H3 否掉，转 H2。
+
+**E1（区分内核/用户态）** U-Boot 里 `tftpboot 0x44000000 s7k.bin ; bootm 0x44000000`
+（S7 内核 + 我们 rootfs；TFTP 根已放 `s7k.bin`）。注意：S7 内核版本与我们的
+`rtl8365mb.ko` vermagic 不匹配 ⇒ 该实验只能观察 `clk_summary` 与 gmac 行为，
+不适合验证交换机转发。
 
 **E2** 只回退 `0722`（恢复 6.18 的 `.index = DT_UNIPHY_RX_CLK/TX_CLK`），重编内核，
 看 `gmac1_tx_clk_src` 是否变 125 MHz、有线是否通。单一变量。
