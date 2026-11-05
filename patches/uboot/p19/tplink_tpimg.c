@@ -18,6 +18,11 @@
 
 const u8 tpimg_magic[8] = { 0x00, 0x00, 0x01, 0x00, 0x55, 0xaa, 0x9d, 0xd1 };
 
+/* 网页刷 u-boot 时写入哪几个槽：0=两槽（默认） 1=只 image_1 2=只 image_2
+ * 由 failsafe/modules/upgrade.c 在 /upload 阶段按前端表单设定；
+ * u-boot 命令行 `tpluboot` 不走它，永远是两槽都写。 */
+int tpimg_uboot_target = TPIMG_UBOOT_TARGET_BOTH;
+
 #define TPIMG_ALIGN_UP(x, a)  (((x) + (a) - 1) & ~((a) - 1))
 
 /* ARM32 不允许非对齐 32 位访问，逐字节拼 */
@@ -214,7 +219,11 @@ int tpimg_parse_factory(const void *addr, ulong size, struct tpimg_info *info,
 	}
 
 	fit = b + TPFACT_KERNEL_OFF;
-	if (be32(fit) != 0xEDFE0DD0) {
+	/* DTB/FIT magic 的大端值是 0xD00DFEED（字节 d0 0d fe ed）。
+	 * 注意别写成 0xEDFE0DD0 —— 那是同一串字节按小端读出来的值，
+	 * fw_dec.h 的 HEADER_MAGIC_FIT 用的就是小端口径（配合 *(u32*) 原生读），
+	 * 这里用 be32() 逐字节拼，口径相反，混用会永远不等 —— P19 真踩过。 */
+	if (be32(fit) != 0xD00DFEED) {
 		*err = "factory_no_fit";
 		printf("tpimg: no FIT magic at 0x%x (got 0x%08x),"
 		       " this factory layout is not the known one\n",
@@ -584,15 +593,31 @@ int tpimg_uboot_write(const void *addr, u8 *hdr_buf, const char **err)
 {
 	u8 sum[16];
 	int ret;
+	bool w1, w2;
+
+	/* 前端可选只写一个槽；默认两槽都写 */
+	switch (tpimg_uboot_target) {
+	case TPIMG_UBOOT_TARGET_IMAGE1:
+		w1 = true;  w2 = false;
+		break;
+	case TPIMG_UBOOT_TARGET_IMAGE2:
+		w1 = false; w2 = true;
+		break;
+	default:
+		w1 = true;  w2 = true;
+		break;
+	}
 
 	/* 新摘要先算好，再动 flash */
 	md5((u8 *)addr, TPIMG_UBOOT_SLOT_LEN, sum);
 	print_digest("tpimg: new u-boot slot md5:", sum);
 
 	printf("\n********************************\n"
-	       " UPGRADING U-BOOT (image_2 then image_1)\n"
+	       " UPGRADING U-BOOT (%s%s%s)\n"
 	       " DO NOT POWER OFF DEVICE\n"
-	       "********************************\n");
+	       "********************************\n",
+	       w1 ? "image_1" : "", (w1 && w2) ? " + " : "",
+	       w2 ? "image_2" : "");
 
 	/* ★ 两槽都刷同一个镜像（这是双槽冗余的前提）
 	 *
@@ -608,14 +633,22 @@ int tpimg_uboot_write(const void *addr, u8 *hdr_buf, const char **err)
 				     addr, sum, hdr_buf, err);
 	if (ret)
 		goto fail;
+	if (!w2)
+		goto done;
 	ret = tpimg_uboot_write_slot(TPIMG_B_SLOT_ADDR, TPIMG_B_HDR_ADDR,
 				     addr, sum, hdr_buf, err);
 	if (ret)
 		goto fail;
 
-	puts("\ntpimg: BOTH u-boot slots written and re-signed"
-	     " (image_1 + image_2)\n"
-	     "tpimg: dual-slot redundancy intact, reset to boot it\n");
+done:
+	if (w1 && w2)
+		puts("\ntpimg: BOTH u-boot slots written and re-signed"
+		     " (image_1 + image_2)\n"
+		     "tpimg: dual-slot redundancy intact, reset to boot it\n");
+	else
+		printf("\ntpimg: only %s written and re-signed\n"
+		       "tpimg: the other slot still holds the previous image\n",
+		       w1 ? "image_1" : "image_2");
 	return 0;
 
 fail:
@@ -868,6 +901,111 @@ int tpimg_selfcheck(void)
 	return rc;
 }
 
+/* -------------------- 静默槽位状态（给网页用） -------------------- */
+
+/* boot_flag 分区：0x4000000 / 0x20000，首 8 字节 = 魔数 55aa4246 + 当前槽号。
+ * 实测值 55aa4246 00000002 出现在跑 image_2 的时候（2026-11-06）。
+ * 注意它只是「一级 u-boot 上次决定启动谁」的旁证，不是本进程的身份，
+ * 所以 JSON 里要带 assumed:true。 */
+#define TPIMG_BOOT_FLAG_OFF	0x04000000u
+#define TPIMG_BOOT_FLAG_MAGIC	0x55aa4246u
+
+/* 读一个槽的状态，全程不打印 */
+static void status_one_slot(struct tpimg_slot_state *st, u32 hdr_addr,
+			    u32 slot_addr, u8 *hdr_buf, u8 *slot_buf)
+{
+	nand_info_t *nand = &nand_info[CONFIG_NAND_FLASH_INFO_IDX];
+	size_t len = TPIMG_HDR_LEN;
+	u8 sum[16];
+	u8 *dec;
+	SizeT dsz;
+	int i;
+
+	memset(st, 0, sizeof(*st));
+
+	if (nand_read(nand, hdr_addr, &len, hdr_buf) || len != TPIMG_HDR_LEN)
+		return;
+	if (memcmp(hdr_buf, tpimg_magic, 8))
+		return;
+	if (be32(hdr_buf + TPIMG_F_UBOOT_OFF) != slot_addr ||
+	    be32(hdr_buf + TPIMG_F_UBOOT_LEN) != TPIMG_UBOOT_SLOT_LEN)
+		return;
+	st->hdr_ok = 1;
+
+	for (i = 0; i < 16; i++)
+		sprintf(st->md5 + i * 2, "%02x", hdr_buf[TPIMG_F_MD5_UBOOT + i]);
+	st->md5[32] = 0;
+
+	len = TPIMG_UBOOT_SLOT_LEN;
+	if (nand_read(nand, slot_addr, &len, slot_buf) ||
+	    len != TPIMG_UBOOT_SLOT_LEN)
+		return;
+
+	md5(slot_buf, TPIMG_UBOOT_SLOT_LEN, sum);
+	st->md5_match = !memcmp(sum, hdr_buf + TPIMG_F_MD5_UBOOT, 16);
+
+	dec = malloc(TPIMG_UBOOT_DEC_CAP);
+	if (!dec)
+		return;
+	dsz = TPIMG_UBOOT_DEC_CAP;
+	if (!lzmaBuffToBuffDecompress(dec, &dsz, slot_buf,
+				      TPIMG_UBOOT_SLOT_LEN - 1) &&
+	    uboot_image_sane(dec, dsz))
+		st->decode_ok = 1;
+	free(dec);
+}
+
+int tpimg_get_status(struct tpimg_status *st)
+{
+	nand_info_t *nand = &nand_info[CONFIG_NAND_FLASH_INFO_IDX];
+	u8 *hdr, *slot;
+	size_t len = TPIMG_HDR_LEN;
+	u8 bf[16];
+
+	if (!st)
+		return -1;
+	memset(st, 0, sizeof(*st));
+
+	hdr = malloc(TPIMG_HDR_LEN);
+	slot = malloc(TPIMG_UBOOT_SLOT_LEN);
+	if (!hdr || !slot) {
+		free(hdr);
+		free(slot);
+		return -1;
+	}
+
+	status_one_slot(&st->slot[0], TPIMG_B_HDR_ADDR, TPIMG_B_SLOT_ADDR,
+			hdr, slot);
+	status_one_slot(&st->slot[1], WTA301_TPHDR_OFF, WTA301_UBOOT_OFF,
+			hdr, slot);
+	free(slot);
+
+	/* boot_flag */
+	len = sizeof(bf);
+	if (!nand_read(nand, TPIMG_BOOT_FLAG_OFF, &len, bf) &&
+	    len == sizeof(bf) && be32(bf) == TPIMG_BOOT_FLAG_MAGIC) {
+		st->boot_flag_ok = 1;
+		st->boot_flag_slot = be32(bf + 4);
+	}
+
+	/* 内核/rootfs 实际来自哪个槽：tpimg_boot_slot() 先试 image_2 再试 image_1 */
+	len = TPIMG_HDR_LEN;
+	if (!nand_read(nand, WTA301_TPHDR_OFF, &len, hdr) &&
+	    len == TPIMG_HDR_LEN && !memcmp(hdr, tpimg_magic, 8) &&
+	    be32(hdr + TPIMG_F_KERNEL_LEN) && be32(hdr + TPIMG_F_ROOTFS_VERIFY))
+		st->fw_slot = 2;
+	else if (!nand_read(nand, TPIMG_B_HDR_ADDR, &len, hdr) &&
+		 len == TPIMG_HDR_LEN && !memcmp(hdr, tpimg_magic, 8) &&
+		 be32(hdr + TPIMG_F_KERNEL_LEN) &&
+		 be32(hdr + TPIMG_F_ROOTFS_VERIFY))
+		st->fw_slot = 1;
+	else
+		st->fw_slot = 0;
+
+	free(hdr);
+	return 0;
+}
+
 static int do_tplcheck(cmd_tbl_t *cmdtp, int flag, int argc, char * const argv[])
 {
 	(void)argc;
@@ -902,6 +1040,8 @@ static int do_tpluboot(cmd_tbl_t *cmdtp, int flag, int argc, char * const argv[]
 		return CMD_RET_SUCCESS;
 	}
 
+	/* 命令行 tpluboot 永远两槽都写，不受网页那套三选一影响 */
+	tpimg_uboot_target = TPIMG_UBOOT_TARGET_BOTH;
 	ret = tpimg_uboot_write((void *)addr, tplflash_hdr, &err);
 	if (ret) {
 		printf("tpluboot: write failed (%s)\n", err);
