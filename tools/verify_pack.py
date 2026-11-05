@@ -10,13 +10,14 @@
   2. op_rootfs_*.bin    squashfs 魔数 / 尾部 0xFF 补齐 / 真实长度不超槽
   3. op_tphdr_*.bin     0x48..0x68 七字段符合本板契约
                         +0x90 = md5(二级 u-boot 槽)；+0xa0 = md5(kernel[0:KLEN] ‖ rootfs[0:RLEN])
-  4. ubi_*.img          UBI# 魔数 / PEB 数 / 卷名 rootfs_data / vtable CRC
+  4. ubi_*.img          UBI# 魔数 / PEB 数 / 卷名（rootfs_data 或 fstools_overlay_name）/ vtable CRC
 
 这些判据来自 docs/P3-PACK-CONTRACT.md，改动契约时必须同步改这里。
 """
 import argparse
 import glob
 import hashlib
+import json
 import os
 import struct
 import sys
@@ -142,7 +143,27 @@ def check_tphdr(path, k, r, uboot):
         info('+0x90 u-boot md5 %s（未给 --uboot，跳过比对）' % d[0x90:0xa0].hex())
 
 
-def check_ubi(path):
+def _cmdline_overlay_name(d):
+    """从包内 FINGERPRINT.json 的 bootargs 取 fstools_overlay_name 的值。
+
+    25.12.6 的 fstools 并非“只认死名”：mount_root.c 会读 /proc/cmdline 的
+    fstools_overlay_name 并传给 volume_find()。所以卷名叫 wta301data 完全合法，
+    只要 bootargs 里的同名参数一起刷进去（真机 P9 已验证）。
+    """
+    fp = os.path.join(d, 'FINGERPRINT.json')
+    if not os.path.exists(fp):
+        return None
+    try:
+        ba = json.load(open(fp, encoding='utf-8')).get('bootargs', '') or ''
+    except Exception:
+        return None
+    for tok in ba.split():
+        if tok.startswith('fstools_overlay_name='):
+            return tok.split('=', 1)[1]
+    return None
+
+
+def check_ubi(path, allow_name=None):
     d = open(path, 'rb').read()
     info('%s  %d B  %d PEB' % (os.path.basename(path), len(d), len(d) // 0x20000))
     if len(d) % 0x20000:
@@ -159,8 +180,13 @@ def check_ubi(path):
     info('vtable: 卷名 %r  reserved_pebs %d  alignment %d  data_pad %d  '
          'vol_type %d  flags 0x%02x  crc %s'
          % (name, res, align, pad, vt, flags, '✓' if crc == calc else '*** 不符'))
-    if name != 'rootfs_data':
-        bad('卷名必须是 rootfs_data（25.12.6 的 fstools 写死只认这个名字）')
+    if name == 'rootfs_data':
+        info("卷名 'rootfs_data' —— fstools 默认认的名字")
+    elif name == allow_name:
+        info("卷名 %r —— 与 bootargs 的 fstools_overlay_name 一致（2.24+fstools 支持）" % name)
+    else:
+        bad("卷名 %r 既不等于 'rootfs_data'，也不等于 bootargs 里的 "
+            "fstools_overlay_name（%r）⇒ 首启不会挂这个卷做 overlay" % (name, allow_name))
     if crc != calc:
         bad('vtable CRC 不符')
     if not (flags & 0x01):
@@ -188,7 +214,7 @@ def main():
     print('== 4. ubi ==')
     up = only('ubi_*.img', d)
     if up:
-        check_ubi(up)
+        check_ubi(up, _cmdline_overlay_name(d))
     print('\n== 结果 ==')
     print('  PASS' if ok else '  FAIL')
     return 0 if ok else 1
