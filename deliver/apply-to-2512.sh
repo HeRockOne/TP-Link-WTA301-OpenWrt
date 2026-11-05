@@ -121,4 +121,29 @@ cp -f "$BDF/board2-wta301-ipq5018-2g.bin"  $T/ipq50xx/base-files/lib/firmware/at
 cp -f "$BDF/board2-wta301-qcn6122-5g.bin"  $T/ipq50xx/base-files/lib/firmware/ath11k/QCN6122/hw1.0/board-2.bin
 md5sum $T/ipq50xx/base-files/lib/firmware/ath11k/*/hw1.0/board-2.bin
 
-echo "== DONE =="
+echo "== 5b. fstools 补丁：mount_root done 也要认 fstools_overlay_name =="
+# 致命缺陷（真机已实证）：我们的 overlay UBI 卷名叫 wta301data，
+# fstools 的 start() 会读 /proc/cmdline 的 fstools_overlay_name 找到它，
+# 但 done() 仍用字面量 volume_find("rootfs_data") -> NULL -> 提前 return，
+# 于是 fs_state_set("/overlay", READY) 永不执行。后果：每次启动都走
+# FS_STATE_UNKNOWN -> PENDING -> overlay_delete()，把整个 overlay 擦掉重做，
+# 用户改的任何东西都不过重启（实测：写 /root/persist.txt + 改 hostname，
+# 重启后全丢；dmesg 每次都有 "overlay filesystem has not been fully initialized yet"）。
+# 不能改回卷名 rootfs_data：rootdisk.c:166 硬编码只认这个名字，会把 mtdsplit 的
+# rootfs_data 分区抢到手。S7 的 fstools 没有这个 bug（其日志 0 条该消息）-> 这是回归。
+# 详见 wta301-2512/docs/P11-OVERLAY-PERSISTENCE.md
+mkdir -p /root/ow2512/package/system/fstools/patches
+cp -f $SRC/patches/fstools/0001-mount_root-done-honor-fstools_overlay_name.patch \
+      /root/ow2512/package/system/fstools/patches/
+ls -l /root/ow2512/package/system/fstools/patches/
+
+# 补丁变了要强制重编 fstools（OpenWrt 不会因为 patches/ 变动自动 clean）
+# 判据：打完补丁后 mount_root.c 里 volume_find(dataname) 必须出现 **2 次**
+# （start() 一次 + done() 一次）。不要用 'dataname = dataparam' 判，因为 start() 里本来就有。
+N=$(grep -c 'volume_find(dataname)' /root/ow2512/build_dir/target-*/fstools-*/mount_root.c 2>/dev/null | head -1)
+if [ "$N" != "2" ]; then
+	echo "fstools 源码尚未含补丁 (volume_find(dataname) x$N) -> clean 以便重新应用"
+	( cd /root/ow2512 && make package/system/fstools/clean >/dev/null 2>&1 )
+fi
+
+ echo "== DONE =="
