@@ -1,0 +1,38 @@
+{
+  "op_kernel_0x480000.bin": {
+    "size": 4718592,
+    "crc32": "4131c6d0",
+    "md5": "842d204e915a4660541e964229e21f09"
+  },
+  "op_rootfs_0xbc0000.bin": {
+    "size": 12320768,
+    "crc32": "0112e226",
+    "md5": "a1881bccea236586f0da775659db0426"
+  },
+  "op_tphdr_0x20000.bin": {
+    "size": 131072,
+    "crc32": "d343b30c",
+    "md5": "7cf8185682493b95115f1c81b5388f85"
+  },
+  "ubi_rootfs_data3_wta301data.img": {
+    "size": 1966080,
+    "crc32": "c8ca6022",
+    "md5": "73b079fbbcddafd43620ecb1fdb4977a"
+  },
+  "version": "P17",
+  "stage": "P17",
+  "purpose": "Argon 主题 + 界面锁中文 + 按键归因修正(内核不变)",
+  "bootargs": "root=/dev/mtdblock6 rootfstype=squashfs rootwait coherent_pool=2M ubi.mtd=rootfs_data3 fstools_overlay_name=wta301data",
+  "rollback": {
+    "to": "S7",
+    "kernel_crc32": "53bd0490",
+    "rootfs_crc32": "c2e227c6",
+    "tphdr_crc32": "3ccbcfc4"
+  },
+  "op_single_0x4800000.bin": {
+    "size": 20447232,
+    "crc32": "5af01327",
+    "md5": "2102f7ca25d5a4370a27584fa89bbf7f",
+    "note": "tphdr+kernel+rootfs 连续镜像，覆盖 0x4800000..0x5b80000，一次 erase+write"
+  }
+}

@@ -1,0 +1,6 @@
+printenv ;tftpboot 0x44000000 op_single_0x4800000.bin
+printenv ;crc32 0x44000000 0x1380000
+printenv ;nand erase 0x4800000 0x1380000
+printenv ;nand write 0x44000000 0x4800000 0x1380000
+printenv ;nand read 0x43000000 0x4800000 0x1380000
+printenv ;crc32 0x43000000 0x1380000
