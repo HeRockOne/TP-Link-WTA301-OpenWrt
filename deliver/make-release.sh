@@ -48,23 +48,30 @@ python3 $W/work/op-build/mk_op_pack.py --kernel "$K" --root "$R" --outdir $OUT/p
         --kblk 0x480000 \
         --uboot $W/work/backup/mtd4_normal_boot.bin || die "mk_op_pack 失败"
 
-echo "== 5. UBI overlay：现造空卷，卷名必须是 rootfs_data =="
-# 为什么不能用冻结的 S7 镜像：它的卷名是 `wta301data`（S7 的 fstools 打过 fstools_overlay_name 补丁）。
-# 25.12.6 的 fstools 写死只认 `rootfs_data`（libfstools/rootdisk.c:166 strcmp(name,"rootfs_data")），
-# 且 ubi.c 里没有 volume_create ⇒ 卷名不对 = 首启无 overlay（只读系统）。
-# 几何必须与冻结镜像一致：2048/LEB 126976(0x1f000)/PEB 131072/subpage 2048，autoresize。
+echo "== 5. UBI overlay：现造空卷，卷名必须是 wta301data =="
+# 卷名由 bootargs 的 fstools_overlay_name=wta301data 决定（与 S7 逐字一致）。
+# 25.12.6 的 fstools 确实支持该参数：mount_root.c:42
+#     if (get_var_from_file("/proc/cmdline", "fstools_overlay_name", dataparam, ...))
+#         dataname = dataparam;
+#     data = volume_find(dataname);
+# get_var_from_file 按 '=' 取 value ⇒ 卷名必须是 wta301data，不能是 rootfs_data。
+# 若卷名写成 rootfs_data，volume_find("wta301data") 找不到 ⇒ 落到 rootdisk driver
+# （把 squashfs 尾部剩余空间当 overlay，本板 = mtd7 仅 3.6MB）⇒ 首启无 overlay。
+# 几何必须与 S7 冻结镜像一致：2048/LEB 126976(0x1f000)/PEB 131072/subpage 2048/autoresize。
 HOSTBIN=/root/nss-edma/staging_dir/host/bin
+UBIVOL=wta301data
+UBIIMG=ubi_rootfs_data3_$UBIVOL.img
 if [ -x "$HOSTBIN/mkfs.ubifs" ] && [ -x "$HOSTBIN/ubinize" ]; then
     rm -rf $OUT/ubitmp && mkdir -p $OUT/ubitmp/empty
     $HOSTBIN/mkfs.ubifs -m 2048 -e 126976 -c 289 -F -x zlib -r $OUT/ubitmp/empty \
         -o $OUT/ubitmp/ubifs.img > /dev/null 2>&1 || die "mkfs.ubifs 失败"
-    printf '[rootfs_data]\nmode=ubi\nimage=%s\nvol_id=0\nvol_type=dynamic\nvol_name=rootfs_data\nvol_flags=autoresize\n' \
-        $OUT/ubitmp/ubifs.img > $OUT/ubitmp/ubinize.cfg
-    $HOSTBIN/ubinize -o $OUT/pack/ubi_rootfs_data3_rootfs_data.img \
+    printf '[%s]\nmode=ubi\nimage=%s\nvol_id=0\nvol_type=dynamic\nvol_name=%s\nvol_flags=autoresize\n' \
+        $UBIVOL $OUT/ubitmp/ubifs.img $UBIVOL > $OUT/ubitmp/ubinize.cfg
+    $HOSTBIN/ubinize -o $OUT/pack/$UBIIMG \
         -m 2048 -p 131072 -s 2048 -O 2048 $OUT/ubitmp/ubinize.cfg > /dev/null 2>&1 \
         || die "ubinize 失败"
     rm -rf $OUT/ubitmp
-    echo "  已生成 ubi_rootfs_data3_rootfs_data.img  $(stat -c%s $OUT/pack/ubi_rootfs_data3_rootfs_data.img) B"
+    echo "  已生成 $UBIIMG  $(stat -c%s $OUT/pack/$UBIIMG) B"
 else
     die "找不到 mkfs.ubifs/ubinize（$HOSTBIN）"
 fi
@@ -72,7 +79,6 @@ fi
 # 把 UBI 区补进刷写序列：mk_op_pack 只产 kernel/rootfs/tphdr 三区，
 # 但 overlay 区必须一起刷（否则仍是 S7 的 /etc/config，会污染首启网络与无线配置）。
 # 顺序：kernel -> rootfs -> ubi -> tphdr（tphdr 最后，头一改校验就变）。
-UBIIMG=ubi_rootfs_data3_rootfs_data.img
 UBILEN=$(stat -c%s $OUT/pack/$UBIIMG)
 UBILENHEX=$(printf '0x%x' $UBILEN)
 python3 - "$OUT/pack/flash_cmds.txt" "$UBILENHEX" "$UBIIMG" <<'PYEOF'

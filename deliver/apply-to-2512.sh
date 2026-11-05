@@ -24,6 +24,21 @@ mkdir -p $T/files
 cp -a $SRC/files/. $T/files/
 find $T/files -name '*ipq5018*' -o -name 'pcs-qca-uniphy*' -o -name 'qca-uniphy.h' | sort
 
+# --- R17: RTL8367S SerDes 驱动（搬自 S7 实测可用的 6.18.55 树）---
+# files/ 只在「解压内核」时 overlay。若内核树已解压过，必须显式同步，
+# 否则改的驱动不会进编译（build_dir 里还是旧文件）。
+for kd in /root/ow2512/build_dir/target-*/linux-*/linux-6.12.*; do
+  [ -d "$kd/drivers/net/dsa/realtek" ] || continue
+  echo "   同步到 $kd/drivers/net/dsa/realtek"
+  cp -f $T/files/drivers/net/dsa/realtek/*.c  $kd/drivers/net/dsa/realtek/
+  cp -f $T/files/drivers/net/dsa/realtek/*.h  $kd/drivers/net/dsa/realtek/
+  cp -f $T/files/drivers/net/dsa/realtek/Makefile $kd/drivers/net/dsa/realtek/
+  cp -f $T/files/drivers/net/dsa/realtek/Kconfig  $kd/drivers/net/dsa/realtek/
+  # S7 是四文件拆分版（main/table/vlan/l2）；旧单文件留着不参与构建，但删掉更干净
+  rm -f $kd/drivers/net/dsa/realtek/rtl8365mb.c
+  rm -f $kd/drivers/net/dsa/realtek/*.o $kd/drivers/net/dsa/realtek/*.ko
+done
+
 echo "== 3. config-default 追加 5 行 =="
 if ! grep -q 'CONFIG_DWMAC_IPQ5018' $T/ipq50xx/config-default; then
 cat >> $T/ipq50xx/config-default <<'EOF'
