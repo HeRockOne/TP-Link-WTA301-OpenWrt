@@ -110,6 +110,75 @@ sed -i 's|^# CONFIG_PCS_QCA_UNIPHY is not set$|CONFIG_PCS_QCA_UNIPHY=y|' $T/ipq5
 grep -q '^CONFIG_PCS_QCA_UNIPHY=y$' $T/ipq50xx/config-default || echo 'CONFIG_PCS_QCA_UNIPHY=y' >> $T/ipq50xx/config-default
 echo "PCS_QCA_UNIPHY => $(grep -n 'PCS_QCA_UNIPHY' $T/ipq50xx/config-default)"
 
+# 幂等强制：物理按键（reset/wps）。
+# 上面那个大块有 `if ! grep -q 'CONFIG_DWMAC_IPQ5018'` 护卫，树里已经有该 symbol
+# 时整块都不会执行，所以新增 symbol 必须自己单独幂等追加。
+# 25.12.6 的 qualcommax/ipq50xx config-default 把 CONFIG_INPUT 关掉了，
+# 导致 dts 里的 `keys { compatible = "gpio-keys"; }` 根本不会注册：
+#   dmesg 无 gpio-keys、/proc/bus/input/devices 不存在
+#   ⇒ /etc/rc.button/{reset,wps} 虽然存在但永远不被触发
+# 三方实情（docs/M05-KEYS-THREE-WAY.md）：原厂走私有 slp_gpio 字符设备；
+# S7 的 .config 有 INPUT=m 但 rootfs 一个 input 模块都没有 ⇒ S7 按键也从未工作。
+# 所以这里是「超越基线的改进」（用户已明确选 B），不是恢复基线。
+for sym in CONFIG_INPUT=y CONFIG_INPUT_EVDEV=y CONFIG_KEYBOARD_GPIO=y CONFIG_INPUT_MISC=y; do
+	name=${sym%%=*}
+	if ! grep -q "^${name}=y$" $T/ipq50xx/config-default; then
+		sed -i "/^# ${name} is not set$/d" $T/ipq50xx/config-default
+		echo "$sym" >> $T/ipq50xx/config-default
+	fi
+done
+echo "KEY/INPUT => $(grep -cE '^CONFIG_(INPUT|INPUT_EVDEV|KEYBOARD_GPIO|INPUT_MISC)=y$' $T/ipq50xx/config-default)/4"
+
+# 幂等强制：软件包 feed + 中文界面 + 家用 QoS（见 docs/P12-PACKAGE-FEED-STATUS.md）。
+# 缺口 A：25.12.6 的 include/feeds.mk:49-59 FeedSourcesAppendAPK 里
+#   luci/packages/routing/telephony 这几行要 CONFIG_FEED_<name>=y 才写，
+#   而 qualcommax/ipq50xx config-default 全是 `is not set`，
+#   导致板上 /etc/apk/repositories.d/distfeeds.list 只有 2 行，
+#   `apk add luci-app-*` 连包名都搜不到。
+# 缺口 B：kmod-* 永远不可能从官方 feed 装（vermagic 由内核 .config hash 得出，
+#   官方 6.12.112-1-175dffd3… vs 我们 6.12.112~e98ab909…），所以
+#   家用 QoS 这类依赖内核模块的功能必须直接编进固件，不能指望 feed。
+#   rootfs 预算：mtd6 分区 12MiB（0xC00000），实测 squashfs 本体 8,722,096B=8.32MiB
+#   ⇒ 可增长上限 0xC00000-8722096 = 3,758,896B = **3.58MiB**（超过就装不进分区）。
+#   本块 5 个 zh-cn 的源 po 合计 782,272B，编译后 lmo 约 1/3 ⇒ ~250KiB，安全。
+#   overlay 另有 27.8MiB 可写（/dev/ubi0_0，ubinfo 印证），但只读 rootfs 才是离线可用路径。
+#
+# CONFIG_PACKAGE_ 形式已验证有效：tmp/.config-package.in 里选项是 **TAB 缩进**的
+#   `\tconfig PACKAGE_luci-i18n-base-zh-cn`，用 `^config ` 锚定会误判 0 条（已踩）。
+# 同理 `tc` 不是包名，真名 tc-tiny/tc-full/tc-bpf；且 sqm-scripts 已 select
+#   tc-tiny / kmod-ifb / kmod-sched-cake / iptables-mod-ipopt / iptables-nft / ip-tiny，
+#   这里显式写一遍只为自文档，选 tc-tiny 与 select 条件一致（不会拉 tc-full）。
+#
+# 中文界面：内置进固件而不是靠 feed 装，三个理由
+#   1) feeds/luci 的 luci.mk:78 `LUCI_LC_ALIAS.zh_Hans=zh-cn` ⇒ 包名为 luci-i18n-<basename>-zh-cn
+#   2) 板上 /etc/config/luci 已是 `option lang 'auto'` ⇒ 装了即按浏览器语言自动切中文
+#   3) 内置版本与树内 luci-base 同源，不会像装官方 feed 那样跨版本（我们 26.288 vs feed 26.304）
+#   4) 不用 `CONFIG_LUCI_LANG_zh_Hans=y` 一行开全：那会拉 100 个包约 4.6MiB，
+#      而 rootfs 分区硬预算 3.58MiB（见上）。PACKAGE_luci-i18n-*-zh-cn 的 Kconfig 是
+#      `default LUCI_LANG_zh_Hans||(ALL&&m)`，所以不设总开关时只能逐个点，正是我们要的。
+#   实测我们的树里有 po/zh_Hans 且与本板已装 luci 模块对得上的共 5 个：
+#   base / firewall / package-manager / dashboard / sqm
+#   （luci-mod-{network,status,system,admin-full} 自 LuCI 21.02 起文案并入 luci-base）
+for sym in CONFIG_FEED_packages=y CONFIG_FEED_luci=y CONFIG_FEED_routing=y \
+           CONFIG_FEED_telephony=y \
+           CONFIG_PACKAGE_luci-i18n-base-zh-cn=y \
+           CONFIG_PACKAGE_luci-i18n-firewall-zh-cn=y \
+           CONFIG_PACKAGE_luci-i18n-package-manager-zh-cn=y \
+           CONFIG_PACKAGE_luci-i18n-dashboard-zh-cn=y \
+           CONFIG_PACKAGE_luci-i18n-sqm-zh-cn=y \
+           CONFIG_PACKAGE_kmod-ifb=y CONFIG_PACKAGE_kmod-sched-cake=y \
+           CONFIG_PACKAGE_sqm-scripts=y CONFIG_PACKAGE_luci-app-sqm=y \
+           CONFIG_PACKAGE_tc-tiny=y; do
+	name=${sym%%=*}
+	if ! grep -q "^${name}=y$" $T/ipq50xx/config-default; then
+		sed -i "/^# ${name} is not set$/d" $T/ipq50xx/config-default
+		echo "$sym" >> $T/ipq50xx/config-default
+	fi
+done
+echo "FEED   => $(grep -cE '^CONFIG_FEED_[a-z]+=y$' $T/ipq50xx/config-default)/4"
+echo "ZH-CN  => $(grep -cE '^CONFIG_PACKAGE_luci-i18n-[a-z-]+-zh-cn=y$' $T/ipq50xx/config-default)/5"
+echo "SQM    => $(grep -cE '^CONFIG_PACKAGE_(kmod-ifb|kmod-sched-cake|sqm-scripts|luci-app-sqm|tc-tiny)=y$' $T/ipq50xx/config-default)/5"
+
 echo "== 4. 去掉 kmod-qca-nss-dp（我们不用 NSS/EDMA，纯 CPU 转发）=="
 if grep -q 'kmod-qca-nss-dp' $T/Makefile; then
 	sed -i 's/kmod-qca-nss-dp //' $T/Makefile
