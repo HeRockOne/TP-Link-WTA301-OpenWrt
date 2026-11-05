@@ -87,6 +87,20 @@ CONFIG_PCS_QCA_UNIPHY=y
 
 CONFIG_STMMAC_ETH=y
 CONFIG_STMMAC_PLATFORM=y
+
+# --- 物理按键（reset = KEY_RESTART, wps = KEY_WPS_BUTTON）---
+# 25.12.6 的 qualcommax/ipq50xx config-default 把 CONFIG_INPUT 关掉了，
+# 于是 dts 里的 `keys { compatible = "gpio-keys"; }` 根本不会被注册：
+#   dmesg 无 gpio-keys、/proc/bus/input/devices 不存在
+#   ⇒ /etc/rc.button/{reset,wps} 虽然存在，但永远不会被触发
+#   ⇒ 长按 reset 恢复出厂这条「免串口救援路径」是断的（家用必须有）
+# 三方比对：S7 的 6.18.55 .config 是 INPUT=m / INPUT_EVDEV=m / KEYBOARD_GPIO=m，
+# 也就是说这是我们的配置缺失，不是 6.12 的限制。
+# 这里用 =y 直接内建，避免再多一个 kmod 包与模块加载时序问题。
+CONFIG_INPUT=y
+CONFIG_INPUT_EVDEV=y
+CONFIG_KEYBOARD_GPIO=y
+CONFIG_INPUT_MISC=y
 EOF
 fi
 tail -12 $T/ipq50xx/config-default
