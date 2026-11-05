@@ -168,12 +168,40 @@ FIT 结构与 3 个 DTB 两端完全一致（见 `evidence/factory-dtb-extract.t
 | S7 `rootfs_data3` | `0x1bc0000`–`0x4000000` | `0x2440000` |
 
 原厂的 `rootfs_data_bak` 与 `rootfs_data` **是同一段物理区间**（原厂 bug 或故意别名）。
-我们把这段改名为 `rootfs_data2`（`0x6A00000`，152 LEB，**一字节未写** = 回退路径），
+我们把这段改名为 `rootfs_data2`（`0x6A00000`，152 LEB），
 另外在原厂 `rootfs` 结束（`0x1bc0000`）到 `boot_flag`（`0x4000000`）之间
 开辟 `rootfs_data3` 作为 **UBIFS overlay**。
 
 **判定：有意改动，已实证可行。** `rootfs_data3` 正好填满原厂 `rootfs_bak` 之后的空隙，
 不与任何原厂分区重叠。
+
+#### ⚠️ 修正（2026-11-05）：`rootfs_data2` 并非「一字节未写」
+
+本文早期版本写「`rootfs_data2` 一字节未写 = 回退路径」，**这个说法已不成立**。
+2026-11-05 P17 实况核对：
+
+```
+# 备份（2026-10-26 原厂全盘 flash_full_128M.bin @0x6a00000）
+55 42 49 23 01 00 00 00 | ec=0x01            | image_seq=0x03f15a1d
+# 现役 P17 板子 /dev/mtd8 首 64 字节
+55 42 49 23 01 00 00 00 | ec=0x16 (22)       | image_seq=0xce3594bd
+```
+
+`image_seq` 不同 ⇒ **不是同一个 UBI 实例**，即 `0x6a00000` 在 10-26 之后
+被某次早朝 OpenWrt 构建重新 `ubiformat` 过（`ec=22` 说明被挂载/写过约 22 次）。
+当前 `mount` 里没有它、`ubinfo -a` 只有 `ubi0`（= mtd12）⇒ **P17 不挂它、不写它**，
+但它里面**存着旧固件遗留的 UBIFS 数据（约 3.1 MB，压缩态无明文字符串）**。
+
+⇒ 结论修正为：
+
+| 项 | 原说法 | 实情 |
+|---|---|---|
+| `rootfs_data2` 内容 | 一字节未写（原厂干净） | 旧固件遗留 UBI，**不是干净原厂数据** |
+| 能否当「原厂回退资产」 | 是 | **否**。回退靠 PC 上的 `work/backup/` 里的文件 |
+| 能否当可用空空间 | 22 MB | **是**，22 MB，P17 不用它 |
+
+原厂数据真正存在的地方是 PC 上的文件：`work/backup/mtd8_firmware.bin`（原厂固件区）、
+`work/backup/flash_full_128M.bin`（10-26 全盘）。板子上的 `mtd8` 不是。
 
 ### 差异 4：`rootfs_data` 来自 mtdsplit
 

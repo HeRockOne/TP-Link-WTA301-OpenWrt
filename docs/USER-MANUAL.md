@@ -237,8 +237,47 @@ uci commit network && /etc/init.d/network reload
 | — | `0x4800000` | `0x0020000` | `0x4820000` | **tphdr** | 128 KB，**不在 /proc/mtd** |
 | mtd5 | `0x4880000` | 声明 `0x400000`<br>实写 `0x480000` | `0x4d00000` | kernel | 已用 |
 | mtd6 | `0x4fc0000` | 声明 `0xc00000`<br>实写 `0xbc0000` | `0x5b80000` | rootfs（squashfs 8.8 MB） | 已用 |
-| mtd7 | `0x5880000` | `0x0340000` | `0x5bc0000` | rootfs_data（原厂 overlay） | **与我们 rootfs 重叠，未挂载** |
-| mtd8 | `0x6a00000` | `0x1600000` | `0x8000000` | rootfs_data2 | **22 MB 空着，未挂载** |
+| mtd7 | `0x5880000` | `0x0340000` | `0x5bc0000` | rootfs_data（**mtdsplit 自动生成**） | 3.25 MB，未挂载 |
+| mtd8 | `0x6a00000` | `0x1600000` | `0x8000000` | rootfs_data2 | **22 MB，里面有旧固件遗留 UBI，P17 不挂不用** |
+
+### 5.1b 为什么 mtd7 / mtd8 不用？
+
+**mtd7 `rootfs_data` = mtdsplit 自动切的余量，不归我们管**
+
+DTS 里 mtd6 声明长度 `0xc00000`（12 MB），但真 squashfs 只有 8.75 MB（到
+`0x5880000` 为止）。内核的 `mtdsplit_squashfs` 读 squashfs 超块拿到真实
+`bytes_used`，把剩余 `0x340000`（3.25 MB）自动注册成 `rootfs_data`。
+⇒ **它的起点和大小随 rootfs 体积浮动**（原厂固件时是 `0x5b00000`/`0xc0000`，
+我们是 `0x5880000`/`0x340000`）。
+
+不用它的原因：它只有 3.25 MB 且位置会漂；我们的 overlay 是 `mtd12` 上的
+UBIFS（36 MB，起点固定 0x1bc0000，不与其他分区重叠）。
+
+**mtd8 `rootfs_data2` = 22 MB 空闲区（可回收利用）**
+
+它确实**不空**（里面有个 UBI），但那个 UBI 是**旧固件遗留**，不是原厂数据：
+
+```
+2026-10-26 原厂全盘备份 @0x6a00000:
+  55 42 49 23 01 00 00 00 | ec=0x01       | image_seq=0x03f15a1d
+2026-11-05 P17 板子 /dev/mtd8 首 64 字节:
+  55 42 49 23 01 00 00 00 | ec=0x16 (22)  | image_seq=0xce3594bd
+```
+
+`image_seq` 不同 ⇒ **不是同一个 UBI 实例**，说明这块在 10-26 之后被某次
+早期 OpenWrt 构建 `ubiformat` 过（`ec=22` = 被挂/写过约 22 次）。
+
+当前实际状态：`mount` 里没有任何 mtd7/mtd8；`ubinfo -a` 只有 `ubi0`（= mtd12）。
+⇒ **P17 不挂它、不写它**，这 22 MB 完全空着。
+
+⚠️ 早期文档曾说它「一字节未写 = 原厂回退资产」，**这个说法已不成立**。
+真正的原厂数据在 PC 上：`work/backup/mtd8_firmware.bin` + `flash_full_128M.bin`。
+
+### 5.1c 想用这 22 MB 得改 DTS（红线）
+
+`rootfs_data2` 已写在 DTS `partitions` 里，但没有被任何 cmdline 引用。
+要拿它做第二个 overlay / 装大包的存储，需要改 DTS 新增一个 `ubi.mtd=rootfs_data2`
+的卷并在 `/etc/config/fstab` 里挂 —— 属于**改分区表 = 红线**，需单独一轮 + 掉电测试。
 
 **合计 128 MB。其中真正被我们使用的只有 16.55 MB（kernel 4.5 + rootfs 11.75 + overlay 0.07），
 空着 22 MB（mtd8）+ 36.25 MB 里只用 72 KB（mtd12）。**
@@ -296,12 +335,15 @@ python work/scratch/flash_single.py        # 或走 coldflash.py --cmds flash_cm
 
 ### 6.2 一键回原厂（**资产已有，未实测**）
 
-```
-work/backup/mtd8_firmware.bin  前 0x13c0000
-  20,709,376 B   crc32 6ce2f0e9   md5 ed3a8f9ea86107cb7f6b526487b1137f
-```
+两种来源，**只有第二种能直接 `nand write`**（见 §2.1）：
 
-验证过：`rel 0`=tphdr、`rel 0x80000`=`d00dfeed`(FIT)、`rel 0x7c0000`=`hsqs`(squashfs)。
+| 来源 | 大小 | crc32 | 用途 |
+|---|---|---|---|
+| `work/out-final/fw_202.bin`（TP-Link 官网原包 2.0.2） | 17,302,016 B | `d74c3411` | ❌ 需先用 `mk_pack_from_factory.py` 转换 |
+| **`work/backup/mtd8_firmware.bin` 前 `0x13c0000`** | 20,709,376 B | `6ce2f0e9` | ✅ 直接刷 |
+
+验证过（后者）：`rel 0`=tphdr `55aa9dd1`、`rel 0x80000`=`d00dfeed`(FIT)、
+`rel 0x7c0000`=`hsqs`(squashfs)。
 
 在 ubootkit 提示符下：
 ```sh
@@ -342,7 +384,7 @@ work/backup/FROZEN-S7-20261105/
 | 问题 | 答案 |
 |---|---|
 | LuCI sysupgrade | ❌ 不能用，但**安全失败**（不写盘）。要做需一轮 P18 |
-| 固件类型 | op 和原厂**同格式**：`0x4800000` 起的连续块，一次 `nand erase+write` |
+| 固件类型 | op 和**板子固件区 dump** 同格式：`0x4800000` 起的连续块，一次 `nand erase+write`。⚠️ **官网下载的原包不同（`55aa4c5e`），要先转** |
 | 进 ubootkit | 上电 3 秒内按键 → `U-Boot 2016.01-9ce3157-dirty` + `Device Size: 128 MiB` |
 | 能刷 op + 原厂 | ✅ 都能，同一种操作，差别只在擦写长度（`0x1380000` vs `0x13c0000`） |
 | 联网装包 | ❌ 无 WAN。feed 配置**已正确**，只缺路由 |
