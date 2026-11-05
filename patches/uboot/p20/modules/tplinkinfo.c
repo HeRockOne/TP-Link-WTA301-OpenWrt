@@ -35,13 +35,15 @@ static void respond_json(struct httpd_response *response, int code,
 	response->info.content_type = content_type ? content_type : "text/plain";
 }
 
-static void tplink_slot_json(char *buf, int *plen, int left, int idx,
+/* i 是数组下标（0/1），不是槽号 —— 用槽号判逗号会拼出
+ * "slots":[,{...}] 这种非法 JSON，前端 JSON.parse 整包失败。 */
+static void tplink_slot_json(char *buf, int *plen, int left, int i,
 			     const struct tpimg_slot_state *s)
 {
 	int len = *plen;
 
-	APPEND_JSON_TO_BUF("%s{\"name\":\"image_%d\",", idx ? "," : "", idx);
-	APPEND_JSON_TO_BUF("\"active\":%s,", idx == 1 ? "true" : "false");
+	APPEND_JSON_TO_BUF("%s{\"name\":\"image_%d\",", i ? "," : "", i + 1);
+	APPEND_JSON_TO_BUF("\"active\":%s,", i == 0 ? "true" : "false");
 	APPEND_JSON_TO_BUF("\"hdr_ok\":%s,", s->hdr_ok ? "true" : "false");
 	APPEND_JSON_TO_BUF("\"md5_match\":%s,", s->md5_match ? "true" : "false");
 	APPEND_JSON_TO_BUF("\"decode_ok\":%s,", s->decode_ok ? "true" : "false");
@@ -111,8 +113,8 @@ static void tplinkinfo_handler(enum httpd_uri_handler_status status,
 			   (ulong)st.boot_flag_slot);
 
 	APPEND_JSON_TO_BUF("\"slots\":[");
-	tplink_slot_json(buf, &len, left, 1, &st.slot[0]);
-	tplink_slot_json(buf, &len, left, 2, &st.slot[1]);
+	tplink_slot_json(buf, &len, left, 0, &st.slot[0]);
+	tplink_slot_json(buf, &len, left, 1, &st.slot[1]);
 	APPEND_JSON_TO_BUF("],");
 
 	/* 内核+rootfs 实际来自哪个槽。tpimg_boot_slot() 先试 image_2（A 槽，

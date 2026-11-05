@@ -910,8 +910,16 @@ int tpimg_selfcheck(void)
 #define TPIMG_BOOT_FLAG_OFF	0x04000000u
 #define TPIMG_BOOT_FLAG_MAGIC	0x55aa4246u
 
-/* 读一个槽的状态，全程不打印 */
-static void status_one_slot(struct tpimg_slot_state *st, u32 hdr_addr,
+/* 读一个槽的状态，全程不往串口打正常信息（失败时打一行原因）。
+ *
+ * ★ 内存约束：CONFIG_SYS_MALLOC_LEN = 256K + 500K = 756 KB（ipq5018.h:188），
+ *   而 u-boot 自己、httpd、tftp 都在同一个池里要内存。实测教训：
+ *   同时持有 hdr(128K) + slot(256K) + dec(640K) = 1024 KB → 第三个 malloc
+ *   静默失败 → decode_ok 永远 0（页面显示“解压失败”，但 md5 明明对）。
+ *   所以这里不 malloc hdr（用调用者的静态缓冲），峰值降到 896 KB，
+ *   与 tplcheck 的 check_one_slot() 完全一致（后者已在真机验证通过）。
+ */
+static void status_one_slot(int idx, struct tpimg_slot_state *st, u32 hdr_addr,
 			    u32 slot_addr, u8 *hdr_buf, u8 *slot_buf)
 {
 	nand_info_t *nand = &nand_info[CONFIG_NAND_FLASH_INFO_IDX];
@@ -944,21 +952,32 @@ static void status_one_slot(struct tpimg_slot_state *st, u32 hdr_addr,
 	md5(slot_buf, TPIMG_UBOOT_SLOT_LEN, sum);
 	st->md5_match = !memcmp(sum, hdr_buf + TPIMG_F_MD5_UBOOT, 16);
 
+	/* LZMA 解一遍：能解出合法 u-boot 才算这一槽真能用。
+	 * 这步是唯一占大块的，失败原因必须上串口，否则页面上只看到
+	 * 一个“解压失败”，看不出是内存不够还是流坏了。 */
 	dec = malloc(TPIMG_UBOOT_DEC_CAP);
-	if (!dec)
+	if (!dec) {
+		printf("tplinkinfo: slot %d - no memory for 0x%x decode buffer\n",
+		       idx, TPIMG_UBOOT_DEC_CAP);
 		return;
+	}
 	dsz = TPIMG_UBOOT_DEC_CAP;
-	if (!lzmaBuffToBuffDecompress(dec, &dsz, slot_buf,
-				      TPIMG_UBOOT_SLOT_LEN - 1) &&
-	    uboot_image_sane(dec, dsz))
+	if (lzmaBuffToBuffDecompress(dec, &dsz, slot_buf,
+				     TPIMG_UBOOT_SLOT_LEN - 1)) {
+		printf("tplinkinfo: slot %d - LZMA decode failed\n", idx);
+	} else if (!uboot_image_sane(dec, dsz)) {
+		printf("tplinkinfo: slot %d - decoded 0x%lx bytes but it is not u-boot\n",
+		       idx, (ulong)dsz);
+	} else {
 		st->decode_ok = 1;
+	}
 	free(dec);
 }
 
 int tpimg_get_status(struct tpimg_status *st)
 {
 	nand_info_t *nand = &nand_info[CONFIG_NAND_FLASH_INFO_IDX];
-	u8 *hdr, *slot;
+	u8 *slot;
 	size_t len = TPIMG_HDR_LEN;
 	u8 bf[16];
 
@@ -966,18 +985,17 @@ int tpimg_get_status(struct tpimg_status *st)
 		return -1;
 	memset(st, 0, sizeof(*st));
 
-	hdr = malloc(TPIMG_HDR_LEN);
+	/* hdr 用模块级的静态 128KB（tplflash_hdr），不 split 堆。
+	 * 静态缓冲的尺寸早已计入 mon_len，不会像旧注释提到的 .bss 涨大
+	 * 那样把 DTB 推后 —— 它本来就在。 */
 	slot = malloc(TPIMG_UBOOT_SLOT_LEN);
-	if (!hdr || !slot) {
-		free(hdr);
-		free(slot);
+	if (!slot)
 		return -1;
-	}
 
-	status_one_slot(&st->slot[0], TPIMG_B_HDR_ADDR, TPIMG_B_SLOT_ADDR,
-			hdr, slot);
-	status_one_slot(&st->slot[1], WTA301_TPHDR_OFF, WTA301_UBOOT_OFF,
-			hdr, slot);
+	status_one_slot(1, &st->slot[0], TPIMG_B_HDR_ADDR, TPIMG_B_SLOT_ADDR,
+			tplflash_hdr, slot);
+	status_one_slot(2, &st->slot[1], WTA301_TPHDR_OFF, WTA301_UBOOT_OFF,
+			tplflash_hdr, slot);
 	free(slot);
 
 	/* boot_flag */
@@ -990,19 +1008,19 @@ int tpimg_get_status(struct tpimg_status *st)
 
 	/* 内核/rootfs 实际来自哪个槽：tpimg_boot_slot() 先试 image_2 再试 image_1 */
 	len = TPIMG_HDR_LEN;
-	if (!nand_read(nand, WTA301_TPHDR_OFF, &len, hdr) &&
-	    len == TPIMG_HDR_LEN && !memcmp(hdr, tpimg_magic, 8) &&
-	    be32(hdr + TPIMG_F_KERNEL_LEN) && be32(hdr + TPIMG_F_ROOTFS_VERIFY))
+	if (!nand_read(nand, WTA301_TPHDR_OFF, &len, tplflash_hdr) &&
+	    len == TPIMG_HDR_LEN && !memcmp(tplflash_hdr, tpimg_magic, 8) &&
+	    be32(tplflash_hdr + TPIMG_F_KERNEL_LEN) &&
+	    be32(tplflash_hdr + TPIMG_F_ROOTFS_VERIFY))
 		st->fw_slot = 2;
-	else if (!nand_read(nand, TPIMG_B_HDR_ADDR, &len, hdr) &&
-		 len == TPIMG_HDR_LEN && !memcmp(hdr, tpimg_magic, 8) &&
-		 be32(hdr + TPIMG_F_KERNEL_LEN) &&
-		 be32(hdr + TPIMG_F_ROOTFS_VERIFY))
+	else if (!nand_read(nand, TPIMG_B_HDR_ADDR, &len, tplflash_hdr) &&
+		 len == TPIMG_HDR_LEN && !memcmp(tplflash_hdr, tpimg_magic, 8) &&
+		 be32(tplflash_hdr + TPIMG_F_KERNEL_LEN) &&
+		 be32(tplflash_hdr + TPIMG_F_ROOTFS_VERIFY))
 		st->fw_slot = 1;
 	else
 		st->fw_slot = 0;
 
-	free(hdr);
 	return 0;
 }
 
