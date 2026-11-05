@@ -128,7 +128,48 @@ mtdsplit 分区，`FS_NONE`），走 jffs2 分支，把 overlay 建到错的地�
 | `work/evidence/S7-reboot2.log` 里 `overlay filesystem has not been fully initialized` | **0 条** | **每次启动 1 条** |
 | 同日志里的 `mount_root: switching to ubifs overlay` | 有 | 有 |
 
-⇒ **S7 的 fstools `done()` 认 `fstools_overlay_name`，25.12.6 上游版本是回归。**
+### 指令级确认（S7 二进制反汇编）
+
+S7 的 `/root/lp/tree/sbin/mount_root` 是 stripped、无 section header，
+但可以按 PT_LOAD 切出 text 段反汇编
+（`python3` 截 `[0:0xfdc]` + `aarch64-linux-gnu-objdump -D -b binary -m aarch64`）：
+
+```asm
+; 第 1 处（start）
+ a10: add  x19, sp, #0x88          ; char dataparam[64]
+ a14: mov  w3, #0x40
+ a18: mov  x2, x19
+ a1c: adrp x1, 0x0
+ a20: add  x1, x1, #0xdc2          ; "fstools_overlay_name"
+ a24: adrp x0, 0x0
+ a28: add  x0, x0, #0xdd7          ; "/proc/cmdline"
+ ...
+ a34: adrp x1, 0x0
+ a38: add  x0, x1, #0xdb0          ; "rootfs_data"  ← 默认值
+
+; 第 2 处（done）
+ c30: add  x20, sp, #0x88
+ c34: mov  w3, #0x40
+ c38: mov  x2, x20
+ c3c: adrp x1, 0x0
+ c40: add  x1, x1, #0xdc2          ; "fstools_overlay_name"
+ c44: adrp x0, 0x0
+ c48: add  x0, x0, #0xdd7          ; "/proc/cmdline"
+ ...
+ c54: adrp x1, 0x0
+ c58: add  x0, x1, #0xdb0          ; "rootfs_data"
+```
+
+字符串偏移实测：`0xdb0="rootfs_data"` · `0xdc2="fstools_overlay_name"` ·
+`0xdd7="/proc/cmdline"`。`get_var_from_file("/proc/cmdline","fstools_overlay_name",
+buf,64)` 的完整指令序列在 S7 二进制里出现 **两次**，`rootfs_data` 两次都只是
+"读不到时用的默认值"。
+
+⇒ **S7 的 `done()` 认 `fstools_overlay_name`，25.12.6 上游版本是回归，我们的补丁与 S7 的实现等价。**
+
+另一个排除项：S7 冻结的 UBI 镜像（`FROZEN-S7-20261105/ubi_..._wta301data.img`）
+里 `.fs_state` 出现 **0 次**，我们的 P9 镜像也是 0 次 ⇒ S7 不是靠"镜像里预置标记"
+过关的，确实是 `done()` 把它写进去的。
 （S7 把 `network/system/wireless` 固化进 rootfs 的做法，现在看来不只是风格选择 ——
 在 overlay 记不住东西的前提下，那是唯一能让配置存活的写法。我们的
 P9「固化 wireless」出于同一个理由才有效。）
