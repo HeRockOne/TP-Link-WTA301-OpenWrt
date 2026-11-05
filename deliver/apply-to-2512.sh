@@ -4,6 +4,46 @@
 set -e
 SRC=/mnt/c/Users/Sophia/Downloads/Compressed/wta301e3tyv1_cn_1_0_10_up_boot/wta301-2512
 T=/root/ow2512/target/linux/qualcommax
+CFG=/root/ow2512/.config
+
+# ---------------------------------------------------------------
+# P17 修正（重要，勿删）：
+#   `$T/ipq50xx/config-default` 是**内核**配置片段，只认内核符号。
+#   把 CONFIG_PACKAGE_* / CONFIG_FEED_* / CONFIG_LUCI_LANG_* 写进去是空转：
+#   实测内核 .config（build_dir/.../linux-6.12.112/.config）里
+#   `grep -c CONFIG_PACKAGE_` = **0**，这些行被内核 Kconfig 当未知符号丢弃。
+#   P16 之所以真出中文包，是因为那一轮另外直接改了顶层 /root/ow2512/.config。
+#   ⇒ 软件包/feed/语言开关一律走 add_pkg_sym()（写顶层 .config）；
+#     内核符号（INPUT*/KEYBOARD_GPIO/PCS_QCA_UNIPHY…）才写 config-default。
+# ---------------------------------------------------------------
+add_pkg_sym() {   # add_pkg_sym CONFIG_X=y [CONFIG_Y=y ...]  -> 顶层 .config
+	for sym in "$@"; do
+		name=${sym%%=*}
+		if ! grep -q "^${name}=${sym#*=}$" "$CFG" 2>/dev/null; then
+			sed -i "/^${name}=[ym]$/d;/^# ${name} is not set$/d" "$CFG"
+			echo "$sym" >> "$CFG"
+		fi
+	done
+}
+
+del_pkg_sym() {   # 显式写 "# CONFIG_X is not set"（删行不会让旧 =y 回退，lesson g8tl61k）
+	for name in "$@"; do
+		sed -i "/^${name}=[ym]$/d;/^# ${name} is not set$/d" "$CFG"
+		echo "# ${name} is not set" >> "$CFG"
+	done
+}
+
+# 清掉历史遗留：早期版本把 CONFIG_PACKAGE_/FEED_/LUCI_LANG_ 污进了内核 config-default
+purge_kernel_cfg_pollution() {
+	local f=$T/ipq50xx/config-default
+	[ -f "$f" ] || return 0
+	local n
+	n=$(grep -c '^CONFIG_PACKAGE_\|^# CONFIG_PACKAGE_\|^CONFIG_FEED_\|^# CONFIG_FEED_\|^CONFIG_LUCI_LANG_\|^# CONFIG_LUCI_LANG_' "$f" 2>/dev/null || true)
+	if [ "${n:-0}" != "0" ]; then
+		sed -i '/^CONFIG_PACKAGE_/d;/^# CONFIG_PACKAGE_/d;/^CONFIG_FEED_/d;/^# CONFIG_FEED_/d;/^CONFIG_LUCI_LANG_/d;/^# CONFIG_LUCI_LANG_/d' "$f"
+		echo "  内核 config-default 清掉 $n 行包/feed 符号（它们在内核 Kconfig 里是空转）"
+	fi
+}
 
 echo "== 0. 树自检 =="
 [ -f $T/Makefile ] || { echo "不是 25.12.6 树: $T"; exit 1; }
@@ -113,20 +153,29 @@ echo "PCS_QCA_UNIPHY => $(grep -n 'PCS_QCA_UNIPHY' $T/ipq50xx/config-default)"
 # 幂等强制：物理按键（reset/wps）。
 # 上面那个大块有 `if ! grep -q 'CONFIG_DWMAC_IPQ5018'` 护卫，树里已经有该 symbol
 # 时整块都不会执行，所以新增 symbol 必须自己单独幂等追加。
-# 25.12.6 的 qualcommax/ipq50xx config-default 把 CONFIG_INPUT 关掉了，
-# 导致 dts 里的 `keys { compatible = "gpio-keys"; }` 根本不会注册：
-#   dmesg 无 gpio-keys、/proc/bus/input/devices 不存在
-#   ⇒ /etc/rc.button/{reset,wps} 虽然存在但永远不被触发
-# 三方实情（docs/M05-KEYS-THREE-WAY.md）：原厂走私有 slp_gpio 字符设备；
-# S7 的 .config 有 INPUT=m 但 rootfs 一个 input 模块都没有 ⇒ S7 按键也从未工作。
-# 所以这里是「超越基线的改进」（用户已明确选 B），不是恢复基线。
-# 开关：WITH_KEYS=1 才把 input 子系统编进内核。默认 0（= 与 P11 基线一致）。
-# 实测教训（2026-11-05，P15 第一轮构建）：这 4 行只生效了 3 行
-#   CONFIG_INPUT=y / INPUT_EVDEV=y / INPUT_MISC=y 进了 .config，
-#   CONFIG_KEYBOARD_GPIO 没有 ⇒ 没有 gpio-keys 驱动 ⇒ 按键照样不工作，
-#   却让内核 Image 长大 65536 B（P11 4131c6d0 → bb0c8667），白多一个变量。
-# 所以按键这事必须单独一轮（WITH_KEYS=1）现场调通 KEYBOARD_GPIO，
-# 不能挂在「省内存」这轮上（AGENTS §2：一次只改一个变量）。
+# ⚠️ 这一段曾经的理由是错的，2026-11-05 上板实测后已推翻（见 docs/M05-KEYS-THREE-WAY.md
+#    文首「第二次修正」）。正确事实：
+#    1) 25.12.6 的 qualcommax/ipq50xx config-default 确实把 CONFIG_INPUT 关掉了，
+#       但**按键在 P16 上本来就是好的** —— 因为 OpenWrt 不走 input 子系统。
+#    2) OpenWrt 的按键桥是 package/kernel/gpio-button-hotplug（树外模块）：
+#       它匹配 of_device_id { .compatible = "gpio-keys" }，把 GPIO 按键变成 **uevent**，
+#       由 procd 的 HANDLER_BUTTON（plug/hotplug.c + files/hotplug.json:70-73
+#       `[ "button", "/etc/rc.button/%BUTTON%" ]`）分发到 /etc/rc.button/<name>。
+#       该包由 target/linux/qualcommax/Makefile:16 的 DEFAULT_PACKAGES 默认带上。
+#    3) P16 板上实证：lsmod 有 gpio_button_hotplug，
+#       ls /sys/bus/platform/drivers/gpio-keys/ 有 keys 设备（已 bind），
+#       人手按 reset/wps 双双产生 rc.button 事件。
+#    4) ⚠️ 开 CONFIG_KEYBOARD_GPIO=y 反而会**弄坏**按键：内建 gpio_keys 同样匹配
+#       "gpio-keys"，开机先注册就抢走设备，gpio_button_hotplug 再也绑不上；
+#       而 input 事件在 OpenWrt 用户态没有任何消费者
+#       （全树 `grep -r '/dev/input' package/` 只命中 busybox 的 Kconfig 文字）。
+#    ⇒ 默认必须是 WITH_KEYS=0。WITH_KEYS=1 只留给「将来真要 input 子系统
+#      （例如接 USB 键盘）」的场景，**不是按键的开关**。
+#    原厂的按键是另一套机制（私有 slp_gpio.ko + /dev/slp_gpio_chrdev + dms），与此无关。
+#
+#    仍然必须写 `# CONFIG_X is not set` 的坑（lesson g8tl61k）：
+#    merge_config 只"写入"，删行不会让旧 .config 里的 =y 回退，实测去掉 4 行后
+#    内核 .config 仍是 =y（P15 第一轮 kernel 4131c6d0 → bb0c8667，白长 65536 B）。
 if [ "${WITH_KEYS:-0}" = 1 ]; then
 	for sym in CONFIG_INPUT=y CONFIG_INPUT_EVDEV=y CONFIG_INPUT_KEYBOARD=y \
 	           CONFIG_KEYBOARD_GPIO=y CONFIG_INPUT_MISC=y; do
@@ -178,25 +227,35 @@ echo "KEY/INPUT => $(grep -cE '^CONFIG_(INPUT|INPUT_EVDEV|INPUT_KEYBOARD|KEYBOAR
 #   实测我们的树里有 po/zh_Hans 且与本板已装 luci 模块对得上的共 5 个：
 #   base / firewall / package-manager / dashboard / sqm
 #   （luci-mod-{network,status,system,admin-full} 自 LuCI 21.02 起文案并入 luci-base）
-for sym in CONFIG_FEED_packages=y CONFIG_FEED_luci=y CONFIG_FEED_routing=y \
-           CONFIG_FEED_telephony=y \
-           CONFIG_PACKAGE_luci-i18n-base-zh-cn=y \
-           CONFIG_PACKAGE_luci-i18n-firewall-zh-cn=y \
-           CONFIG_PACKAGE_luci-i18n-package-manager-zh-cn=y \
-           CONFIG_PACKAGE_luci-i18n-dashboard-zh-cn=y \
-           CONFIG_PACKAGE_luci-i18n-sqm-zh-cn=y \
-           CONFIG_PACKAGE_kmod-ifb=y CONFIG_PACKAGE_kmod-sched-cake=y \
-           CONFIG_PACKAGE_sqm-scripts=y CONFIG_PACKAGE_luci-app-sqm=y \
-           CONFIG_PACKAGE_tc-tiny=y; do
-	name=${sym%%=*}
-	if ! grep -q "^${name}=y$" $T/ipq50xx/config-default; then
-		sed -i "/^# ${name} is not set$/d" $T/ipq50xx/config-default
-		echo "$sym" >> $T/ipq50xx/config-default
-	fi
-done
-echo "FEED   => $(grep -cE '^CONFIG_FEED_[a-z]+=y$' $T/ipq50xx/config-default)/4"
-echo "ZH-CN  => $(grep -cE '^CONFIG_PACKAGE_luci-i18n-[a-z-]+-zh-cn=y$' $T/ipq50xx/config-default)/5"
-echo "SQM    => $(grep -cE '^CONFIG_PACKAGE_(kmod-ifb|kmod-sched-cake|sqm-scripts|luci-app-sqm|tc-tiny)=y$' $T/ipq50xx/config-default)/5"
+#
+# P17 修正：原先把 FEED / ZH-CN / SQM 三组混在一个循环里，任何一次跑本脚本都会
+#   把 SQM(QoS) 一起带进固件。这违反 AGENTS §2「一次只改一个变量」：
+#   Argon 主题 / 按键 / 语言锁定 都能在板上各自独立验证，SQM 却是改数据面，
+#   需要单独跑吞吐验证。所以拆成 WITH_SQM 开关（默认 0），与 WITH_KEYS 同风格。
+purge_kernel_cfg_pollution
+
+add_pkg_sym CONFIG_FEED_packages=y CONFIG_FEED_luci=y CONFIG_FEED_routing=y \
+            CONFIG_FEED_telephony=y CONFIG_FEED_video=y
+
+# 中文总开关。P16 实测：写 CONFIG_PACKAGE_luci-i18n-*-zh-cn=y 会被 `make defconfig`
+#   覆盖（Kconfig 的 `default LUCI_LANG_zh_Hans||(ALL&&m)` 重新求值）；
+#   只写总开关时 Kconfig 会按「已启用的 luci 模块」自动选，P16 选中 3 个共 75KiB。
+#   开 WITH_SQM 后会自动多选 luci-i18n-sqm-zh-cn。
+add_pkg_sym CONFIG_LUCI_LANG_zh_Hans=y
+
+if [ "${WITH_SQM:-0}" = 1 ]; then
+	add_pkg_sym CONFIG_PACKAGE_kmod-ifb=y CONFIG_PACKAGE_kmod-sched-cake=y \
+	            CONFIG_PACKAGE_sqm-scripts=y CONFIG_PACKAGE_luci-app-sqm=y \
+	            CONFIG_PACKAGE_tc-tiny=y
+else
+	del_pkg_sym CONFIG_PACKAGE_kmod-ifb CONFIG_PACKAGE_kmod-sched-cake \
+	            CONFIG_PACKAGE_sqm-scripts CONFIG_PACKAGE_luci-app-sqm \
+	            CONFIG_PACKAGE_luci-i18n-sqm-zh-cn CONFIG_PACKAGE_tc-tiny \
+	            CONFIG_PACKAGE_luci-i18n-dashboard-zh-cn
+fi
+echo "FEED   => $(grep -cE '^CONFIG_FEED_[a-z]+=y$' $CFG)/5  (顶层 .config)"
+echo "ZH-CN  => $(grep -cE '^CONFIG_LUCI_LANG_zh_Hans=y$' $CFG)/1  (顶层 .config)"
+echo "SQM    => $(grep -cE '^CONFIG_PACKAGE_(kmod-ifb|kmod-sched-cake|sqm-scripts|luci-app-sqm|tc-tiny)=y$' $CFG)/5 (WITH_SQM=${WITH_SQM:-0})"
 
 echo "== 4. 去掉 kmod-qca-nss-dp（我们不用 NSS/EDMA，纯 CPU 转发）=="
 if grep -q 'kmod-qca-nss-dp' $T/Makefile; then
@@ -282,5 +341,29 @@ if [ -n "$DPH" ]; then
 else
 	echo "  解包源尚未存在（首次构建）-> 无需 clean"
 fi
+
+ echo "== 5d. LuCI 主题 Argon v3.1.0（用户指定，取代 Bootstrap 为默认）=="
+ # 为什么不用官方 feed：25.12.6 的 luci feed 只有 5 个主题
+ #   bootstrap / footstrap / material / openwrt / openwrt-2020 —— 没有 Argon。
+ # Argon 是第三方的：https://github.com/jerrykuku/luci-theme-argon
+ # v3.1.0 官方 CI 用 OpenWrt 25.12.5 SDK 出 APK v3，且模板以源码形式发布
+ #   （Makefile 里 LUCI_MINIFY_UT:=0），不绑死 ucode 字节码版本 —— 这两点
+ #   正是 25.12 能用的关键（issue #715 / #660 是老 2.x 在 25.12 上崩的原因）。
+ ARGON_SRC=/root/pkgsrc/luci-theme-argon-v3.1.0
+ if [ -d "$ARGON_SRC" ]; then
+ 	rm -rf /root/ow2512/package/luci-theme-argon
+ 	mkdir -p /root/ow2512/package/luci-theme-argon
+ 	cp -a "$ARGON_SRC/." /root/ow2512/package/luci-theme-argon/
+ 	echo "  源码 -> package/luci-theme-argon（$(ls /root/ow2512/package/luci-theme-argon | wc -l) 个顶层项）"
+ else
+ 	echo "  !! 缺 $ARGON_SRC —— Argon 不会进固件"
+ 	echo "     下载 https://codeload.github.com/jerrykuku/luci-theme-argon/tar.gz/refs/tags/v3.1.0"
+ 	echo "     解包到 $ARGON_SRC（--strip-components=1）"
+ fi
+ # Bootstrap 保留安装（约 40KiB）但不是默认：Argon 的 uci-defaults 会把
+ #   luci.main.mediaurlbase 设成 /luci-static/argon。留着它是逃生门 —— Argon 若
+ #   渲染失败，uci set luci.main.mediaurlbase=/luci-static/bootstrap 即可回到。
+ add_pkg_sym CONFIG_PACKAGE_luci-theme-argon=y CONFIG_PACKAGE_luci-theme-bootstrap=y
+ echo "THEME  => $(grep -cE '^CONFIG_PACKAGE_luci-theme-(argon|bootstrap)=y$' $CFG)/2（argon 为活动主题，bootstrap 仅兜底，顶层 .config）"
 
  echo "== DONE =="

@@ -1,0 +1,19 @@
+#!/bin/sh
+# P17: 默认界面语言锁成简体中文（不跟随浏览器）。
+#
+# 依据（feeds/luci/modules/luci-base/ucode/dispatcher.uc:83-110）：
+#   let lang = uci.get('luci','main','lang') || 'auto';
+#   if (lang == 'auto') lang = 'en';
+#   else lang = replace(lang, '_', '-');
+#   load_catalog(lang, '/usr/lib/lua/luci/i18n')   -> base.zh-cn.lmo
+# 所以 'zh_cn' 会被替换成 'zh-cn' 再去找 base.zh-cn.lmo，值必须带下划线。
+#
+# 注意：luci-i18n-base-zh-cn 自带的 uci-defaults 只做
+#   uci set luci.languages.zh_cn='简体中文 (Simplified Chinese)'
+# 也就是「把中文注册进语言下拉框」，不改变 luci.main.lang（仍是 auto）。
+# 浏览器是英文时界面还是英文 —— 本文件才是真正锁语言的那一步。
+[ -x /usr/sbin/luci ] || [ -d /usr/lib/lua/luci ] || exit 0
+uci -q get luci.main >/dev/null 2>&1 || uci set luci.main='main'
+uci set luci.main.lang='zh_cn'
+uci commit luci
+exit 0
