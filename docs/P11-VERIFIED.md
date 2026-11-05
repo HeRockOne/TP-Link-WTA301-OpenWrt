@@ -123,6 +123,24 @@ rootfs_data          (0xdb0) refs: 2  ->  0xa38, 0xc58
 
 ---
 
+## 4b. 连带修复：SSH host key 不再每次重启都变
+
+P9 及之前 overlay 每次被擦，`/etc/dropbear/dropbear_*_host_key` 每启动重新生成，
+客户端 SSH 会一直报 `HOST KEY CHANGED`（家用时很烦，也是"被中间人"的假警报）。
+
+P11 实测 host key 已落在 overlay upper 层，随 `.fs_state -> 2` 一起持久：
+
+```
+-rw-------  1 root root  83 Oct 17 21:45 dropbear_ed25519_host_key
+-rw-------  1 root root 805 Oct 17 21:45 dropbear_rsa_host_key
+md5  df9e521f489c40d90e3e4a0f1642cf03  (ed25519)
+     080552379b8182be54cb81125c993374  (rsa)
+
+/overlay/upper/etc/dropbear/ 里同时存在这两个文件  ⇒ 已持久化
+```
+
+（下次重启可复核上面两个 md5 是否不变。）
+
 ## 5. 判据坑（两条，已记 lesson）
 
 1. **`.fs_state` 是 symlink，不是普通文件。** `fs_state_set()` 用
