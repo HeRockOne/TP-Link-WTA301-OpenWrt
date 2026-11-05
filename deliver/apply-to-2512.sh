@@ -133,16 +133,19 @@ echo "== 5b. fstools 补丁：mount_root done 也要认 fstools_overlay_name =="
 # rootfs_data 分区抢到手。S7 的 fstools 没有这个 bug（其日志 0 条该消息）-> 这是回归。
 # 详见 wta301-2512/docs/P11-OVERLAY-PERSISTENCE.md
 mkdir -p /root/ow2512/package/system/fstools/patches
-cp -f $SRC/patches/fstools/0001-mount_root-done-honor-fstools_overlay_name.patch \
+cp -f $SRC/patches/fstools/0001-fstools-honor-fstools_overlay_name.patch \
       /root/ow2512/package/system/fstools/patches/
+rm -f /root/ow2512/package/system/fstools/patches/0001-mount_root-done-honor-fstools_overlay_name.patch
 ls -l /root/ow2512/package/system/fstools/patches/
 
 # 补丁变了要强制重编 fstools（OpenWrt 不会因为 patches/ 变动自动 clean）
-# 判据：打完补丁后 mount_root.c 里 volume_find(dataname) 必须出现 **2 次**
-# （start() 一次 + done() 一次）。不要用 'dataname = dataparam' 判，因为 start() 里本来就有。
+# 判据：打完补丁后 volume_find(dataname) 在 mount_root.c 里 **2 次**
+# （start() 一次 + done() 一次）、在 factoryreset.c 里 **1 次**。
+# 不要用 'dataname = dataparam' 判，因为 start() 里本来就有。
 N=$(grep -c 'volume_find(dataname)' /root/ow2512/build_dir/target-*/fstools-*/mount_root.c 2>/dev/null | head -1)
-if [ "$N" != "2" ]; then
-	echo "fstools 源码尚未含补丁 (volume_find(dataname) x$N) -> clean 以便重新应用"
+M=$(grep -c 'volume_find(dataname)' /root/ow2512/build_dir/target-*/fstools-*/factoryreset.c 2>/dev/null | head -1)
+if [ "$N" != "2" ] || [ "$M" != "1" ]; then
+	echo "fstools 源码尚未含补丁 (mount_root x$N / factoryreset x$M) -> clean 以便重新应用"
 	( cd /root/ow2512 && make package/system/fstools/clean >/dev/null 2>&1 )
 fi
 

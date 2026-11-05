@@ -1,0 +1,79 @@
+From: WTA301 migration <noreply@example.invalid>
+Subject: [PATCH] fstools: honor fstools_overlay_name instead of a hardcoded volume name
+
+`mount_root start`() reads `fstools_overlay_name` from /proc/cmdline to pick the
+overlay volume, but the rest of fstools still looks up the hardcoded name
+"rootfs_data".  On a board whose overlay volume is named differently (we use
+"wta301data", because libfstools/rootdisk.c:166 matches that exact name and
+would otherwise grab the mtdsplit `rootfs_data` partition), that mismatch is
+silent and destructive:
+
+1. mount_root.c done()   -> volume_find("rootfs_data") returns NULL, so it
+   returns before fs_state_set("/overlay", FS_STATE_READY).  /overlay/.fs_state
+   therefore stays absent, every subsequent boot takes the
+   FS_STATE_UNKNOWN -> FS_STATE_PENDING path in mount_overlay() and calls
+   overlay_delete(), i.e. it WIPES the overlay and reformats it.  Nothing the
+   user changes survives a reboot.  dmesg shows it every boot:
+       mount_root: overlay filesystem has not been fully initialized yet
+       mount_root: switching to ubifs overlay
+
+2. factoryreset.c main() -> volume_find("rootfs_data") returns NULL, so
+   `factoryreset -y` (and the reset button) abort with
+   "MTD partition 'rootfs_data' not found", i.e. factory reset never works.
+
+Both are fixed by using the same lookup as `mount_root start`().
+
+* mount_root: `done` must honor fstools_overlay_name
+
+--- a/mount_root.c
++++ b/mount_root.c
+@@ -115,7 +115,14 @@
+ static int
+ done(int argc, char *argv[1])
+ {
+-	struct volume *v = volume_find("rootfs_data");
++	char dataparam[BUFLEN];
++	char *dataname = "rootfs_data";
++	struct volume *v;
++
++	if (get_var_from_file("/proc/cmdline", "fstools_overlay_name", dataparam, sizeof(dataparam)))
++		dataname = dataparam;
++
++	v = volume_find(dataname);
+ 
+ 	if (!v)
+ 		return -1;
+
+* factoryreset: same fix, otherwise `factoryreset -y` aborts
+
+--- a/factoryreset.c
++++ b/factoryreset.c
+@@ -30,6 +30,7 @@
+ #include <mtd/ubi-user.h>
+ 
+ #include "libfstools/libfstools.h"
++#include "libfstools/common.h"
+ #include "libfstools/volume.h"
+ 
+ static int jffs2_mark(struct volume *v);
+@@ -136,9 +137,18 @@
+ 		return -1;
+ 	}
+ 
+-	v = volume_find("rootfs_data");
++	{
++		char dataparam[64];
++		char *dataname = "rootfs_data";
++
++		if (get_var_from_file("/proc/cmdline", "fstools_overlay_name",
++				      dataparam, sizeof(dataparam)))
++			dataname = dataparam;
++
++		v = volume_find(dataname);
++	}
+ 	if (!v) {
+-		ULOG_ERR("MTD partition 'rootfs_data' not found\n");
++		ULOG_ERR("overlay volume not found\n");
+ 		return -1;
+ 	}
+ 

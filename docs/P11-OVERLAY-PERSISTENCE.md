@@ -137,8 +137,17 @@ P9「固化 wireless」出于同一个理由才有效。）
 
 ## 4. 修复
 
-新增 `patches/fstools/0001-mount_root-done-honor-fstools_overlay_name.patch`：
-让 `done()` 用和 `start()` 完全相同的方式取卷名。
+新增 `patches/fstools/0001-fstools-honor-fstools_overlay_name.patch`（由
+`tools/mk_fstools_patch.py` 对 pristine 源码生成，`patch --dry-run` 通过），
+修**两处**同类字面量，都改成用和 `start()` 完全相同的方式取卷名：
+
+| 文件 | 位置 | 不修的后果 |
+|---|---|---|
+| `mount_root.c` | `done()` | overlay 每次启动被擦（本文 §0~§2） |
+| `factoryreset.c` | `main()` | `factoryreset -y` / 重置按钮 直接报 `MTD partition 'rootfs_data' not found` 而**失效** |
+
+`factoryreset.c` 还需要补一行 `#include "libfstools/common.h"`
+（`get_var_from_file()` 的声明在那里，原文件只包含了 `libfstools.h`）。
 
 ```c
 -	struct volume *v = volume_find("rootfs_data");
@@ -153,10 +162,17 @@ P9「固化 wireless」出于同一个理由才有效。）
 +	v = volume_find(dataname);
 ```
 
+`factoryreset.c` 同理，另把错误信息从 `MTD partition 'rootfs_data' not found`
+改成 `overlay volume not found`（原信息在卷名不同时会误导）。
+
 `deliver/apply-to-2512.sh` 新增 §5b：把补丁投进
-`/root/ow2512/package/system/fstools/patches/`，并在 build_dir 源码里没有
-`dataname = dataparam` 时先 `make package/system/fstools/clean`
-（OpenWrt 不会因为 `patches/` 变动自动重编）。
+`/root/ow2512/package/system/fstools/patches/`，并以
+`volume_find(dataname)` 出现次数为应用判据（`mount_root.c` 必须 2 次 =
+`start`+`done`，`factoryreset.c` 必须 1 次），不符就先
+`make package/system/fstools/clean`（OpenWrt 不会因为 `patches/` 变动自动重编）。
+
+> 判据坑：最初用 `grep -q 'dataname = dataparam'` 判，结果 `start()` 里本来就有这一行，
+> 补丁没打上也照样"通过"。教训见 `docs/AGENTS-CASES.md` 式的一次自纠记录。
 
 副作用：`fstools` 变了 ⇒ rootfs / tphdr 的 crc32 会变，kernel 不变。
 
@@ -178,7 +194,31 @@ P9「固化 wireless」出于同一个理由才有效。）
 
 ---
 
-## 6. 教训
+## 6. 外部证据（AGENTS §0）
+
+这条不是我们自己逆向出来的，**上游已经报过同一个 bug，而且至今没合入修复**：
+
+| 来源 | 内容 | 与本板关系 |
+|---|---|---|
+| [openwrt/fstools issue #18](https://github.com/openwrt/fstools/issues/18) | 标题即 "Overlay reformats on reboot with fstools_overlay_name bootparam"；正文："during the `mount_root done` phase, `mount_root` does not pick up the overlay name from the `fstools_overlay_name` boot parameter, so it fails to locate the correct partition. As a result, the `.fs_state` file is not created." 并附了 7 行补丁，**与我们生成的补丁等价** | **同症状、同根因、补丁一致** [外部实证] |
+| [fstools commit 0b60224](https://git.cdn.openwrt.org/project/fstools/commit/?id=0b6022439cadf5928d0c657f16cf5af354eff3ff) | 引入 `fstools_overlay_name`（"The name is resolved by the regular stack of fstools drivers"） | 说明参数本来**设计给全流程用**，`done()` 漏读属实现疏漏 [上游代码] |
+| [openwrt/fstools master mount_root.c](https://github.com/openwrt/fstools/blob/master/mount_root.c) | 抓取时 master 的 `done()` 仍然是 `volume_find("rootfs_data")` | **上游没修**，所以我们必须长期自带这个补丁 [上游代码] |
+| [openwrt-devel 2020-12 邮件](https://lists.openwrt.org/pipermail/openwrt-devel/2020-December/032810.html) | "mount_root … has logic that will wipe your entire overlay FS if there isn't a `.fs_state` … wait until `/etc/rc.d/S95done` is run, as this runs `mount_root done` which will set the `.fs_state`" | 独立确认「S95done → 置 READY」是唯一免擦机制 [外部实证] |
+| [OpenWrt 论坛帖](https://forum.openwrt.org/t/factory-reset-results-in-overlay-filesystem-has-not-been-fully-initialized-yet-error/14653) | 同一 `S95done` 未生效导致配置不持久 | 同症状（非本板） [外部实证] |
+
+### 板级差异表（外部结论≠本板结论）
+
+| 项 | 上游讨论的那个板 | 本板 WTA301 | 是否相同 |
+|---|---|---|---|
+| 触发条件 | 设了 `fstools_overlay_name=` 且卷名 ≠ `rootfs_data` | 同（`wta301data`） | **相同** |
+| overlay 介质 | 未说明 | UBIFS on `ubi0:0`（mtd12 `rootfs_data3`） | 不同（不影响机理） |
+| `/etc/init.d/done` | S95done 调 `mount_root done` | 同（已核 `/root/ours/tree/etc/init.d/done`：`START=95`、`mount_root done`） | **相同** |
+| 是否有 mtdsplit `rootfs_data` 冲突 | 未提及 | **有**（mtd7），所以不能改回默认卷名 | 不同（决定修法） |
+| 症状表现 | 每次启动 overlay 被重格式化 | 同（0 号证据 §0） | **相同** |
+
+⇒ 结论：机理与上游完全一致，本板的特殊性只在「不能改回卷名」，因此采用上游提案的补丁而非改卷名。
+
+## 7. 教训
 
 **验收判据里必须有「重启后还在」这一条。** 本次 P4~P9 的九项判据全部是
 "当场观测"，而"当场"恰好是这个 bug 唯一不发作的时刻。凡是涉及
