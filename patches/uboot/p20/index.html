@@ -770,7 +770,20 @@ function doUpload(field,btn,statusEl,onOk,extra){
 }
 
 /* ---------------- flash (step 2) ---------------- */
-function doFlash(statusEl,btn,onOk,body){
+/* ★ 这个 POST 必须**不带 body、不设 Content-Type**。
+ *
+ * net/httpd.c:549 解析 POST 时：只要头部出现 Content-Type 却又找不到
+ * "boundary="，立刻 goto bad_request ⇒ 返回 11 字节的 "Bad Request"。
+ * 浏览器对**字符串** body 会自动加 "Content-Type: text/plain;charset=UTF-8"，
+ * 正好落进这个分支 —— 所以以前只要带 body 就必然 400，而前端
+ * JSON.parse 失败后只显示「写入失败」，一个字的原因都看不到。
+ *
+ * 空 body 的 POST 没有 Content-Type 头，走的是和 curl -X POST 同一条路
+ * （历史上所有成功记录都是这条路）。
+ *
+ * 另外：写入目标（slot 0/1/2）在 /upload 阶段就已经交给板子并存在
+ * tpimg_uboot_target 里了，/result 不需要任何参数。 */
+function doFlash(statusEl,btn,onOk){
   statusEl=statusEl||"st";
   btn=btn||$("bflash");
   btn.disabled=true;
@@ -785,8 +798,17 @@ function doFlash(statusEl,btn,onOk,body){
     try{ d=JSON.parse(x.responseText) }catch(e){}
     if(d&&d.status==="success"){
       if(onOk) onOk(d);
+    }else if(d){
+      status(statusEl,"err","写入失败","",describe(d.info));
+      $("bcheck").disabled=false; btn.disabled=false;
     }else{
-      status(statusEl,"err","写入失败","",describe(d&&d.info));
+      /* 服务端回了非 JSON（或空）—— 把 HTTP 状态和原文摊开，
+       * 别再让失败原因埋在串口里。 */
+      var raw=(x.responseText||"").replace(/\s+/g," ").slice(0,200);
+      status(statusEl,"err","写入失败（服务端未返回 JSON）",
+        "HTTP "+x.status+(raw?"  ·  "+raw:"  ·  空响应"),
+        ["这通常说明请求被 u-boot 的 httpd 直接拒了，",
+         "板子仍在 u-boot，flash 没有被写。"]);
       $("bcheck").disabled=false; btn.disabled=false;
     }
   };
@@ -796,7 +818,7 @@ function doFlash(statusEl,btn,onOk,body){
   x.ontimeout=function(){ progressDone();
     status(statusEl,"warn","超时","写入可能仍在进行，请等待 30 秒后刷新页面。");
   };
-  x.send(body||null);
+  x.send();
 }
 
 /* ---------------- wire up ---------------- */
@@ -859,13 +881,12 @@ $("buboot").onclick=function(){
       btn.disabled=false;
       return;
     }
-    var body="slot="+tgt;
     doFlash("st2",btn,function(){
       var done={"0":"两个槽都已更新并重新签名。","1":"image_1 已更新并重新签名，重启后生效。","2":"image_2 已更新并重新签名（暂不生效）。"};
       status("st2","ok","U-Boot 已写入",done[""+tgt]);
       setPill("live","待重启");
       loadSlots();
-    },body);
+    });
   },{slot:""+tgt});
 };
 

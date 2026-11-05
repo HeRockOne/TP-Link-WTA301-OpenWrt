@@ -199,3 +199,72 @@ if (be32(fit) != 0xD00DFEED) { ... }
 - `/etc/rc.button/reset` 阈值 5 s（原厂惯例 10 s）
 - 未开 WAN 口
 - mtd8 那 22 MB 未利用
+
+---
+
+## 11. P20c：`/result` 必须发空 body（浏览器「写入失败」的真正根因）
+
+### 症状
+- 「上传并校验」通过（`262144 B · LZMA`），「写入 Flash」只显示「写入失败」，无任何原因。
+- 串口里 `/result` 之后**一行日志都没有**（连 `httpd_recv_payload` 都没有）。
+
+### 决定性证据
+用 python 重放两个请求（`tools/replay_uboot_write.py`）：
+
+| 请求 | 结果 |
+|---|---|
+| `POST /upload`（multipart） | `200` · `{"status":"success","info":{...md5:"59163039..."}}` |
+| `POST /result`（body=`"slot=0"`，即浏览器发的） | **`400 text/html` · 11 字节 · `Bad Request`** |
+
+串口实录（`work/evidence/p20b-write.log`）：
+```
+httpd_recv_hdr: POST /result
+httpd_recv_hdr: Content-Length: 6 Bytes
+                       ← 到此为止，没有 payload、没有 handler 日志
+```
+
+### 根因（`net/httpd.c:549-552`）
+```c
+ct_ptr = strstr(fields_ptr, content_type_str);
+if (ct_ptr) {
+        b_ptr = strstr(ct_ptr, boundary_str);
+        /* only accept multipart/form-data */
+        if (!b_ptr)
+                goto bad_request;      /* → 400 */
+}
+```
+- 只要请求头里有 `Content-Type` 却**没有 `boundary=`**，httpd 在**头解析阶段**就 400，
+  handler 根本不会被执行。
+- 浏览器对**字符串** body 会自动加 `Content-Type: text/plain;charset=UTF-8`
+  ⇒ 正好落进这个分支。
+- **空 body 的 POST 不带 `Content-Type` 头** ⇒ 跳过该分支 ⇒ 正常进入 `result_handler`。
+  历史上所有成功记录（`curl -X POST /result` 不带 body）走的都是这条路。
+
+### 修法
+`failsafe/fsdata/index.html` 的 `doFlash()`：
+- 去掉 `body` 参数与 `x.send(body||null)`，改为 `x.send()`。
+- 写入目标（slot 0/1/2）**在 `/upload` 阶段就交给板子**并存进 `tpimg_uboot_target`
+  （`modules/upgrade.c` 的 `HTTP_CB_RESPONDING` 分支），`/result` 不需要任何参数。
+- 另外补上：服务端返回非 JSON 时，把 `HTTP 状态 + 原文` 显示出来，
+  不再只显示「写入失败」（就是这个坑让我以为 `result_handler` 没设 `response->data`）。
+
+> 更正上一版文档/note 里的错误推断：`result_handler` 在失败时**是**会返回 JSON 的
+> （`failsafe_write_image` 失败时设 `response->data = resp`）。这次的 400 发生在
+> 更早的 HTTP 头解析层，和 handler 无关。
+
+### 验证（不写 flash，可安全复跑）
+`tools/verify_result_fix.py`：`/upload` 一个 1 KB 垃圾（`tpimg_uboot_validate` 必拒），
+再发**空 body** 的 `/result`：
+```
+/upload  → 200 {"status":"fail","info":{"type":"wrong_file_type",...}}
+/result  → 200 {"status":"fail","info":{"type":"wrong_file_type",...}}   ← 不再是 400
+判定: PASS（且 flash 未写入 —— wrong_fw_type 在动 flash 之前返回）
+```
+
+### 实刷记录（P20c）
+```
+POST /upload  → success  md5 c3a6a2c1db4147f43bca2ab541924f16
+POST /result  → 200 {"status":"success","info":{"reboot":false}}
+tplcheck      → image_2 0x4700000 OK / image_1 0x700000 OK, 均 decodes to 0x86e38 (=552504 B)
+GET /sysinfo/tplink → 合法 JSON, 两槽 decode_ok=true, md5 c3a6a2c1..., boot_flag raw=2
+```
