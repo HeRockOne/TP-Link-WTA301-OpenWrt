@@ -47,20 +47,36 @@
 
 BUDGET=1000
 FLOW_ENTRIES=4096
-TARGET_CPU_MASK=2      # CPU1 only
-TARGET_CPU_LIST="1"
+TARGET_CPU_HEX=2        # 位图：bit1 = CPU1。写 /proc/irq/N/smp_affinity
+TARGET_CPU_LIST="1"     # 同上的人类可读形式，写 smp_affinity_list
+
+# ★ 亲和性写入格式的坑（本板实测，勿改）
+#   /proc/irq/N/smp_affinity       接受 **十六进制位图** → 写 2 = CPU1 ✓
+#   /proc/irq/N/smp_affinity_list  接受 **CPU 列表**     → 写 "1" = CPU1 ✓
+#                                                但写 "3" ≠ 两核！
+#     "3" 被解析成「CPU3」——本板只有 CPU0/CPU1，于是**静默失败**。
+#     两核要写 "0-1"。
+#   实测记录：
+#     echo 3 > smp_affinity_list   → 无变化（仍 CPU0）
+#     echo 0-1 > smp_affinity_list → smp=3 eff=0（默认态）
+#     echo 2 > smp_affinity        → smp=2 eff=1 ✓
+#   另：默认态 smp_affinity=3 但 effective_affinity=1 —— 即**出厂就把所有
+#   IRQ 实际压在 CPU0**，这正是本板 WiFi 只能用一核的根因。
+# ⇒ 判定用 effective_affinity_list（真实生效值），不能用 smp_affinity。
 
 log() { logger -t net-tune "$*"; }
 
-# ── 1. 按名字找 eth0 的 IRQ 号并挪到 CPU1 ────────────────────────────
+# ── 1. 把 eth0 的 IRQ 找到并挪到 CPU1 ───────────────────────────────
 tune_eth0_irq() {
 	_irq=$(awk '/eth0$/ { sub(":", "", $1); print $1; exit }' /proc/interrupts 2>/dev/null)
 	[ -n "$_irq" ] || return 0
-	_cur=$(cat /proc/irq/$_irq/smp_affinity_list 2>/dev/null)
-	[ "$_cur" = "$TARGET_CPU_LIST" ] && return 0
-	echo "$TARGET_CPU_LIST" > /proc/irq/$_irq/smp_affinity_list 2>/dev/null || return 0
 	_eff=$(cat /proc/irq/$_irq/effective_affinity_list 2>/dev/null)
-	log "eth0 irq$_irq affinity $_cur -> $_eff"
+	[ "$_eff" = "$TARGET_CPU_LIST" ] && return 0
+	_old=$(cat /proc/irq/$_irq/smp_affinity_list 2>/dev/null)
+	echo "$TARGET_CPU_HEX" > /proc/irq/$_irq/smp_affinity 2>/dev/null || return 0
+	# 回读校正：有些 irqchip 会拒绝或改回，写后再读 effective
+	_new=$(cat /proc/irq/$_irq/effective_affinity_list 2>/dev/null)
+	log "eth0 irq$_irq $_old -> $_new (smp=$(cat /proc/irq/$_irq/smp_affinity))"
 }
 
 # ── 2. 全局参数（只需设一次，但重复设无害）────────────────────────────

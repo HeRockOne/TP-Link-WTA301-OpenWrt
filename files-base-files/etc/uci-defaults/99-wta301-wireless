@@ -25,14 +25,19 @@
 #
 # 配置取值（P24 实测，见 docs/P24-WIFI-5G-PERF.md）
 # ------------------------------------------------
-#   radio0 (2g): ssid OpenWrt-WTA301     ch6  HT40 noscan cell_density 2  country CN
+#   radio0 (2g): ssid OpenWrt-WTA301     ch11 HT20       cell_density 2  country CN
 #   radio1 (5g): ssid OpenWrt-WTA301-5G  ch161 HE80       cell_density 2  country CN
 #   两个 iface : mode ap / network lan / encryption psk2 / key 123456789
 #
 # 为什么 5G 用 161 不用 36：CN 非 DFS 段，避 CAC；36 也非 DFS 但实测同一套
 # 参数下 161 表现更稳。为什么不用 HE160：本机客户端只 80MHz，开 160 后信道
-# busy 0.4%→63%、expected 887→551。为什么 2.4G 要 noscan：不加就被
-# "overlapping BSSes" 压回 20MHz + CTS protection，实测仅 ~20 Mbps。
+# busy 0.4%→63%、expected 887→551。
+# 为什么 2.4G 用 ch11 + HT20（用户拍定的稳妥档）：
+#   ch11 HT20 实测 66/49/26 Mbps；ch6 HT20 约 20 Mbps（被 CTS protection 压着）。
+#   强开 HT40 要加 noscan，会挤到邻居（扫到 ch1=4 / ch11=4 个 AP），家用长期
+#   稳定优先 ⇒ HT20。想要 40MHz 自己改（本脚本幂等，重启不会改回去）：
+#     uci set wireless.radio0.htmode='HT40' && uci set wireless.radio0.noscan='1'
+#     uci commit wireless && wifi reload
 #
 # 安全提示（务必让用户知道）
 # --------------------------
@@ -59,7 +64,7 @@ apply_radio() {
 	local sec="$1" band="$2" chan htmode ssid noscan i
 
 	case "$band" in
-	2g) chan=6;   htmode='HT40'; ssid='OpenWrt-WTA301';    noscan=1 ;;
+	2g) chan=11;  htmode='HT20'; ssid='OpenWrt-WTA301';    noscan=0 ;;
 	5g) chan=161; htmode='HE80'; ssid='OpenWrt-WTA301-5G'; noscan=0 ;;
 	*)  return 0 ;;
 	esac

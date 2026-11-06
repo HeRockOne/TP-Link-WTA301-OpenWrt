@@ -13,13 +13,20 @@
 #                busy 0.4%→63%、expected throughput 887→551（-19%）。
 #   cell_density 2  更激进的 CCA 阈值（-72 dBm vs -82 dBm），实测吞吐更高。
 #
-# radio0 (2.4G)
-#   channel 6    本机实测邻居分布 ch1=4 / ch3=1 / ch4=1 / ch6=0 / ch11=4，
-#                只有 ch6 主信道干净。
-#   HT40 + noscan 1  不加 noscan 时 hostapd 报
+# radio0 (2.4G) —— 已改为稳妥档（用户拍定：回退 HT20）
+#   channel 11  实测数据：
+#                 ch11 HT20 = 66 / 49 / 26 Mbps（expected 126.6）
+#                 ch6  HT20 = 约 20 Mbps（被 CTS protection 压着，邻频一堆）
+#               ⇒ 同为 HT20，ch11 明显好于 ch6，所以默认给 11。
+#                 （早期“ch11 比 ch6 干净 97 倍”的结论是错的，当时拿「在用信道
+#                  累计 busy」比「非在用信道 150ms 采样」；正确做法是同信道两次
+#                  survey 差分。修正后 ch6 实际 busy 95%，其中他人占 46%。）
+#   htmode  HT20  不加 noscan 时 hostapd 报
 #                "20/40 MHz operation not permitted ... based on overlapping BSSes"
-#                被压回 20MHz + CTS protection，实测约 20 Mbps。
-#                ⚠ 强制 40MHz 在密集住宅区会与邻居互相干扰，权衡见文档。
+#                最后还是回落到 20MHz + CTS，等于白折腾；加 noscan 强开 40MHz 又
+#                会挤邻居（扫到 ch1=4 / ch11=4 个 AP）。家用长期稳定优先 ⇒ HT20。
+#                想自行换回 40MHz 的话：uci set wireless.radio0.htmode='HT40';
+#                  uci set wireless.radio0.noscan='1'; uci commit; wifi reload
 #
 # 未设置 txpower 的原因
 # --------------------
@@ -32,9 +39,8 @@ config wifi-device 'radio0'
 	option path 'platform/soc@0/c000000.wifi'
 	option band '2g'
 	option hwmode '11g'
-	option channel '6'
-	option htmode 'HT40'
-	option noscan '1'
+	option channel '11'
+	option htmode 'HT20'
 	option country 'CN'
 	option cell_density '2'
 	option disabled '0'

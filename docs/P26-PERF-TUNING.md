@@ -105,7 +105,7 @@ RedHat 官方判据：`/proc/net/softnet_stat` 第 3 列持续增长 ⇒ 提高 
 
 | 文件 | 内容 | 归属 |
 |---|---|---|
-| `files-base-files/etc/config/wireless` | 5G `161/HE80/cell_density 2`；2.4G `6/HT40/noscan/cell_density 2`；不设 txpower（驱动默认=上限） | base-files |
+| `files-base-files/etc/config/wireless` | 5G `161/HE80/cell_density 2`；2.4G `11/HT20/cell_density 2`（**无 noscan**）；不设 txpower（驱动默认=上限） | base-files |
 | `files-base-files/etc/uci-defaults/99-wta301-wireless` | 上述配置的第二层兜底 | base-files |
 | `files-base-files/etc/uci-defaults/99-wta301-net` | `packet_steering=2` + `steering_flows=4096` | base-files |
 | `files-rootfs/etc/sysctl.d/99-wta301-net.conf` | `netdev_budget=1000`、`rps_sock_flow_entries=4096` | rootfs |
@@ -169,3 +169,59 @@ ls /usr/sbin/rps-watch /etc/init.d/rps 2>&1 | head  # No such file
 | E4 | `packet_steering` 1 vs 2 | 同上 |
 
 **一个变量一次（AGENTS §2）**，每次只改一项，记信号与 expected。
+---
+
+## 8. 决策变更记录：2.4G 回退 HT20（用户拍定）
+
+**原方案**：`ch6 / HT40 / noscan=1`（速度优先）
+**现值**：`ch11 / HT20 / 无 noscan`（稳定优先）
+
+### 为什么换信道（6 → 11）
+
+同为 HT20，实测差距很大：
+
+| 信道 | 模式 | 实测吞吐 |
+|---|---|---|
+| ch6 | HT20 | 约 **20 Mbps**（被 CTS protection 压着，邻频一堆） |
+| ch11 | HT20 | **66 / 49 / 26 Mbps**（expected 126.6） |
+
+⚠️ 早期「ch11 比 ch6 干净 97 倍」的结论是**方法错误**——拿「在用信道的累计 busy」
+去比「非在用信道的 150ms 采样」。正确做法是**同信道两次 survey 差分**。
+修正后 ch6 空载 10 秒：busy 95%，其中自身 rx+tx 只占 48%，**他人占 46%**。
+
+### 为什么放弃 HT40
+
+- 不加 `noscan`：hostapd 直接报
+  `20/40 MHz operation not permitted on channel pri=6 based on overlapping BSSes`
+  → 回落到 20MHz + CTS protection，等于白折腾
+- 加 `noscan=1` 能强开 40MHz，但会挤邻居（扫到 ch1=4 个、ch11=4 个 AP）
+- **家用长期稳定优先** ⇒ 选 HT20
+
+### 想要 40MHz 自己改（uci-defaults 幂等，重启不会改回去）
+
+```sh
+uci set wireless.radio0.htmode='HT40'
+uci set wireless.radio0.noscan='1'
+uci commit wireless && wifi reload
+```
+
+### 本次改动实测确认（板上 192.168.1.1）
+
+```
+channel 11 (2462 MHz), width: 20 MHz, center1: 2462 MHz   ✓
+5G 不受影响: channel 161 (5805 MHz), width: 80 MHz        ✓
+```
+
+### ★ 附带发现：`rps_cpus` 扛住了 `wifi reload`
+
+改完 2.4G 后跑 `wifi reload`，复查：
+
+```
+phy0-ap0 rps=3   phy1-ap0 rps=3   eth0 rps=3   br-lan rps=0
+```
+
+**全部保持 3**。这推翻了我原来的判断（需要自建 `rps-watch` 看护）。
+根因：上游 `packet_steering` 注册了 `procd_add_reload_trigger network wireless`，
+`wifi reload` 会重新跑它。**自建的 rps-watch 反而是多余且有害的**（两边互相覆盖）。
+
+`br-lan rps=0` 是正常：上游脚本跳过带 `lower_*` 属性的主设备。
