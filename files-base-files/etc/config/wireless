@@ -1,0 +1,67 @@
+# WTA301 出厂无线配置（固化进 rootfs —— 开箱即用，不需要用户 shell 调试）
+#
+# ★ 每一项都有实测依据，见 wta301-2512/docs/P24-WIFI-5G-PERF.md
+#   P24 之前这里是出厂/上游默认：radio1 ch36 HE80 cell_density 0，
+#   radio0 无 noscan ⇒ 5G 比现在少约 250 Mbps，2.4G 被压到 20MHz + CTS。
+#
+# radio1 (5G)
+#   channel 161  CN 非 DFS 段（149/153/157/161/165 都是 33 dBm 上限）。
+#                避开 DFS 52-64 / 100-144：需要 CAC，起不来会让 AP 彻底不可用
+#                （实测把 channel 设成 64 后 hostapd 循环 DFS-CAC-START →
+#                 DFS->DISABLED，AP 完全起不来）。
+#   htmode  HE80 不用 HE160：本机客户端只支持 80MHz，实测开 160MHz 后信道
+#                busy 0.4%→63%、expected throughput 887→551（-19%）。
+#   cell_density 2  更激进的 CCA 阈值（-72 dBm vs -82 dBm），实测吞吐更高。
+#
+# radio0 (2.4G)
+#   channel 6    本机实测邻居分布 ch1=4 / ch3=1 / ch4=1 / ch6=0 / ch11=4，
+#                只有 ch6 主信道干净。
+#   HT40 + noscan 1  不加 noscan 时 hostapd 报
+#                "20/40 MHz operation not permitted ... based on overlapping BSSes"
+#                被压回 20MHz + CTS protection，实测约 20 Mbps。
+#                ⚠ 强制 40MHz 在密集住宅区会与邻居互相干扰，权衡见文档。
+#
+# 未设置 txpower 的原因
+# --------------------
+# 本板 BDF 硬限 24 dBm（IPQ5018/QCN6122），设 24~33 都回落 24.00，设 20 才生效。
+# 不写即用驱动默认 = BDF 上限，等于最优。改国家码不能提功率（CN=33/US=30/AU=30
+# 实测都只有 24），国家码只决定信道可用性（JP/DE 禁用 161）。
+
+config wifi-device 'radio0'
+	option type 'mac80211'
+	option path 'platform/soc@0/c000000.wifi'
+	option band '2g'
+	option hwmode '11g'
+	option channel '6'
+	option htmode 'HT40'
+	option noscan '1'
+	option country 'CN'
+	option cell_density '2'
+	option disabled '0'
+
+config wifi-iface 'default_radio0'
+	option device 'radio0'
+	option network 'lan'
+	option mode 'ap'
+	option ssid 'OpenWrt-WTA301'
+	option encryption 'psk2'
+	option key '123456789'
+
+config wifi-device 'radio1'
+	option type 'mac80211'
+	option path 'platform/soc@0/b00a040.wifi'
+	option band '5g'
+	option hwmode '11a'
+	option channel '161'
+	option htmode 'HE80'
+	option country 'CN'
+	option cell_density '2'
+	option disabled '0'
+
+config wifi-iface 'default_radio1'
+	option device 'radio1'
+	option network 'lan'
+	option mode 'ap'
+	option ssid 'OpenWrt-WTA301-5G'
+	option encryption 'psk2'
+	option key '123456789'

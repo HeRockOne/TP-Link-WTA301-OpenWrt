@@ -1,0 +1,91 @@
+#!/bin/sh
+#
+# net-tune —— WTA301 网络性能调优（固件内置，开箱即用）
+#
+# 依据文档：docs/R20-PERF-EXTERNAL-EVIDENCE.md，每条都有外部出处 + 本板实测。
+#
+# ── 只做三件事，每件都有证据 ──────────────────────────────────────────
+#
+# 1) 把 eth0 的中断从 CPU0 挪到 CPU1
+#    本板实测：32 个 ath11k IRQ（44~75）+ eth0(22) 全部打在 CPU0，CPU1 只做 RPS。
+#    同款双核 ath10k 实证（OpenWrt 论坛 221783）：
+#      「I assigned core1 to eth0 and that made a boost to wifi speeds upto 350 mbps
+#        (from 250) … all ethernet interrupts are now serviced by core 1 so
+#        core 0 has more room.」
+#    学术侧同向（arXiv 2408.01013 结论 iii）：
+#      「E2W path does not utilize multi-core processing. This limitation can result
+#        in a throughput drop if the core assigned to the Ethernet NIC cannot handle
+#        the maximum supported throughput of the two NICs.」
+#    ⇒ WiFi 相关 IRQ 留在 CPU0，eth0 让出去，CPU0 就有余量喂 WiFi。
+#
+# 2) net.core.netdev_budget 300 → 1000
+#    RedHat 官方判据：/proc/net/softnet_stat 第三列持续增长 = softirq 一轮 poll 不完。
+#    本板实测第三列：CPU0 = 0x27b8 = 10168，CPU1 = 0x050d = 1293 ⇒ 确实不够。
+#
+# 3) 全局 RPS flow 表大小（rps_sock_flow_entries）
+#    与 packet_steering 的 steering_flows 配套；packet_steering 自己会写
+#    rps_flow_cnt，这里只补全局表。
+#
+# ── 明确不做的事（都查过，理由见 R20）────────────────────────────────
+#   × threaded NAPI —— 上游 13aa2fb 合入后因 QCN9074 被 revert（d265ebe）；
+#     本板 ath11k NAPI 挂在未注册的 dummy netdev 上，sysfs 写不进去，只能改驱动。
+#   × AQL / airtime fairness —— iw phy 无该 feature 位，机制 inert（LWN 1090342）。
+#   × BBR —— 论坛实证会让 WiFi 下行显著变慢，本板保持 cubic。
+#   × CONFIG_HZ / 抢占模型 —— OpenWrt 上游 3326b5e 明确统一 100Hz 且给了理由。
+#   × gro_normal_batch 16 —— 上游被否（「16 比 8 慢 2%」）。
+#   × NSS 卸载 —— 闭源固件 + 与 DSA 冲突，违背「长期稳定家用」。
+#   × flow offloading —— 本板无 WAN，全是桥，只对 forward 有效。
+#   × packet_steering 的 rps_cpus —— 交给上游 /etc/init.d/packet_steering 管，
+#     我们**不再自己写 rps_cpus**（上游脚本会覆盖，且它在 interface.* 事件上重跑）。
+#
+# ── 为什么是常驻轮询 ────────────────────────────────────────────────
+# IRQ 号每次启动都可能变（本板实测出厂重置前 22/44-75，重刷后编号会动），
+# 且 `wifi reload` 会重建 phy*-ap*。所以：
+#   - IRQ 号按 **名字** 从 /proc/interrupts 查，不写死；
+#   - 每 5 秒自检一次，只在值不对时才写。
+# 成本：steady state 下每 5 秒读一次 /proc/interrupts，实测 CPU 占用 0.0%。
+
+BUDGET=1000
+FLOW_ENTRIES=4096
+TARGET_CPU_MASK=2      # CPU1 only
+TARGET_CPU_LIST="1"
+
+log() { logger -t net-tune "$*"; }
+
+# ── 1. 按名字找 eth0 的 IRQ 号并挪到 CPU1 ────────────────────────────
+tune_eth0_irq() {
+	_irq=$(awk '/eth0$/ { sub(":", "", $1); print $1; exit }' /proc/interrupts 2>/dev/null)
+	[ -n "$_irq" ] || return 0
+	_cur=$(cat /proc/irq/$_irq/smp_affinity_list 2>/dev/null)
+	[ "$_cur" = "$TARGET_CPU_LIST" ] && return 0
+	echo "$TARGET_CPU_LIST" > /proc/irq/$_irq/smp_affinity_list 2>/dev/null || return 0
+	_eff=$(cat /proc/irq/$_irq/effective_affinity_list 2>/dev/null)
+	log "eth0 irq$_irq affinity $_cur -> $_eff"
+}
+
+# ── 2. 全局参数（只需设一次，但重复设无害）────────────────────────────
+tune_globals() {
+	if [ "$(cat /proc/sys/net/core/netdev_budget 2>/dev/null)" != "$BUDGET" ]; then
+		echo "$BUDGET" > /proc/sys/net/core/netdev_budget 2>/dev/null
+		log "netdev_budget -> $BUDGET"
+	fi
+	if [ "$(cat /proc/sys/net/core/rps_sock_flow_entries 2>/dev/null)" != "$FLOW_ENTRIES" ]; then
+		echo "$FLOW_ENTRIES" > /proc/sys/net/core/rps_sock_flow_entries 2>/dev/null
+		log "rps_sock_flow_entries -> $FLOW_ENTRIES"
+	fi
+}
+
+# 等 eth0 出现（开机时 DSA 交换机可能还没 probe 完）
+_i=0
+while [ ! -d /sys/class/net/eth0 ] && [ $_i -lt 60 ]; do
+	sleep 2
+	_i=$((_i + 1))
+done
+
+tune_globals
+
+while :; do
+	tune_eth0_irq
+	tune_globals
+	sleep 5
+done

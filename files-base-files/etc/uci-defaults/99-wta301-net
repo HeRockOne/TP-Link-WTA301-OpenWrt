@@ -1,0 +1,46 @@
+#!/bin/sh
+# 99-wta301-net —— 让 OpenWrt 自带的 packet steering 跑在「所有 CPU」模式
+#
+# 为什么必须改这一项（本板实测 + 上游代码）
+# ----------------------------------------
+# 25.12.6 自带 /usr/libexec/network/packet-steering.uc，它会把 rps_cpus 写成
+# CPU 位图。但：
+#   packet_steering 未设置  ⇒ 默认 '1' ⇒ 「Enabled」，而它的语义是
+#      「把队列亲和到处理该网卡中断的那颗 CPU」。
+# 上游脚本里 `all_cpus`（取值 '2'）才会走 cpu_mask(-1) = 0b11 = 3（两核）。
+#
+# OpenWrt 论坛 packet steering 主贴（moeller0）说得很直白：
+#   「OpenWrt packet steering defaulted to exempting the CPUs involved in processing
+#     interfaces interrupts from packet steering. … for routers with 2 or 4 cores
+#     this can be suboptimal. Especially on dual core devices that often means only
+#     one CPU can be used for packet steering … this is why the "on all CPUs" option
+#     can be helpful.」
+#
+# 本板是 **2 核 A53**，正是这句话说的情况。实测 packet_steering='2' 后：
+#   phy0-ap0 rps_cpus=3  phy1-ap0=3  eth0=3   phy*: rps_flow_cnt=4096
+#
+# 为什么这里不再自己写 rps_cpus
+# -----------------------------
+# 上游 /etc/init.d/packet_steering 有 procd_add_raw_trigger "interface.*"，
+# 每次接口变化都会重跑脚本覆盖 rps_cpus（论坛原话：「Your rps_cpus won't survive
+# long, as the steering scripts will overwrite them.」）。
+# ⇒ 自己写 rps_cpus 是跟上游打架；正确做法是配置上游那个开关。
+#
+# 与 sysctl.d/99-wta301-net.conf 的分工
+#   - 本文件：uci 层（packet_steering / steering_flows）
+#   - sysctl.d：内核层（netdev_budget / rps_sock_flow_entries）
+#   - net-tune 服务：只能靠脚本的 IRQ 亲和性（IRQ 号每次启动会变）
+
+[ "$(board_name)" = "tplink,wta301" ] || exit 0
+
+# globals 段可能不存在（全新生成时只有 loopback/lan）
+uci -q get network.globals >/dev/null 2>&1 || uci set network.globals='globals'
+
+uci set network.globals.packet_steering='2'      # 2 = Enabled (all CPUs)
+uci set network.globals.steering_flows='4096'    # → 每 rx 队列 rps_flow_cnt
+uci commit network
+
+# 让 packet steering 立刻按新配置生效（boot 期间本来也会跑一次 START=25）
+[ -x /etc/init.d/packet_steering ] && /etc/init.d/packet_steering reload 2>/dev/null
+
+exit 0

@@ -369,4 +369,41 @@ fi
  add_pkg_sym CONFIG_PACKAGE_luci-theme-argon=y CONFIG_PACKAGE_luci-theme-bootstrap=y
  echo "THEME  => $(grep -cE '^CONFIG_PACKAGE_luci-theme-(argon|bootstrap)=y$' $CFG)/2（argon 为活动主题，bootstrap 仅兜底，顶层 .config）"
 
+ # ---------------------------------------------------------------
+ # P25 —— rootfs overlay：开箱即用调优（不再靠用户 shell）
+ # ---------------------------------------------------------------
+ # 为什么单独一个目录：$T/files/ 是**内核源码** overlay（drivers/dts），
+ # 而 rootfs 文件必须进编译树顶层 /root/ow2512/files/（OpenWrt 约定，
+ # 在 base-files 与 package 之后覆盖进 $(TARGET_DIR)）。
+ #
+ # base-files 那两份（wireless 配置、uci-defaults 兜底）走 target 目录，
+ # 整份替换 —— 不用 sed 打补丁，保证可复现、不被上游上下文变化搞坏。
+ # ---------------------------------------------------------------
+ echo "== 5e. rootfs overlay（net-tune 守护 + sysctl + rc.d）=="
+ ROOTFILES=/root/ow2512/files
+ # 旧的 rps-watch 三件套已被上游 packet_steering 取代，残留会把 rps_cpus 拉回
+ # 单核（上游脚本会跟它打架）。先清掉已装到编译树的旧拷贝。
+ rm -f $ROOTFILES/usr/sbin/rps-watch $ROOTFILES/etc/init.d/rps \
+       $ROOTFILES/etc/sysctl.d/99-wta301-rps.conf $ROOTFILES/etc/rc.d/S99rps
+ mkdir -p $ROOTFILES
+ cp -a $SRC/files-rootfs/. $ROOTFILES/
+ chmod 0755 $ROOTFILES/usr/sbin/net-tune $ROOTFILES/etc/init.d/net-tune
+ # /etc/rc.d 符号链接：OpenWrt 用 S<NN><name> -> ../init.d/<name> 控制开机顺序。
+ # 不用 `/etc/init.d/net-tune enable` 的原因是那要等板子起来跑；构建期放链接才叫固化。
+ mkdir -p $ROOTFILES/etc/rc.d
+ ln -sf ../init.d/net-tune $ROOTFILES/etc/rc.d/S99net-tune
+ find $ROOTFILES -type f -o -type l | sed "s|$ROOTFILES|  files/|"
+
+ echo "== 5f. base-files 整份替换（无线出厂最优值 + packet steering）=="
+ BB=$T/ipq50xx/base-files
+ cp -f $SRC/files-base-files/etc/config/wireless              $BB/etc/config/wireless
+ cp -f $SRC/files-base-files/etc/uci-defaults/99-wta301-wireless $BB/etc/uci-defaults/99-wta301-wireless
+ cp -f $SRC/files-base-files/etc/uci-defaults/99-wta301-net      $BB/etc/uci-defaults/99-wta301-net
+ chmod 0644 $BB/etc/config/wireless
+ chmod 0755 $BB/etc/uci-defaults/99-wta301-wireless $BB/etc/uci-defaults/99-wta301-net
+ echo "  wireless:"
+ grep -E "^\s*option (band|channel|htmode|country|cell_density|noscan)" $BB/etc/config/wireless | sed 's/^/    /'
+ echo "  packet steering:"
+ grep -E "packet_steering|steering_flows" $BB/etc/uci-defaults/99-wta301-net | sed 's/^/    /'
+
  echo "== DONE =="
