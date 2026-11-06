@@ -68,6 +68,19 @@ make -j$(nproc) world      # 首次约 1.5–2 h
 bash wta301-2512/deliver/make-release.sh
 ```
 
+### 交付前自检（必跑）
+
+```bash
+# 把要交付的那两个单 bin 按 u-boot 后端的判据验一遍
+python wta301-2512/tools/verify_single_bin.py --dir <交付目录>
+```
+
+它模拟 `tpimg_parse_image()` 的全部判据（魔数 / klen 三条 / vlen 三条 /
+avail+rlen / 防 `rootfs_too_big`），以及 `tpimg_uboot_write()` 的槽尺寸与
+LZMA 解压上限。为什么不能用 `verify_pack.py`：那个验的是**四件套（TTL 口径）**，
+网页刷是**单文件紧凑包**，判据不同 —— P18 §9 就踩过拿错包被判
+`rootfs_too_big` 的坑。
+
 ### 验收判据
 
 | 项 | 期望 | 来源 |
