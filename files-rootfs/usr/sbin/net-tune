@@ -44,6 +44,17 @@
 #   - IRQ 号按 **名字** 从 /proc/interrupts 查，不写死；
 #   - 每 5 秒自检一次，只在值不对时才写。
 # 成本：steady state 下每 5 秒读一次 /proc/interrupts，实测 CPU 占用 0.0%。
+#
+# 2) 给 rps_cpus 补位（R26-1，恢复出厂首次开机暴露的缺口）
+#    上游 /etc/init.d/packet_steering 注册了
+#      procd_add_raw_trigger "interface.*" 1000 /etc/init.d/packet_steering reload
+#    但实测**补不上晚创建的接口**：
+#      phy0-ap0 (2.4G) rps_cpus=3   ← 先创建，被触发器捕到
+#      phy1-ap0 (5G)   rps_cpus=0   ← 后创建，触发器没有第二次补上
+#    证据：手动 `/etc/init.d/packet_steering reload` 后 phy1-ap0 立刻变 3
+#          ⇒ 不是配置错、不是逻辑错，是**时序缺口**。
+#    做法：只在 packet_steering=2（我们要的模式）且该接口当前为 0 时补成全核位图；
+#          用户自己设的非 0 值一律不动。与上游同值，不打架。
 
 BUDGET=1000
 FLOW_ENTRIES=4096
@@ -98,10 +109,33 @@ while [ ! -d /sys/class/net/eth0 ] && [ $_i -lt 60 ]; do
 	_i=$((_i + 1))
 done
 
+# ── 3. rps_cpus 补位（见文件头 2）──────────────────────────────────────
+# 期望位图按本机 CPU 数算，不硬编码：2 核 → 0b11 → "3"
+_NCPU=$(grep -c '^processor' /proc/cpuinfo 2>/dev/null)
+[ -n "$_NCPU" ] && [ "$_NCPU" -ge 1 ] || _NCPU=1
+_ALLMASK=$(printf '%x' $(( (1 << _NCPU) - 1 )))
+
+tune_rps() {
+	# 只在「我们希望的 all_cpus 模式」下补位；否则完全交给上游脚本
+	[ "$(uci -q get network.globals.packet_steering 2>/dev/null)" = "2" ] || return 0
+	for _d in /sys/class/net/phy*-ap* /sys/class/net/eth0; do
+		[ -d "$_d" ] || continue
+		_f="$_d/queues/rx-0/rps_cpus"
+		[ -f "$_f" ] || continue
+		_cur=$(cat "$_f" 2>/dev/null)
+		# 只在「0（未设）」时补。非 0 说明已被上游或用户设过，不抢。
+		[ "$_cur" = "0" ] || continue
+		echo "$_ALLMASK" > "$_f" 2>/dev/null || continue
+		log "rps ${_d##*/} 0 -> $(cat "$_f" 2>/dev/null) (all ${_NCPU} cpus)"
+	done
+}
+
 tune_globals
+tune_rps
 
 while :; do
 	tune_eth0_irq
 	tune_globals
+	tune_rps
 	sleep 5
 done

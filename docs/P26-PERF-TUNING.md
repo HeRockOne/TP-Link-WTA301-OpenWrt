@@ -225,3 +225,81 @@ phy0-ap0 rps=3   phy1-ap0 rps=3   eth0 rps=3   br-lan rps=0
 `wifi reload` 会重新跑它。**自建的 rps-watch 反而是多余且有害的**（两边互相覆盖）。
 
 `br-lan rps=0` 是正常：上游脚本跳过带 `lower_*` 属性的主设备。
+
+---
+
+## 9. R26-1 修复：恢复出厂首启时 5G 接口 rps_cpus 漏设
+
+### 症状（刷 P26 后恢复出厂，首次验收实测）
+
+```
+A1. packet steering
+  [OK]   phy0-ap0 rps_cpus (3)     ← 2.4G 正常
+  [FAIL] phy1-ap0 rps_cpus: 期望 3 实得 0   ← 5G 漏了
+  [OK]   eth0 rps_cpus (3)
+```
+
+23 OK / 1 FAIL。
+
+### 定位（不是猜，是手动实验）
+
+```
+手动 /etc/init.d/packet_steering reload  →  phy1-ap0 立刻变 3
+```
+
+⇒ **配置没错、逻辑没错，是时序缺口。**
+
+### 根因
+
+上游 `/etc/init.d/packet_steering` 的 `service_triggers()`：
+
+```sh
+procd_add_reload_trigger "network"
+procd_add_reload_trigger "firewall"
+procd_add_raw_trigger "interface.*" 1000 /etc/init.d/packet_steering reload
+```
+
+`interface.*` 触发器只覆盖「最后一次」的接口事件。开机时 `phy0-ap0`（2.4G）
+先创建并被捕获，`phy1-ap0`（5G）稍后创建，**没有再触发一次全量 reload**。
+恢复出厂走的就是这条冷路径，所以必现；日常 `wifi reload` 反而不一定复现。
+
+### 修法
+
+`/usr/sbin/net-tune` 里加 `tune_rps()`，挂在已有的 5 秒自检循环上：
+
+- 只在 `network.globals.packet_steering == 2`（我们期望的 all_cpus 模式）时工作
+- 只处理 `phy*-ap*` 与 `eth0`
+- **只在该接口当前值为 `0`（未设）时**补成全核位图
+- 期望位图按 `grep -c ^processor /proc/cpuinfo` 算，不硬编码（2 核 → `0b11` → `"3"`）
+
+这样它与上游脚本**同值不打架**，用户自己设的非 0 值也一律不动。
+
+### 三条判断题（板上实测）
+
+| 场景 | 期望 | 实测 |
+|---|---|---|
+| `phy1-ap0=0` + `packet_steering=2` | 补成 3 | `rps phy1-ap0 0 -> 3` ✓ |
+| 用户把 `phy1-ap0` 设成 1 | 保持 1，不抢 | 仍为 1 ✓ |
+| `packet_steering=1`（非 all_cpus） | 完全不插手 | `phy1-ap0` 仍为 0 ✓ |
+
+幂等：第二轮静默无输出 ✓
+
+### 重启后实证（这就是当初暴露问题的路径）
+
+```
+uptime 61s
+logread -e net-tune:
+  net-tune: eth0 irq22 0-1 -> 1 (smp=2)
+  net-tune: rps phy1-ap0 0 -> 3 (all 2 cpus)     ← 开机自动补上了
+
+phy0-ap0 rps=3   phy1-ap0 rps=3   eth0 rps=3
+```
+
+验收：**OK=24 FAIL=0**
+
+### 一个附带踩坑
+
+`net-tune` 原文件**末尾缺换行**（`...\ndone` 无 `\n`）。用 heredoc 经
+`plink ... sh -s` 推送时，`done` 会和终止符粘成 `doneWTA_NET_TUNE_EOF`，
+终止符永远匹配不到 ⇒ 整个脚本被吞、无任何输出也无报错。
+**所有要经 heredoc 传输的脚本必须保证以换行结尾。**
