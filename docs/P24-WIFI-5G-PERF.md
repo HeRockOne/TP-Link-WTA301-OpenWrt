@@ -17,9 +17,9 @@ wireless.radio1.txpower='33'         # 法规上限（BDF 实际限 24，见 §4
 wireless.radio1.noscan='1'
 wireless.radio1.cell_density='2'
 
-# 2.4G —— 从 ch6（busy 2,135,077 ms）换到 ch11（busy 22,130 ms）
-wireless.radio0.channel='11'
-wireless.radio0.htmode='HT40'        # 实际协商 20MHz（ch11 无法向上扩展）
+# 2.4G —— ch6（主信道 0 邻居；ch1/ch11 各 4 个）；详见 §7
+wireless.radio0.channel='6'
+wireless.radio0.htmode='HT40'        # 实际协商 20MHz（HT40 被重叠 BSS 拒绝）
 wireless.radio0.country='CN'
 wireless.radio0.txpower='20'         # CN 2.4G 法规上限
 wireless.radio0.cell_density='2'
@@ -30,7 +30,7 @@ wireless.radio0.cell_density='2'
 5G : channel 161 (5805 MHz), width 80 MHz, txpower 24.00 dBm
      signal -20 dBm | tx 1080.6 / rx 1200.9 Mbps HE-MCS10/11 NSS2
      expected throughput 887.703 Mbps
-2.4G: channel 11 (2462 MHz), width 20 MHz, txpower 20.00 dBm
+2.4G: channel 6 (2437 MHz), width 20 MHz, txpower 20.00 dBm
 ```
 
 ---
@@ -210,15 +210,70 @@ echo 1000 > /proc/sys/net/core/netdev_max_backlog 2>/dev/null
 
 ---
 
-## 7. 2.4G 信道（ch6 → ch11）
+## 7. 2.4G：信道选择与实测
 
-| 信道 | 频率 | busy time | 说明 |
-|---|---|---|---|
-| **ch6**（出厂默认） | 2437 MHz | **2,135,077 ms** | 严重拥塞，被挤到 20MHz + CTS protection，实测 ~20 Mbps |
-| **ch11** | 2462 MHz | **22,130 ms** | **97× 更干净** |
+### 7.1 ★ 方法论纠正（重要，勿再犯）
 
-2.4G 邻居（`scan` 实测）：邻频有 CMCC / HUAWEI 多个 AP。
-`ch11 + HT40` 实际协商 **20 MHz**（ch11 向上无合法 HT40 扩展位），这是法规限制，正常。
+**错误做法**：拿 `iw survey` 里「**在用信道**的累计 busy」去比「**非在用信道**的 150 ms 采样」。
+
+```
+ch6 （在用）  active 几十万 ms，busy 2,135,077 ms
+ch11（非在用）active 仅 150 ms，busy 105 ms      ← 只扫了一下，不可比
+```
+
+曾据此得出「ch11 比 ch6 干净 97×」—— **这是错的**。在用信道的 busy 里绝大部分是**自己 AP 的流量**。
+
+**正确做法**：对**同一信道**取两次 `survey` 做时间差分：
+```sh
+t0: active=A1 busy=B1 rx=R1 tx=T1
+sleep 10
+t1: active=A2 busy=B2 rx=R2 tx=T2
+busy% = (B2-B1)/(A2-A1)
+他人占用% = ((B2-B1)-(R2-R1)-(T2-T1))/(A2-A1)
+```
+
+### 7.2 实测：2.4G 邻居分布（`iw scan`）
+
+| 信道 | 邻居 AP 数 | 信号 |
+|---|---|---|
+| ch1 | **4** | -51 ~ -69 dBm |
+| ch3 | 1 | -61 dBm |
+| ch4 | 1 | -55 dBm |
+| **ch6** | **0** | — |
+| **ch11** | **4** | -59 ~ -66 dBm |
+
+### 7.3 实测：ch6 的 10 秒差分（空闲状态）
+
+```
+active +9995 ms，busy +9541 ms  → busy 95%
+自身 rx+tx  = 48%
+他人占用    = 46%          ← 真实外部干扰
+```
+
+⇒ **2.4G 频段本身被占掉约一半**，与选哪个信道关系不大。
+
+### 7.4 HT40 在两种信道上都被拒
+
+```
+hostapd: 20/40 MHz operation not permitted on channel pri=11 sec=7 based on overlapping BSSes
+hostapd: 20/40 MHz operation not permitted on channel pri=6  sec=10 based on overlapping BSSes
+```
+
+即使 ch6 主信道无邻居，HT40+ 需要 ch6..ch10 全清，而 ch11 的 4 个邻居（20MHz 占 2452–2472）与 HT40 的 2432–2462 在 2452–2462 重叠 ⇒ 被拒。
+ch11 的 HT40- 需要 ch7..ch11，同样与邻居冲突 ⇒ 也被拒。
+
+**要强开只能 `noscan='1'`**，但那是无视重叠强占频宽，在住宅区会互相伤害，收益有限（外部实测 20MHz 75–119 vs 40MHz+noscan 112.5）。
+
+### 7.5 实测吞吐（ch11，客户端平均信号 -19 dBm）
+
+| 项 | 值 |
+|---|---|
+| 峰值 / 平均 / 最低 | **66 / 49 / 26 Mbps** |
+| expected throughput | 126.6 Mbps |
+| 达成率 | 39% |
+| 重传 / 失败 | **0 / 0** |
+
+改动前（ch6 + CTS protection）：**~20 Mbps** ⇒ **提升约 2.5×**。
 
 ---
 
