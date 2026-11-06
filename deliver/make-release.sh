@@ -1,12 +1,34 @@
 #!/bin/bash
 # 从 25.12.6 源码构建产物 → 可刷四件套（P3）
-# 运行（WSL，root）：wsl -d Ubuntu2404 -u root bash /root/make-release.sh
+# 运行：bash deliver/make-release.sh [--version P29-2512] [--stage P29]
 set -u
-W=/mnt/c/Users/Sophia/Downloads/Compressed/wta301e3tyv1_cn_1_0_10_up_boot
-OUT=/root/rel
+_here=$(cd "$(dirname "$0")" && pwd)
+. "$_here/lib-paths.sh"
 die(){ echo "*** FAIL: $*"; exit 1; }
 
-cd /root/ow2512 || die "no ow2512"
+need_tree || exit 1
+need_tool mk_op_pack.py || exit 1
+
+# ── 参数解析（以前这里没有，--version/--stage 被默默丢弃，-- ★ 真 bug）──
+VERSION=""
+STAGE=""
+PURPOSE=""
+while [ $# -gt 0 ]; do
+	case "$1" in
+	--version) VERSION=${2:-}; shift 2 || die "--version 缺值" ;;
+	--stage)   STAGE=${2:-};   shift 2 || die "--stage 缺值" ;;
+	--purpose) PURPOSE=${2:-}; shift 2 || die "--purpose 缺值" ;;
+	-h|--help) sed -n '2,12p' "$0"; exit 0 ;;
+	*) die "未知参数：$1" ;;
+	esac
+done
+# 未给就用当前仓库状态推一个，不静默编成旧版本号
+[ -n "$VERSION" ] || VERSION="$(date +%Y%m%d)-local"
+[ -n "$STAGE" ]   || STAGE="dev"
+[ -n "$PURPOSE" ] || PURPOSE="25.12.6 / 6.12.112 本地构建（<$STAGE>）"
+echo "== 版本=$VERSION  阶段=$STAGE =="
+
+cd "$OWTREE" || die "进不去 $OWTREE"
 
 echo "== 1. 找 sysupgrade 包 =="
 SYSUP=$(ls -1t bin/targets/qualcommax/ipq50xx/*tplink_wta301*squashfs-sysupgrade.bin 2>/dev/null | head -1)
@@ -44,9 +66,9 @@ echo "== 4. 打包（mk_op_pack.py，带 u-boot 槽让 +0x90 自洽）=="
 # --kblk 0x480000：内核区必须按 S7 的整区长度补齐，不能只对齐到 NAND 擦除块。
 # 依据：S7 tphdr +0x5c KERNEL_LEN=0x480000，且 +0xa0 = md5(kernel[0:0x480000] ‖ rootfs[0:0xbc0000])；
 # u-boot 按 KERNEL_LEN 从 NAND 读该长度算 md5，若只写 0x420000 则尾部残留旧数据 => 校验必失败。
-python3 $W/work/op-build/mk_op_pack.py --kernel "$K" --root "$R" --outdir $OUT/pack \
+python3 "$TOOLS/mk_op_pack.py" --kernel "$K" --root "$R" --outdir $OUT/pack \
         --kblk 0x480000 \
-        --uboot $W/work/backup/mtd4_normal_boot.bin || die "mk_op_pack 失败"
+        --uboot $WORK/backup/mtd4_normal_boot.bin || die "mk_op_pack 失败"
 
 echo "== 5. UBI overlay：现造空卷，卷名必须是 wta301data =="
 # 卷名由 bootargs 的 fstools_overlay_name=wta301data 决定（与 S7 逐字一致）。
@@ -58,7 +80,8 @@ echo "== 5. UBI overlay：现造空卷，卷名必须是 wta301data =="
 # 若卷名写成 rootfs_data，volume_find("wta301data") 找不到 ⇒ 落到 rootdisk driver
 # （把 squashfs 尾部剩余空间当 overlay，本板 = mtd7 仅 3.6MB）⇒ 首启无 overlay。
 # 几何必须与 S7 冻结镜像一致：2048/LEB 126976(0x1f000)/PEB 131072/subpage 2048/autoresize。
-HOSTBIN=/root/nss-edma/staging_dir/host/bin
+# HOSTBIN 由 lib-paths.sh 解析（优先 $OWTREE/staging_dir/host/bin，
+# 回落到本机历史使用的 nss-edma 那套）；这里不再写死。
 UBIVOL=wta301data
 UBIIMG=ubi_rootfs_data3_$UBIVOL.img
 if [ -x "$HOSTBIN/mkfs.ubifs" ] && [ -x "$HOSTBIN/ubinize" ]; then
@@ -111,7 +134,15 @@ ls -la $OUT/pack/
 
 echo "== 6. FINGERPRINT.json + tphdr 自洽复核 =="
 python3 --version >/dev/null
-python3 "$W/wta301-2512/tools/mk_fingerprint.py" $OUT/pack --version P28-2512 --stage P28 --purpose "25.12.6 / 6.12.112 / P28 系统内 sysupgrade（platform.sh tplink,wta301 + kernel 分区 0x740000）＋ P26 性能优化（packet_steering=2 + eth0 IRQ->CPU1 + netdev_budget=1000 + 5G ch161/HE80 + 2.4G ch11/HT20）" --bootargs "root=/dev/mtdblock6 rootfstype=squashfs rootwait coherent_pool=2M ubi.mtd=rootfs_data3 fstools_overlay_name=wta301data" --rollback-to S7 --rollback-kernel 53bd0490 --rollback-rootfs c2e227c6 --rollback-tphdr 3ccbcfc4   || die "mk_fingerprint 失败"
+# ★ 之前这里的 --version/--stage 是**写死的 P28**，而本脚本又不解析命令行参数，
+#   于是传进来的 --version P29-2512 被默默丢弃，p29 包的 FINGERPRINT.json
+#   里写的是 P28-2512。现已改为真解析（见脚本开头的 getopt）。
+python3 "$TOOLS/mk_fingerprint.py" $OUT/pack \
+	--version "$VERSION" --stage "$STAGE" \
+	--purpose "$PURPOSE" \
+	--bootargs "root=/dev/mtdblock6 rootfstype=squashfs rootwait coherent_pool=2M ubi.mtd=rootfs_data3 fstools_overlay_name=wta301data" \
+	--rollback-to S7 --rollback-kernel 53bd0490 --rollback-rootfs c2e227c6 --rollback-tphdr 3ccbcfc4 \
+	|| die "mk_fingerprint 失败"
 
 echo "== 7. sysupgrade 包（系统内升级用，不必进 u-boot）=="
 # 这是 OpenWrt 原生 tar：sysupgrade-<board>/{CONTROL,kernel,root} + fwtool 元数据尾。

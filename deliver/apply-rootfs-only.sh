@@ -18,19 +18,22 @@
 # ⚠ 前置条件：全量脚本**至少跑过一次**（内核补丁、DTS、Device 块都在位）。
 #   本脚本不做任何内核侧校验，缺失时会在编译阶段以别的形式报错。
 #
-# 用法（WSL，root）：
-#     wsl -d Ubuntu2404 -u root bash /mnt/c/.../wta301-2512/deliver/apply-rootfs-only.sh
+# 用法：
+#     bash deliver/apply-rootfs-only.sh
+#     OWTREE=/path/to/openwrt bash deliver/apply-rootfs-only.sh
 # 之后：
 #     make -j6 target/install
 #
 set -e
-SRC=/mnt/c/Users/Sophia/Downloads/Compressed/wta301e3tyv1_cn_1_0_10_up_boot/wta301-2512
-T=/root/ow2512/target/linux/qualcommax
-[ -d /root/ow2512 ] || { echo "*** 没有 /root/ow2512"; exit 1; }
+_here=$(cd "$(dirname "$0")" && pwd)
+. "$_here/lib-paths.sh"
+
+T=$OWTREE/target/linux/qualcommax
+[ -f "$OWTREE/Makefile" ] || { echo "*** 没有 OpenWrt 树：$OWTREE"; exit 1; }
 [ -d "$T/ipq50xx/base-files" ] || { echo "*** 编译树没准备好（先跑 apply-to-2512.sh）"; exit 1; }
 
 echo "== 5e. rootfs overlay（net-tune 守护 + sysctl + rc.d）=="
-ROOTFILES=/root/ow2512/files
+ROOTFILES=$OWTREE/files
 # 旧的 rps-watch 三件套已被上游 packet_steering 取代，残留会把 rps_cpus 拉回
 # 单核（上游脚本会跟它打架）。先清掉已装到编译树的旧拷贝。
 rm -f $ROOTFILES/usr/sbin/rps-watch $ROOTFILES/etc/init.d/rps \

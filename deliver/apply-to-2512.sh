@@ -1,10 +1,20 @@
 #!/bin/bash
-# 把 P1 核对出来的交付物装进 25.12.6 树 (/root/ow2512)。
+# 把 P1 核对出来的交付物装进 OpenWrt 25.12.6 树。
 # 幂等：重复运行不会重复追加（用标记 + grep 保护）。
+#
+# 用法：
+#   bash deliver/apply-to-2512.sh                        # 默认树 /root/ow2512
+#   OWTREE=/path/to/openwrt bash deliver/apply-to-2512.sh  # 指定别的树
+#
+# ★ 本脚本会碰 target/linux/qualcommax/{patches-6.12,files}，
+#   使它们的 mtime 变化 ⇒ 下次 make 会**全量重编内核（约 45 分钟）**。
+#   只改用户态时用 apply-rootfs-only.sh。
 set -e
-SRC=/mnt/c/Users/Sophia/Downloads/Compressed/wta301e3tyv1_cn_1_0_10_up_boot/wta301-2512
-T=/root/ow2512/target/linux/qualcommax
-CFG=/root/ow2512/.config
+_here=$(cd "$(dirname "$0")" && pwd)
+. "$_here/lib-paths.sh"
+
+T=$OWTREE/target/linux/qualcommax
+CFG=$OWTREE/.config
 
 # ---------------------------------------------------------------
 # P17 修正（重要，勿删）：
@@ -12,7 +22,7 @@ CFG=/root/ow2512/.config
 #   把 CONFIG_PACKAGE_* / CONFIG_FEED_* / CONFIG_LUCI_LANG_* 写进去是空转：
 #   实测内核 .config（build_dir/.../linux-6.12.112/.config）里
 #   `grep -c CONFIG_PACKAGE_` = **0**，这些行被内核 Kconfig 当未知符号丢弃。
-#   P16 之所以真出中文包，是因为那一轮另外直接改了顶层 /root/ow2512/.config。
+#   P16 之所以真出中文包，是因为那一轮另外直接改了顶层 $OWTREE/.config。
 #   ⇒ 软件包/feed/语言开关一律走 add_pkg_sym()（写顶层 .config）；
 #     内核符号（INPUT*/KEYBOARD_GPIO/PCS_QCA_UNIPHY…）才写 config-default。
 # ---------------------------------------------------------------
@@ -70,7 +80,7 @@ find $T/files -name '*ipq5018*' -o -name 'pcs-qca-uniphy*' -o -name 'qca-uniphy.
 # --- R17: RTL8367S SerDes 驱动（搬自 S7 实测可用的 6.18.55 树）---
 # files/ 只在「解压内核」时 overlay。若内核树已解压过，必须显式同步，
 # 否则改的驱动不会进编译（build_dir 里还是旧文件）。
-for kd in /root/ow2512/build_dir/target-*/linux-*/linux-6.12.*; do
+for kd in $OWTREE/build_dir/target-*/linux-*/linux-6.12.*; do
   [ -d "$kd/drivers/net/dsa/realtek" ] || continue
   echo "   同步到 $kd/drivers/net/dsa/realtek"
   cp -f $T/files/drivers/net/dsa/realtek/*.c  $kd/drivers/net/dsa/realtek/
@@ -296,21 +306,21 @@ echo "== 5b. fstools 补丁：mount_root done 也要认 fstools_overlay_name =="
 # 不能改回卷名 rootfs_data：rootdisk.c:166 硬编码只认这个名字，会把 mtdsplit 的
 # rootfs_data 分区抢到手。S7 的 fstools 没有这个 bug（其日志 0 条该消息）-> 这是回归。
 # 详见 wta301-2512/docs/P11-OVERLAY-PERSISTENCE.md
-mkdir -p /root/ow2512/package/system/fstools/patches
+mkdir -p $OWTREE/package/system/fstools/patches
 cp -f $SRC/patches/fstools/0001-fstools-honor-fstools_overlay_name.patch \
-      /root/ow2512/package/system/fstools/patches/
-rm -f /root/ow2512/package/system/fstools/patches/0001-mount_root-done-honor-fstools_overlay_name.patch
-ls -l /root/ow2512/package/system/fstools/patches/
+      $OWTREE/package/system/fstools/patches/
+rm -f $OWTREE/package/system/fstools/patches/0001-mount_root-done-honor-fstools_overlay_name.patch
+ls -l $OWTREE/package/system/fstools/patches/
 
 # 补丁变了要强制重编 fstools（OpenWrt 不会因为 patches/ 变动自动 clean）
 # 判据：打完补丁后 volume_find(dataname) 在 mount_root.c 里 **2 次**
 # （start() 一次 + done() 一次）、在 factoryreset.c 里 **1 次**。
 # 不要用 'dataname = dataparam' 判，因为 start() 里本来就有。
-N=$(grep -c 'volume_find(dataname)' /root/ow2512/build_dir/target-*/fstools-*/mount_root.c 2>/dev/null | head -1)
-M=$(grep -c 'volume_find(dataname)' /root/ow2512/build_dir/target-*/fstools-*/factoryreset.c 2>/dev/null | head -1)
+N=$(grep -c 'volume_find(dataname)' $OWTREE/build_dir/target-*/fstools-*/mount_root.c 2>/dev/null | head -1)
+M=$(grep -c 'volume_find(dataname)' $OWTREE/build_dir/target-*/fstools-*/factoryreset.c 2>/dev/null | head -1)
 if [ "$N" != "2" ] || [ "$M" != "1" ]; then
 	echo "fstools 源码尚未含补丁 (mount_root x$N / factoryreset x$M) -> clean 以便重新应用"
-	( cd /root/ow2512 && make package/system/fstools/clean >/dev/null 2>&1 )
+	( cd $OWTREE && make package/system/fstools/clean >/dev/null 2>&1 )
 fi
 
 echo "== 5c. mac80211/ath11k 补丁：把 DP ring 降到 256 MiB 档（对齐 S7 backports-7.2）=="
@@ -328,18 +338,18 @@ echo "== 5c. mac80211/ath11k 补丁：把 DP ring 降到 256 MiB 档（对齐 S7
 #     解法就是减半 RX/monitor ring；上游 ath-next 同名补丁正在推按 RAM 选档。
 #  3) 字节：两射频合计预期省 ~33 MiB。
 # 详见 wta301-2512/docs/P15-ATH11K-RINGS.md
-mkdir -p /root/ow2512/package/kernel/mac80211/patches/ath11k
-cp -f $SRC/patches/mac80211/0950-wifi-ath11k-reduce-DP-ring-sizes-256M.patch       /root/ow2512/package/kernel/mac80211/patches/ath11k/
-ls -l /root/ow2512/package/kernel/mac80211/patches/ath11k/0950-*.patch
+mkdir -p $OWTREE/package/kernel/mac80211/patches/ath11k
+cp -f $SRC/patches/mac80211/0950-wifi-ath11k-reduce-DP-ring-sizes-256M.patch       $OWTREE/package/kernel/mac80211/patches/ath11k/
+ls -l $OWTREE/package/kernel/mac80211/patches/ath11k/0950-*.patch
 
 # OpenWrt 不会因为 patches/ 变动自动重编 mac80211；判据看解包源里的常量。
-DPH=$(ls -d /root/ow2512/build_dir/target-*/linux-qualcommax_ipq50xx/mac80211-regular/backports-*/drivers/net/wireless/ath/ath11k/dp.h 2>/dev/null | head -1)
+DPH=$(ls -d $OWTREE/build_dir/target-*/linux-qualcommax_ipq50xx/mac80211-regular/backports-*/drivers/net/wireless/ath/ath11k/dp.h 2>/dev/null | head -1)
 if [ -n "$DPH" ]; then
 	V=$(awk '/^#define DP_TX_COMP_RING_SIZE/{print $3}' "$DPH")
 	echo "  解包源 DP_TX_COMP_RING_SIZE=$V ($DPH)"
 	if [ "$V" != "8192" ]; then
 		echo "  未含补丁 -> clean mac80211 以便重新应用"
-		( cd /root/ow2512 && make package/kernel/mac80211/clean >/dev/null 2>&1 )
+		( cd $OWTREE && make package/kernel/mac80211/clean >/dev/null 2>&1 )
 	fi
 else
 	echo "  解包源尚未存在（首次构建）-> 无需 clean"
@@ -352,12 +362,12 @@ fi
  # v3.1.0 官方 CI 用 OpenWrt 25.12.5 SDK 出 APK v3，且模板以源码形式发布
  #   （Makefile 里 LUCI_MINIFY_UT:=0），不绑死 ucode 字节码版本 —— 这两点
  #   正是 25.12 能用的关键（issue #715 / #660 是老 2.x 在 25.12 上崩的原因）。
- ARGON_SRC=/root/pkgsrc/luci-theme-argon-v3.1.0
+ # ARGON_SRC 由 lib-paths.sh 解析（默认 $WORK/pkgsrc/luci-theme-argon-v3.1.0）
  if [ -d "$ARGON_SRC" ]; then
- 	rm -rf /root/ow2512/package/luci-theme-argon
- 	mkdir -p /root/ow2512/package/luci-theme-argon
- 	cp -a "$ARGON_SRC/." /root/ow2512/package/luci-theme-argon/
- 	echo "  源码 -> package/luci-theme-argon（$(ls /root/ow2512/package/luci-theme-argon | wc -l) 个顶层项）"
+ 	rm -rf $OWTREE/package/luci-theme-argon
+ 	mkdir -p $OWTREE/package/luci-theme-argon
+ 	cp -a "$ARGON_SRC/." $OWTREE/package/luci-theme-argon/
+ 	echo "  源码 -> package/luci-theme-argon（$(ls $OWTREE/package/luci-theme-argon | wc -l) 个顶层项）"
  else
  	echo "  !! 缺 $ARGON_SRC —— Argon 不会进固件"
  	echo "     下载 https://codeload.github.com/jerrykuku/luci-theme-argon/tar.gz/refs/tags/v3.1.0"
@@ -373,14 +383,14 @@ fi
  # P25 —— rootfs overlay：开箱即用调优（不再靠用户 shell）
  # ---------------------------------------------------------------
  # 为什么单独一个目录：$T/files/ 是**内核源码** overlay（drivers/dts），
- # 而 rootfs 文件必须进编译树顶层 /root/ow2512/files/（OpenWrt 约定，
+ # 而 rootfs 文件必须进编译树顶层 $OWTREE/files/（OpenWrt 约定，
  # 在 base-files 与 package 之后覆盖进 $(TARGET_DIR)）。
  #
  # base-files 那两份（wireless 配置、uci-defaults 兜底）走 target 目录，
  # 整份替换 —— 不用 sed 打补丁，保证可复现、不被上游上下文变化搞坏。
  # ---------------------------------------------------------------
  echo "== 5e. rootfs overlay（net-tune 守护 + sysctl + rc.d）=="
- ROOTFILES=/root/ow2512/files
+ ROOTFILES=$OWTREE/files
  # 旧的 rps-watch 三件套已被上游 packet_steering 取代，残留会把 rps_cpus 拉回
  # 单核（上游脚本会跟它打架）。先清掉已装到编译树的旧拷贝。
  rm -f $ROOTFILES/usr/sbin/rps-watch $ROOTFILES/etc/init.d/rps \

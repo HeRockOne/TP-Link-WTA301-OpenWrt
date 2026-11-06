@@ -1,13 +1,33 @@
 # WTA301 使用手册 — 升级 / 刷写 / 回原厂 / 空间
 
-日期：2026-11-05（P17 状态）
+日期：2026-11-06（P30 状态）
 所有数字均为**本轮板子实测**，非估算。
+
+> **本手册随版本演进，§1 已过时过一次。** 早期的「LuCI 刷写固件不能用」在 P28
+> 实现系统内升级后已不成立，§1 已改成指向 `P28-SYSUPGRADE-IN-OS.md`。
+> 看任何一节的「不能」时，先确认它的日期。
 
 ---
 
-## 1. LuCI 里的「刷写固件」能用吗？—— **不能**
+## 1. LuCI 里的「刷写固件」能用吗？—— **能（P28 之后）**
 
-### 1.1 实测证据
+### 1.0 现状（P28 起）
+
+「系统 → 备份/刷写固件」上传 `*-sysupgrade.bin` **可以直接刷**，配置与已装包自动保留。
+命令行：`sysupgrade -T <img>` 先干跑校验，`sysupgrade <img>` 真刷。
+
+**但第一次必须走 u-boot 网页刷**（`docs/USER-MANUAL.md` §3）：DTS 分区加宽写在 FIT
+内嵌的 DTB 里，不先刷进去 `mtd write` 会被分区尺寸拒绝。判据：
+
+```sh
+cat /sys/class/mtd/mtd5/size     # 7602176 = 0x740000 表示已加宽
+```
+
+完整根因与铁证见 `docs/P28-SYSUPGRADE-IN-OS.md`。
+
+下面是**P17 当时**的实测记录，保留作为历史依据 —— 它解释了我们为什么要动 DTS。
+
+### 1.1 实测证据（P17 时点）
 
 ```
 root@OpenWrt:~# cat /proc/mtd | grep -c firmware
@@ -47,17 +67,24 @@ tphdr 里存着四个字段，换 kernel/rootfs 后必须重算：
 ⇒ 「只写 mtd5/mtd6、不动 tphdr」的 in-Linux 升级路径**在原理上不存在**：
 tphdr 的 md5 必然失效 → u-boot 校验失败 → 落 B 槽。
 
-### 1.3 想做 sysupgrade 需要什么（P18 可选任务，非必须）
+### 1.3 当初的设想（已被 P28 的实做取代）
 
-**可行方案（不改任何 MTD 序号）**：把 DTS 的 kernel 分区从
+> **这一节是 P17 的方案推演，不是最终落地方案。** 最终选了更简单的做法：
+> 只把 DTS 的 kernel 分区 `0x400000` 改成 `0x740000`（起点不动），
+> tphdr 保持不可寻址，在 `platform_do_upgrade()` 里直接写 mtd5/mtd6。
+> 见 `docs/P28-SYSUPGRADE-IN-OS.md`。下面保留原文以便对照当时为什么想复杂了。
+
+**当时考虑的方案（未采用）**：把 DTS 的 kernel 分区从
 `0x4880000/0x400000` 改成 `0x4800000/0x500000`，把 tphdr 包进分区头部。
 这样 `mtd5` 序号不变、`root=/dev/mtdblock6` 不受影响，且 tphdr 变成可写。
 
 然后写 `platform_do_upgrade()`：解出 kernel、拼 `tphdr(0x20000)+pad(0x60000)+kernel(0x480000)`、
 `mtd write - kernel`、`mtd write - rootfs`。
 
-代价：内核 crc32 会变（要重刷一次）、要实测序号、要掉电中断测试。约 1 天。
-**当前收益不足**（家用一年升级几次，TTL 刷写 5 分钟可接受），见 `UPGRADE-POLICY.md`。
+**为什么没走这条路**：起点前移到 `0x4800000` 会让分区与 tphdr 自身的头重叠，
+而 tphdr 里存的 klen/rlen 是 u-boot 读写时唯一依据 —— 多一层耦合，换更少收益。
+直接加宽 kernel 分区（`0x740000`，刚好到 rootfs 起点 `0x4fc0000`）不改任何偏移，
+只改一个数字，风险最小。（P28 实测：`mtd5 = 7602176`，`sysupgrade` 全链路通过。）
 
 ---
 
@@ -383,7 +410,7 @@ work/backup/FROZEN-S7-20261105/
 
 | 问题 | 答案 |
 |---|---|
-| LuCI sysupgrade | ❌ 不能用，但**安全失败**（不写盘）。要做需一轮 P18 |
+| LuCI sysupgrade | ✅ **能用（P28 起）**。上传 `*-sysupgrade.bin` 即刷，配置自动保留。首次仍须走 u-boot 网页刷（分区加宽在 DTB 里） |
 | 固件类型 | op 和**板子固件区 dump** 同格式：`0x4800000` 起的连续块，一次 `nand erase+write`。⚠️ **官网下载的原包不同（`55aa4c5e`），要先转** |
 | 进 ubootkit | 上电 3 秒内按键 → `U-Boot 2016.01-9ce3157-dirty` + `Device Size: 128 MiB` |
 | 能刷 op + 原厂 | ✅ 都能，同一种操作，差别只在擦写长度（`0x1380000` vs `0x13c0000`） |

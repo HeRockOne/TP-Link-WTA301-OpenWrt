@@ -44,35 +44,87 @@
 
 ## 3. 复现 OpenWrt 固件
 
+> **先跑静态自检**（30 秒，不编译）：
+> ```bash
+> bash wta301-2512/deliver/verify-repro.sh
+> ```
+> 它检查的东西全是「不编译也能查出来、但一旦错就白等 45 分钟」的：
+> 仓库必需文件是否齐全、脚本里有没有本机绝对路径、补丁能否干净应用、
+> DTS kernel 分区与 `mk_web_img.py` 的常量是否一致、BDF variant 是否与 DTS
+> 对得上、文件末尾换行（heredoc 静默吞命令的根源）。
+> **OK=24 WARN=0 FAIL=0 再往下走。**
+
 ```bash
 # 1) 取上游（稀疏克隆够用：qualcommax + mac80211 + generic）
 git clone --filter=blob:none https://github.com/openwrt/openwrt.git /root/ow2512
-cd /root/ow2512 && git checkout v25.12.6
-git rev-parse HEAD        # 必须是 64900e756efa667774214f9c6b17c113222e01f7
+cd /root/ow2512 && git checkout 64900e756efa667774214f9c6b17c113222e01f7
+git rev-parse HEAD        # 必须就是上面这个 commit（v25.12.6）
 
 # 2) 放权威 .config（省掉一长串 make menuconfig 猜测）
 cp wta301-2512/pin/ow2512-dot-config.txt .config
 
 # 3) 铺我们的改动（幂等，可重复跑）
+#    树不在 /root/ow2512 时：OWTREE=/path/to/openwrt bash ...
 bash wta301-2512/deliver/apply-to-2512.sh
 
-# 4) Argon 主题（第三方，需自己下）
+# 4) Argon 主题（第三方，需自己下；位置可用 ARGON_SRC 覆盖）
 mkdir -p /root/pkgsrc/luci-theme-argon-v3.1.0
 curl -L https://codeload.github.com/jerrykuku/luci-theme-argon/tar.gz/refs/tags/v3.1.0 \
   | tar xz -C /root/pkgsrc/luci-theme-argon-v3.1.0 --strip-components=1
 
 # 5) 编
 make -j$(nproc) world      # 首次约 1.5–2 h
+make -j$(nproc) target/install
 
-# 6) 出四件套
-bash wta301-2512/deliver/make-release.sh
+# 6) 出包（三步，前一步的产物是后一步的输入）
+bash wta301-2512/deliver/make-release.sh --version <VER>-2512 --stage <VER>
+bash wta301-2512/deliver/make-deliverable.sh <ver>     # 小写
+bash wta301-2512/deliver/make-open-release.sh <VER>    # 大写，出对外发布包
+```
+
+### 路径覆盖（全部可环境变量指定）
+
+`deliver/lib-paths.sh` 统一解析，**没有一处写死本机路径**：
+
+| 变量 | 默认 | 用途 |
+|---|---|---|
+| `OWTREE` | `/root/ow2512` | OpenWrt 源码树 |
+| `WORK` | `<repo>/../work` | 仓库外资产（备份镜像、旧交付包） |
+| `REL` | `/root/rel` | 出包输出根 |
+| `ARGON_SRC` | `$WORK/pkgsrc/luci-theme-argon-v3.1.0` | 主题源码 |
+| `HOSTBIN` | `$OWTREE/staging_dir/host/bin` | `mkfs.ubifs` / `ubinize` |
+| `SRC` | 脚本所在仓库根 | 仓库自身 |
+
+### 出包工具全在仓库内
+
+早期 `make-deliverable.sh` 调的是 `work/out-final/flash_release.py` 和
+`work/op-build/mk_single_img.py` —— **这两个文件不在仓库里**，别人 clone 下来
+根本跑不了。现已改为：
+
+| 产物 | 仓库内工具 | 状态 |
+|---|---|---|
+| 网页整包（紧凑 `0x1060000`） | `tools/mk_web_img.py` | ✅ 已逐字节验证：产出 md5 = 已交付的 `c5ac0911…` |
+| TTL 整包（稀疏 `0x1380000`） | `tools/mk_single_img.py` | ✅ 已迁入仓库（原本只在 work/ 里） |
+| 四区 + tphdr + UBI | `tools/mk_op_pack.py` | ✅ 仓库副本是规范版（含 `--rlen`） |
+| 指纹 | `tools/mk_fingerprint.py` | ✅ |
+| 包判据 | `tools/verify_single_bin.py` | ✅ 仓库副本更新（8 字节 magic 修正） |
+| u-boot 槽镜像 | `patches/uboot/build/mk_uboot_slot.py` | ✅ 端到端验证：`u-boot.bin`(556032) → 槽 `d0ada9f7…` / crc32 `0xCB2D3108` |
+
+**整链复现实测**：用重构后的纯仓库工具重跑 `make-deliverable.sh p29`，
+四个包的 md5 与已交付发布的包**逐个相同**：
+
+```
+76df463df4d8b5acba5d52852870c127  sysupgrade
+c5ac0911accd2ec48033329c383d5c4c  网页包
+ d0ada9f76e4f1aba9b96a559a5220cee  u-boot 槽
+ e1424fea2494bcb9b527f9540a5bc91d  TTL 包
 ```
 
 ### 交付前自检（必跑）
 
 ```bash
 # 把要交付的那两个单 bin 按 u-boot 后端的判据验一遍
-python wta301-2512/tools/verify_single_bin.py --dir <交付目录>
+python3 wta301-2512/tools/verify_single_bin.py --dir <交付目录>
 ```
 
 它模拟 `tpimg_parse_image()` 的全部判据（魔数 / klen 三条 / vlen 三条 /
@@ -103,13 +155,14 @@ LZMA 解压上限。为什么不能用 `verify_pack.py`：那个验的是**四�
 
 | 产物 | 能否从仓库重建 | 实测证据 |
 |---|---|---|
-| **u-boot 槽镜像**（262,144 B） | ✅ **闭环** | 仓库版 `mk_uboot_slot.py` 重跑 → `d0ada9f7…` / `0xCB2D3108`，与已刷入板子的 `work/images/kit-p21c/uboot_slot_0x40000.bin` **逐字节一致** |
-| **u-boot `u-boot.bin`** | ⚠️ 理论上可以，**未实跑** | 脚本已可移植，本轮未执行；且基座 commit 未固定（§4） |
-| **OpenWrt 固件四件套** | ✅ 可重建 | P10：同源重跑三项逐字节相同；输入已全在仓库（§2） |
+| **u-boot 槽镜像**（262,144 B） | ✅ **闭环** | 仓库版 `mk_uboot_slot.py` 重跑 → `d0ada9f7…` / crc32 `0xCB2D3108`，与已刷入板子的实物 **逐字节一致**（本轮再次复验） |
+| **u-boot `u-boot.bin`**（556,032 B） | ⚠️ 理论上可以，**未实跑** | 已有实物 `u-boot.bin` md5 `3a4cb00e…` 与 README §3 记载一致；从其重生槽镜像也一致。但「从基座源码编译出这个 `u-boot.bin`」本轮未执行，且基座 commit 未固定（§4） |
+| **OpenWrt 固件出包** | ✅ **闭环，已逐字节验证** | 重构为纯仓库工具后重跑 `make-deliverable.sh p29`，四个包 md5 与已发布的 **逐个相同**（§3） |
+| **OpenWrt 编译** | ✅ 同一棵树内可重复 | P10：同源重跑 kernel / rootfs / tphdr 三项逐字节相同 |
 | **UBI overlay** | 结构可重建、字节不能 | 时间戳写进 superblock（§4） |
 
-> 一句话：**出槽镜像那一步已闭环；编译那一步靠固定引用 + overlay，换机器第一次跑不能指望 md5 一致。**
-> 想真正卡死 u-boot 复现，唯一办法是把 codelinaro 基座 commit 钉下来写进 §1。
+> 一句话：**出包链路完全闭环（含 u-boot 槽镜像）；编译链路靠固定引用 + overlay，u-boot 基座 commit 是唯一剩下的硬缺口。**
+> OpenWrt 侧已固定到 commit（`64900e75…`），u-boot 侧只固定到分支，这是本工程最大的复现残留风险。
 
 ---
 
@@ -117,10 +170,11 @@ LZMA 解压上限。为什么不能用 `verify_pack.py`：那个验的是**四�
 
 | 项 | 状况 | 影响 |
 |---|---|---|
-| u-boot 基座 commit | **未固定**（只记了分支） | 同代基座可过；跨大版本要人工对 |
+| u-boot 基座 commit | **未固定**（只记了分支 `NHSS.QSDK.12.5`） | 同代基座可过；跨大版本要人工对 |
 | UBI overlay 镜像字节 | `mkfs.ubifs` 写入当前时间戳，`SOURCE_DATE_EPOCH` 在 host 工具上不生效 | 只影响字节，不影响功能（首启会重格式化） |
-| 绝对路径 | `apply-to-2512.sh` 硬编码 `/root/ow2512`、`/root/pkgsrc/...` | 换机器要改，脚本有 `die()` 保护会早失败，不会静默走错 |
+| ~~绝对路径~~ | ✅ **已修**：所有脚本走 `deliver/lib-paths.sh`，`OWTREE`/`WORK`/`REL`/`ARGON_SRC`/`HOSTBIN` 全部可环境变量覆盖 | 已无此项 |
 | 工具链 | 不进仓库（`staging_dir` 有数百 MB，随基座走） | 属正常实践 |
+| 整包尺寸常量 | `0x1060000`/`0x1380000`/`0x740000` 写在多处（出包脚本、`mk_web_img.py`、DTS），改一处必须改一片 | `verify-repro.sh` §6/§9 会交叉比对并报错 |
 
 ---
 

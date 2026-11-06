@@ -9,11 +9,26 @@
 *.itb
 *.squashfs
 *.tar.zst
+*.tar.gz
 *.apk
+
+# 发布包目录（由 deliver/make-open-release.sh 生成，走 Releases 页）
+/release/
+/release-*/
 
 # 证据日志保留
 !docs/evidence/*.txt
 
 # BDF 例外：board-2.bin 是 WiFi 板型/校准数据，上游任何 repo 都没有。
 # 它是**输入**不是产物，必须入库；否则构出来的固件 WiFi 起不来。
+# 它的来历与 IP 注意事项见 THIRD-PARTY.md §2。
 !patches/bdf/*.bin
+
+# 本地临时物
+__pycache__/
+*.pyc
+*.tmp
+*.orig
+*.rej
+.DS_Store
+Thumbs.db

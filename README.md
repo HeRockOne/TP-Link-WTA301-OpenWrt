@@ -1,89 +1,199 @@
-# wta301-2512 —— 迁移到 OpenWrt 正式版 25.12.6
+# WTA301 → OpenWrt
 
-**目标**：把 TP-Link WTA301（IPQ5018 + RTL8367S + QCN6122，256 MiB DDR3 / 128 MiB NAND）从当前的
-**snapshot `r37669-6c9452a35b`** 迁到 **正式版 `v25.12.6`**，从而获得永久冻结的软件源、上游维护的
-无线驱动，以及正常的 `sysupgrade` 能力。
+把 **TP-Link WTA301**（Qualcomm IPQ5018 Wi-Fi 6 路由器）跑上 **OpenWrt 25.12.6** 的完整移植工程：
+设备树、内核补丁、u-boot（含网页恢复界面）、固件打包、成品固件，以及每一步的实测证据。
 
-**当前状态（2026-11-06）**：**P1–P11、P16、P17 已在真机验证；P18–P21 网页刷机链路打通**。
-板子现跑 OpenWrt 25.12.6 r33311 / 6.12.112，u-boot 为 P21c。
-
-| 阶段 | 状态 | 落点 |
-|---|---|---|
-| P1 逐模块核对（12 个） | ✅ | `docs/M01..M12` |
-| P2/P3 造 DTS、编内核、四件套打包 | ✅ 逐项复核 | `docs/P2-BUILD-DELIVERY.md` · `docs/P3-PACK-CONTRACT.md` |
-| P4–P5 真机首启 + 包集对齐 | ✅ 已实证 | `docs/P5-PACKAGE-PARITY.md` |
-| P7 有线（UNIPHY PCS） | ✅ 9/9 判据 | `docs/P7-WIRED-FIX-VERIFIED.md` |
-| P9–P11 overlay 持久化 | ✅ | `docs/P11-OVERLAY-PERSISTENCE.md` |
-| P16/P17 中文 LuCI + Argon + 按键 | ✅ | `docs/P16-VERIFIED.md` · `docs/P17-ARGON-KEYS.md` |
-| P18–P21 u-boot 网页刷机 | ✅ 链路闭环，余 `factory_no_fit` 真刷未验 | `docs/P20-UBOOT-UI.md` · `docs/P21-DECODE-OOM.md` |
-| P22 存储布局实测 | ✅ 已实测并决策（mtd8 保留不动） | `docs/P22-STORAGE-LAYOUT.md` |
-
-**复现**：见 `docs/REPRODUCE.md`（OpenWrt）与 `patches/uboot/README.md`（u-boot kit）。
-
-**待服务决策**（不影响当前可用性）：WiFi 默认密码、reset 长按阈值、是否开 WAN。
-
-**已决策**：mtd8 的 22 MB 保留不动 —— `/overlay` 还剩 27.7 MB，190 个包只占 508 KB，
-改分区表风险大于收益。实测数据与理由见 `docs/P22-STORAGE-LAYOUT.md`。
+板子是本仓库作者自己的一台机器，所有结论都在**真机**上验证过；没验证的地方在文档里
+明确标为「未验证」，不写成「已完成」。
 
 ---
 
-## 这个仓库是什么
+## 支持的硬件
+
+| 项 | 规格 |
+|---|---|
+| SoC | Qualcomm **IPQ5018**（2× Cortex-A53 @ 1 GHz，2.4 GHz 射频内置） |
+| 5 GHz | **QCN6122**（Wi-Fi 6，独立芯片） |
+| 交换机 | **Realtek RTL8367S** → 4× RJ45，CPU 口 SGMII 1 Gbps |
+| 内存 | 256 MiB DDR3（可用 174.5 MiB） |
+| Flash | 128 MiB NAND |
+| 按键 | reset（GPIO20）、WPS（GPIO17） |
+| LED | 5 个（含一个 `green:wan`，但本机没有 WAN 口） |
+| 串口 | 1 个（`blsp1_uart1`） |
+
+**没有**：USB、PCIe 外设、SD/MMC。（DTS 里 `pcie0/pcie1` 注明 `disabled on purpose`。）
+
+---
+
+## 现在能做什么
+
+| 能力 | 状态 | 文档 |
+|---|---|---|
+| 启动、有线 4 口（DHCP + 桥接） | ✅ 真机验证 | `docs/P7-WIRED-FIX-VERIFIED.md` |
+| 双频 Wi-Fi（5 GHz HE80 / 2.4 GHz HT20） | ✅ 真机验证 | `docs/M12-FIRMWARE-BDF.md` |
+| 中文 LuCI + Argon 主题 | ✅ | `docs/P16-CHINESE-LUCI.md` |
+| 重置 / WPS 按键 | ✅ | `docs/P17-ARGON-KEYS.md` |
+| overlay 断电持久化 | ✅ | `docs/P11-OVERLAY-PERSISTENCE.md` |
+| **u-boot 网页刷机**（不死 u-boot + 自带 HTTP 恢复页） | ✅ | `docs/P20-UBOOT-UI.md` |
+| **系统内 `sysupgrade`**（LuCI 直接刷，不用进 u-boot） | ✅ 真机验证 | `docs/P28-SYSUPGRADE-IN-OS.md` |
+| LuCI 概览页 CPU / 温度面板 | ✅ | `docs/P30-THERMAL.md` |
+| 性能调优（packet steering / IRQ 亲和 / NAPI budget） | ✅ 已烧进固件 | `docs/P26-PERF-TUNING.md` |
+| 开箱即用（默认 SSID / 密码 / 信道） | ✅ | `docs/P25-OUT-OF-BOX.md` |
+| **NSS 硬件加速** | ❌ 有意不做 | `docs/R21-CPU-LOAD-VS-STOCK-EXTERNAL-EVIDENCE.md` |
+| 2.5G HSGMII | ❌ 交换芯片不支持 | `docs/R17-RTL8367S-SERDES.md` |
+
+> **为什么 CPU 占用比原厂高**：原厂走 NSS（闭源硬件转发，947 Mbps @ 9% CPU）。
+> 我们用主线的软件转发，有线 ~590 Mbps @ 80% CPU。要 NSS 就得弃 DSA、
+> 换闭源 blob、内核全部脱离主线 —— 与「长期稳定家用」冲突，故不做。
+> 完整对比数据见上面的 R21 文档。
+
+---
+
+## 固件下载
+
+成品固件在 **Releases** 页（仓库里不存二进制，`*.bin` 已被 `.gitignore` 排除）。
+
+每个版本给三个包，**用途完全不同，不能混刷**：
+
+| 文件 | 大小 | 用途 |
+|---|---|---|
+| `wta301-op-25.12.6-<ver>.bin` | 17,170,432 B | **u-boot 网页刷机**（紧凑布局 `0x1060000`） |
+| `wta301-op-25.12.6-<ver>-sysupgrade.bin` | ~13.4 MB | **系统内升级**（LuCI / `sysupgrade`） |
+| `rescue/wta301-op-25.12.6-<ver>-ttl.bin` | 20,447,232 B | **串口救砖**（稀疏布局 `0x1380000`，含 head/tail 填充） |
+| `wta301-uboot-p21c.bin` | 262,144 B | u-boot 槽镜像（一般不用刷，u-boot 本身已经是这个版本） |
+
+网页包和 TTL 包的**布局不同**（紧凑 vs 稀疏），互相刷会写错偏移。看标题对号入座。
+
+### 刷机流程
+
+**第一次从原厂 / 别的 OpenWrt 过来 —— 必须走 u-boot 网页**：
+
+1. 断电，按住 reset 不放，上电，等约 **40 秒**到红灯常亮（进入 u-boot failsafe）
+2. 网线接到 LAN 口，电脑设 `192.168.1.2/24`，浏览器开 `http://192.168.1.1`
+3. 上传网页包 → 页面会先校验再写入
+4. 刷完**手动 `bootipq`**，不要放手
+
+细节与故障处理见 `docs/USER-MANUAL.md` §3。
+
+**之后的版本 —— 直接在 LuCI 里刷**：
+「系统 → 备份/刷写固件」上传 `-sysupgrade.bin`。
+配置和已装软件包**会自动保留**（overlay 在独立的 UBI 卷上，升级不碰它）。
+
+### 回原厂
+
+原厂固件在 B 槽（`mtd10` + `mtd11`）里原封不动保留着。
+`boot_flag`（`mtd13`）= `55 aa 42 46 | 00 00 00 02`，大端 `2` = 从 A 槽启动。
+把原厂 A 槽镜像 dd 回 `mtd5` + `mtd6` 即可，`boot_flag` 不用改。
+
+---
+
+## 仓库结构
 
 | 目录 | 内容 |
 |---|---|
-| `docs/` | 迁移分析、风险登记、阶段记录、外部证据、复现指南 |
-| `pin/` | 事实快照（S7 基线、**25.12.6 顶层 .config**、板级实测数据） |
-| `patches/` | 本板补丁 + **`uboot/files/`（u-boot 自研代码全量）** + **`bdf/`（两个 board-2.bin）** |
-| `files/` | 内核驱动 / dt-binding / 板级 dts 的 overlay |
-| `deliver/` | 应用脚本 + 出包脚本 + base-files + 成品固件 |
+| `patches/uboot/` | **u-boot kit** —— 全部自研 u-boot 代码（23 个文件，整份 overlay 不打 diff）+ 构建脚本 + 槽镜像打包器。见 `patches/uboot/README.md` |
+| `patches/kernel-6.12/` | 内核补丁：UNIPHY PCS、stmmac DWMAC、gephy 时钟、dt-binding |
+| `patches/mac80211/` | ath11k 低内存 DP ring 尺寸 |
+| `patches/fstools/` | `fstools_overlay_name` 支持（overlay 用自定义 UBI 卷名） |
+| `patches/bdf/` | 两个 `board-2.bin`（Wi-Fi 板型容器）—— **上游任何仓库都没有** |
+| `files/` | DTS + 设备树覆盖 |
+| `files-rootfs/` | rootfs overlay：`net-tune` 守护、sysctl、LuCI 温度面板、rpcd 数据源 |
+| `files-base-files/` | base-files overlay：出厂无线配置、uci-defaults |
+| `files-ipq50xx-upgrade/` | `platform.sh`（系统内升级的板级实现） |
+| `deliver/` | 应用脚本、出包脚本、验收脚本 |
+| `tools/` | 校验 / 刷写 / 串口 / 三方差异表工具 |
+| `pin/` | 事实快照（上游 `.config`、S7 基线、板级实测数据） |
+| `docs/` | 分析、风险登记、阶段记录、外部证据、复现指南 |
 | `evidence/` | 实测日志 |
-| `tools/` | 校验 / 刷写 / 串口 / 差异表工具 |
 
-**不包含**：OpenWrt 源码树（14 GB）、u-boot 源码树（133 MB）、工具链。
-这些不属仓库内容 —— 只记固定引用（tag + commit），具体见 `docs/REPRODUCE.md` §1。
-
-**回退基线**在仓库外：`../work/backup/FROZEN-S7-20261105/`。
+**不包含**（按固定引用取）：OpenWrt 源码树（14 GB）、u-boot 源码树（133 MB）、工具链。
+具体 tag / commit 见 `docs/REPRODUCE.md`。
 
 ---
 
-## 为什么迁移（决策依据，全部有出处）
+## 从源码构建
 
-| 事实 | 证据 |
+### OpenWrt
+
+```bash
+git clone https://github.com/openwrt/openwrt.git
+cd openwrt && git checkout 64900e756efa667774214f9c6b17c113222e01f7   # v25.12.6
+# 铺本仓库的 overlay + 补丁（脚本会逐项校验 md5）
+bash wta301-2512/deliver/apply-to-2512.sh /path/to/openwrt
+make -j$(nproc) world
+make -j$(nproc) target/install
+```
+
+`apply-to-2512.sh` 会碰 `target/linux/qualcommax/files/`，**触发内核全量重编（约 45 分钟）**。
+只改用户态时用 `deliver/apply-rootfs-only.sh`，不触发重编。
+
+出包：
+
+```bash
+bash deliver/make-release.sh --version P29-2512 --stage P29   # 四区 + sysupgrade
+bash deliver/make-deliverable.sh p29                          # 三种成品包 + 自检
+```
+
+### u-boot
+
+见 `patches/uboot/README.md`。要点：
+
+```bash
+UBOOT_TREE=/path/to/u-boot-2016 \
+TOOLCHAIN_BIN=/path/to/toolchain/bin \
+bash patches/uboot/build/build_j1.sh
+```
+
+验收：`u-boot.bin` 应为 **556,032 B**，槽镜像 262,144 B / md5 `d0ada9f7…`。
+
+---
+
+## ⚠️ 刷机前必须知道的三件事
+
+1. **二级 u-boot 链接基址是 `0x49900000`，不是 `0x4a920000`。**
+   链错 → 一级跳过去找不到东西 → **串口直接死**。
+
+2. **一级 u-boot（`factory_boot`，`0x0–0x3c0000`）永不写入。**
+   它是唯一的救命通道。本仓库的所有工具都不会碰它。
+
+3. **u-boot 基座 commit 未固定。**
+   `patches/uboot/README.md` §1.1 写明了这个残余风险：codelinaro 上游当时没记 commit。
+   补救是本目录的 `files/` 是**整份 overlay**（改过的文件全量收录，不打 diff），
+   只要基座同代（2016.01 / QSDK 12.5）就能重建出等价产物。
+   跨基座版本重编不保证 md5 一致 —— 这是已知局限，不是疏漏。
+
+---
+
+## 已知限制
+
+| 限制 | 说明 |
 |---|---|
-| `v25.12.6` 标签日期 **2026-10-18 02:11**，而本板 snapshot 构建于 **2026-10-25 20:35** | 上游 git tag |
-| 正式版 `ipq50xx` 子目标自 `25.12.0` 起存在；`24.10.x` 无此子目标 | `downloads.openwrt.org/releases/` |
-| 正式版**永久冻结**；snapshot 每次构建覆盖，8 条源已在漂移（现 `r38103` / 内核 6.18.60） | `docs/03-EXTERNAL-EVIDENCE.md` |
-| 25.12.6 有 **7 个同硬件组合**设备（IPQ5018+QCA8337+QCN6122）的 DTS 可参照 | `pin/x2512-facts.json` |
-| 25.12.6 含 QCN6122 专用 ath11k 补丁 5 个（920/921/922/923/924/925） | 同上 |
-
-⇒ 当初选 snapshot 是在正式版已发布 7 天的情况下选的，属于**基线选择失误**。见 `docs/00-MIGRATION-ANALYSIS.md` §1。
-
----
-
-## 关键约束（不可协商）
-
-1. **S7 是回退基线，迁移全程不碰板子**。所有产物先离线造好、离线校验。
-2. 首版目标 = **只验证能不能启动 + 有线通**，Wi-Fi 留到第二阶段。
-3. 迁移产物**不覆盖** S7 的 `work/images/out-op-v19-fix10.1-S7/`。
-4. 刷机前必须过 `flash_release.py` 预检 + 三重校验（`AGENTS.md` §5.5）。
-5. 未在真机验证的产物不得写成"已完成"。
+| 无 WAN 口 | 5 个交换口全在 `br-lan` 桥里，有意设计（原厂也只有一个桥） |
+| 内存紧 | `MemTotal 174.5 MiB`，ath11k 独占 73.4 MiB = 42%。装软件包要看容量 |
+| 无 `cpufreq` | IPQ5018 频率锁定，无法调频/降频省电 |
+| 无 RTC | 重启后时钟倒退，判断事件先后要用 `/proc/uptime` |
+| 5 GHz 峰值温度较高 | 满载打到 90 °C（芯片阈值 120 °C，`ath11k_thermal cur_state=0/100`）。给 5G 芯片加散热片有用，给 CPU 加没用（两者不在同一硅片） |
+| mtd8 的 22 MiB 未启用 | 改分区表风险大于收益，保留不动。理由见 `docs/P22-STORAGE-LAYOUT.md` |
 
 ---
 
-## 状态
+## 许可
 
-| 阶段 | 状态 |
-|---|---|
-| P0 规划（本文档 + 分析 + 风险 + 计划） | ✅ |
-| P1 取得上游参数、克隆源码树 | ✅ v25.12.6 = 64900e75 |
-| P2 造 DTS、编内核 | ✅ 6.12.112 |
-| P3 离线造包 + 打包（TP 头） | ✅ 四件套逐项复核 |
-| P4 真机验证（启动 + 有线） | ✅ |
-| P5 包集对齐（182 包） | ✅ |
-| P6 sysupgrade | ⛔ **不做**（stock sysupgrade 会破坏启动） |
-| P7 有线 UNIPHY PCS | ✅ 9/9 |
-| P9–P11 overlay 持久化 | ✅ |
-| P16/P17 中文 LuCI + Argon + 按键 | ✅ |
-| P18–P21 u-boot 网页刷机 | ✅ 闭环（`factory_no_fit` 真刷未验） |
+本仓库的**原创部分**（脚本、文档、DTS、u-boot 自研代码、内核补丁）以 **GPL-2.0** 发布，
+见 [`LICENSE`](LICENSE)。这是与 OpenWrt、u-boot、Linux 内核保持一致的选择。
 
-各阶段细节见 `docs/02-PHASE-PLAN.md`；从零复现见 `docs/REPRODUCE.md`。
+仓库内含的第三方材料及其许可见 [`THIRD-PARTY.md`](THIRD-PARTY.md)。
+其中 `patches/bdf/` 与 ART 校准数据的关系，务必读那一节。
+
+---
+
+## 致谢
+
+- **OpenWrt** —— 整个用户态、LuCI、`ipq50xx` 子目标
+- **Linux 内核** + Qualcomm 上游化工作（UNIPHY PCS、IPQ5018 DWMAC、gephy 时钟）
+- **ath11k** —— 无线驱动，以及上游那套低内存 DP ring 尺寸提案
+- **u-boot** 与 CodeLinaro QSDK（`NHSS.QSDK.12.5` 分支）
+- **kenzok8 / jerrykuku** —— Argon 主题
+- 所有在 OpenWrt 论坛、linux-arm-msm、lore.kernel.org 上留下实证记录的人 ——
+  本工程大部分的「可行 / 不可行」结论，先是他们的，然后才是我们验证的
+

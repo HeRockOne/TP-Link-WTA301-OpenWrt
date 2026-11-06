@@ -1,5 +1,11 @@
 # P6 sysupgrade 设计（平台内升级，必须在真机 P4/P5 通过后做）
 
+> **状态：已实现（P28）。** 本文是当时的**方案推演**，不是最终做法。
+> 最终落地：`docs/P28-SYSUPGRADE-IN-OS.md`，代码在 `files-ipq50xx-upgrade/lib/upgrade/platform.sh`。
+>
+> 本文§1对「为什么原厂 sysupgrade 会破启动链」的分析是对的；
+> 但结论「tphdr 写不了 ⇒ 做不到」是错的 —— 只加宽 DTS 的 kernel 分区就绕过去了。
+
 **为什么单列一阶段**：这块板的 kernel/rootfs **不在 UBI 里**，而是裸分区 + 一个
 `tphdr`（0x4800000）里写着 `md5(kernel[0:0x480000] ‖ rootfs[0:0xbc0000])`，
 secondary u-boot 的 `tpl_boot_one()` 每次都校验它。stock `sysupgrade` 只写分区、
