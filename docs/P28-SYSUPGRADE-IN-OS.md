@@ -362,6 +362,44 @@ ls: /tmp/su.log: No such file or directory
 ```
 ⇒ 验证剧本里**任何想跨重启保留的证据都必须放 `/overlay`**。
 
+#### ★ 一个源码级的附带实证：`/overlay/.fs_state -> 2`
+
+重启后查：
+
+```
+# ls -la /overlay/
+lrwxrwxrwx    1 root root 1 Oct 17 21:46 .fs_state -> 2
+```
+
+这就是 §2.5 引的 `mount_root.c` 里那几行的落点：
+
+```c
+case FS_EXT4: case FS_F2FS: case FS_JFFS2: case FS_UBIFS:
+	fs_state_set("/overlay", FS_STATE_READY);   // 2
+	break;
+```
+
+`2 = FS_STATE_READY`。所以「overlay 没被格式化」不再是「看起来没丢」，
+而是有**源码级判据**可读：`.fs_state` 为 `2` 就是走了 READY 分支，
+只有 `jffs2_switch()`（格式化）才会把它改成别的状态。
+
+这条可以当以后任何机型的通用判据：**一个符号链接顶一整段推理**。
+
+#### ⚠ 板子没有 RTC，不能用时间戳判断先后
+
+刷机后立刻查到的矛盾：
+
+```
+# date          → Sat Oct 17 21:49:07      （现在）
+# /proc/uptime  → 54.70                     （54 秒前启动）
+# ls -l /overlay/su2.log → Oct 17 21:51      （比「现在」还晚）
+# dmesg 里内核构建时间 → SMP Sat Oct 17 21:45:38
+```
+
+**重启后系统时钟会倒退**（无 RTC / 无 NTP），所以板上任何基于 mtime 或 logread
+时间戳的「先发生 vs 后发生」判断都不可靠，**必须改用 `/proc/uptime` 或事件序列本身**。
+这次只是虚惊（差点把正常重启当成时钟异常），但很容易引人走错。
+
 
 ---
 
