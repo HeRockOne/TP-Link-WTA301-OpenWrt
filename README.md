@@ -4,20 +4,22 @@
 **snapshot `r37669-6c9452a35b`** 迁到 **正式版 `v25.12.6`**，从而获得永久冻结的软件源、上游维护的
 无线驱动，以及正常的 `sysupgrade` 能力。
 
-**当前状态（2026-11-05 05:2x）**：**P1–P3 完成，P4 待真机**。离线产物已造好并逐项复核，
-**尚未向板子写入任何内容**（S7 原样运行中）。
+**当前状态（2026-11-06）**：**P1–P11、P16、P17 已在真机验证；P18–P21 网页刷机链路打通**。
+板子现跑 OpenWrt 25.12.6 r33311 / 6.12.112，u-boot 为 P21c。
 
 | 阶段 | 状态 | 落点 |
 |---|---|---|
 | P1 逐模块核对（12 个） | ✅ | `docs/M01..M12` |
-| P2 造 DTS + 编内核（6.12.112） | ✅ `target/linux` EXIT=0，`make -j8` EXIT=0 | `docs/P2-BUILD-DELIVERY.md` |
-| P3 四件套打包 + 独立复核 | ✅ kernel/rootfs/tphdr/ubi 全绿 | `docs/P3-PACK-CONTRACT.md` · `../work/images/v25.12.6-P3/` |
-| P4 真机首验 | ⏸ **等板子上电 + 串口**（机箱网卡无 192.168.1.x、串口通道未起） | `docs/P4-FIRST-BOOT-PLAN.md` |
-| P5 LuCI/包集对齐 | ✅ 182 包，squashfs 8.71 MB（余量 3.6 MB），产物 `../work/images/v25.12.6-P5/` | `docs/P5-PACKAGE-PARITY.md` |
+| P2/P3 造 DTS、编内核、四件套打包 | ✅ 逐项复核 | `docs/P2-BUILD-DELIVERY.md` · `docs/P3-PACK-CONTRACT.md` |
+| P4–P5 真机首启 + 包集对齐 | ✅ 已实证 | `docs/P5-PACKAGE-PARITY.md` |
+| P7 有线（UNIPHY PCS） | ✅ 9/9 判据 | `docs/P7-WIRED-FIX-VERIFIED.md` |
+| P9–P11 overlay 持久化 | ✅ | `docs/P11-OVERLAY-PERSISTENCE.md` |
+| P16/P17 中文 LuCI + Argon + 按键 | ✅ | `docs/P16-VERIFIED.md` · `docs/P17-ARGON-KEYS.md` |
+| P18–P21 u-boot 网页刷机 | ✅ 链路闭环，余 `factory_no_fit` 真刷未验 | `docs/P20-UBOOT-UI.md` · `docs/P21-DECODE-OOM.md` |
 
-**一句话下一步**：插上串口 + 网线、给板子上电，然后按 `docs/P4-FIRST-BOOT-PLAN.md` §9.1 先做回退演练，
-再照着 `../work/images/v25.12.6-P5/flash_cmds.txt` 四区顺序刷写（每区都有 `crc32` 期望值）。
-升级/在线刷写（P6）的设计见 `docs/P6-SYSUPGRADE-PLAN.md`——**stock sysupgrade 会破坏启动**，别直接跑。
+**复现**：见 `docs/REPRODUCE.md`（OpenWrt）与 `patches/uboot/README.md`（u-boot kit）。
+
+**待服务决策**（不影响当前可用性）：WiFi 默认密码、reset 长按阈值、是否开 WAN、是否用 mtd8 的 22 MB。
 
 ---
 
@@ -25,12 +27,18 @@
 
 | 目录 | 内容 |
 |---|---|
-| `docs/` | 迁移分析、风险登记、阶段计划、外部证据 |
-| `pin/` | 事实快照（S7 基线、25.12.6 上游参数、板级实测数据） |
-| `patches/` | 需要带到 25.12.6 的本板补丁（DTS、ath11k low-mem 等） |
-| `evidence/` | 实测日志（`.txt`，本仓库 `.gitignore` 不排除） |
+| `docs/` | 迁移分析、风险登记、阶段记录、外部证据、复现指南 |
+| `pin/` | 事实快照（S7 基线、**25.12.6 顶层 .config**、板级实测数据） |
+| `patches/` | 本板补丁 + **`uboot/files/`（u-boot 自研代码全量）** + **`bdf/`（两个 board-2.bin）** |
+| `files/` | 内核驱动 / dt-binding / 板级 dts 的 overlay |
+| `deliver/` | 应用脚本 + 出包脚本 + base-files + 成品固件 |
+| `evidence/` | 实测日志 |
+| `tools/` | 校验 / 刷写 / 串口 / 差异表工具 |
 
-**不包含**：固件二进制。回退基线在 `../work/backup/FROZEN-S7-20261105/`。
+**不包含**：OpenWrt 源码树（14 GB）、u-boot 源码树（133 MB）、工具链。
+这些不属仓库内容 —— 只记固定引用（tag + commit），具体见 `docs/REPRODUCE.md` §1。
+
+**回退基线**在仓库外：`../work/backup/FROZEN-S7-20261105/`。
 
 ---
 
@@ -63,11 +71,15 @@
 | 阶段 | 状态 |
 |---|---|
 | P0 规划（本文档 + 分析 + 风险 + 计划） | ✅ |
-| P1 取得上游参数、克隆源码树 | ⬜ |
-| P2 造 DTS、编内核与 ImageBuilder | ⬜ |
-| P3 离线造包 + 打包（TP 头） | ⬜ |
-| P4 真机验证（启动 + 有线） | ⬜ |
-| P5 Wi-Fi 验证（含 low-mem ring 方案） | ⬜ |
-| P6 sysupgrade 落地 | ⬜ |
+| P1 取得上游参数、克隆源码树 | ✅ v25.12.6 = 64900e75 |
+| P2 造 DTS、编内核 | ✅ 6.12.112 |
+| P3 离线造包 + 打包（TP 头） | ✅ 四件套逐项复核 |
+| P4 真机验证（启动 + 有线） | ✅ |
+| P5 包集对齐（182 包） | ✅ |
+| P6 sysupgrade | ⛔ **不做**（stock sysupgrade 会破坏启动） |
+| P7 有线 UNIPHY PCS | ✅ 9/9 |
+| P9–P11 overlay 持久化 | ✅ |
+| P16/P17 中文 LuCI + Argon + 按键 | ✅ |
+| P18–P21 u-boot 网页刷机 | ✅ 闭环（`factory_no_fit` 真刷未验） |
 
-详见 `docs/02-PHASE-PLAN.md`。
+各阶段细节见 `docs/02-PHASE-PLAN.md`；从零复现见 `docs/REPRODUCE.md`。

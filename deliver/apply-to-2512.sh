@@ -275,9 +275,12 @@ cp -a $SRC/deliver/ipq50xx-base-files/. $T/ipq50xx/base-files/
 ls -l $T/ipq50xx/base-files/etc/board.d/90_wta301 $T/ipq50xx/base-files/etc/hotplug.d/firmware/12-wta301-caldata
 
 echo "== 7. board-2.bin（两个容器，S7 已实证；不从 ipq-wifi 取）=="
+# 优先用仓库内的副本（patches/bdf/），仓库外那份只做兼容回退。
+# BDF 是二进制 blob，不在上游任何 repo 里，必须随仓库走，否则 WiFi 起不来。
+BDF=$SRC/patches/bdf
+[ -f "$BDF/board2-wta301-ipq5018-2g.bin" ] || BDF=$SRC/../work/op-build/assets/bdf
 mkdir -p $T/ipq50xx/base-files/lib/firmware/ath11k/IPQ5018/hw1.0 \
          $T/ipq50xx/base-files/lib/firmware/ath11k/QCN6122/hw1.0
-BDF=$SRC/../work/op-build/assets/bdf
 cp -f "$BDF/board2-wta301-ipq5018-2g.bin"  $T/ipq50xx/base-files/lib/firmware/ath11k/IPQ5018/hw1.0/board-2.bin
 cp -f "$BDF/board2-wta301-qcn6122-5g.bin"  $T/ipq50xx/base-files/lib/firmware/ath11k/QCN6122/hw1.0/board-2.bin
 md5sum $T/ipq50xx/base-files/lib/firmware/ath11k/*/hw1.0/board-2.bin

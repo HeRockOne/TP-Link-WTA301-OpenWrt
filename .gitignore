@@ -13,3 +13,7 @@
 
 # 证据日志保留
 !docs/evidence/*.txt
+
+# BDF 例外：board-2.bin 是 WiFi 板型/校准数据，上游任何 repo 都没有。
+# 它是**输入**不是产物，必须入库；否则构出来的固件 WiFi 起不来。
+!patches/bdf/*.bin
