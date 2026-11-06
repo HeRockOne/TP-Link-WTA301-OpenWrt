@@ -26,35 +26,51 @@ wta301-getroot.py —— 一键在原厂固件上取得 root，并可继续刷�
 ★★★ 分区表 —— 最容易搞死的地方 ★★★
 ═══════════════════════════════════════════════════════════════════════════
 
-原厂 shell 实测（4.4.60，15 个分区）与我们的 OpenWrt（6.12，17 个分区）逐条比对：
+以下全部来自板上 /sys/class/mtd/mtdN/offset（十进制已换算成十六进制），
+是唯一真源。名字和编号都会骗人，物理偏移不会。
 
-    偏移          原厂名字           OpenWrt 名字    说明
-    0x0700000    normal_boot      normal_boot     u-boot 槽
-    0x0880000    kernel_bak       kernel_bak      ★★ B 槽内核（原厂主槽…其实不是）
-    0x0fc0000    rootfs_bak       rootfs_bak      ★★ B 槽 rootfs
-    0x4700000    normal_boot_bak  normal_boot     u-boot 槽（两边都是我们的 kit）
-    0x4800000    firmware_bak     (未建模)         A 槽容器
-    0x4880000    kernel           kernel          ★★ A 槽内核
-    0x4fc0000    rootfs           rootfs          ★★ A 槽 rootfs
-    0x0080000    firmware         (未建模)         B 槽容器
+    mtd   偏移         大小         名字               归属
+    0     0x00000000  0x003c0000  factory_boot       一级 u-boot（永不写）
+    1     0x00400000  0x00020000  factory_info       机型/MAC（永不写）
+    2     0x00480000  0x00020000  art                校准（永不写）
+    3     0x00500000  0x00200000  config             UBI（内含卷 mtd15）
+    4     0x00700000  0x00040000  normal_boot        u-boot   B 槽
+    5     0x00880000  0x00400000  kernel             kernel   B 槽
+    6     0x00fc0000  0x00c00000  rootfs             rootfs   B 槽
+    7     0x06a00000  0x01600000  rootfs_data        原厂 overlay（内含卷 mtd16）
+    8     0x00800000  0x02620000  firmware           容器     B 槽
+    9     0x04700000  0x00040000  normal_boot_bak    u-boot   A 槽
+    10    0x04880000  0x00400000  kernel_bak         kernel   A 槽
+    11    0x04fc0000  0x00c00000  rootfs_bak         rootfs   A 槽
+    12    0x06a00000  0x01600000  rootfs_data_bak    与 mtd7 同一块
+    13    0x04800000  0x02620000  firmware_bak       容器     A 槽
+    14    0x04000000  0x00020000  boot_flag          55aa4246 00000001
 
-★★ 更正过的错误：我曾写「原厂/我们的 mtd 名字完全相反」，并把 kernel↔kernel_bak
-   说成互为主备。**实测不成立。** 证据：
-     1) 原厂 shell 里 `md5sum /dev/mtdblock10` = 2868d8e975da7c641e54c72b6beb8f26
-        = work/backup/mtd10_kernel_bak.bin（即 0x880000 的内容）→ mtd10 同位。
-     2) 原厂现在正从 A 槽（0x4880000/0x4fc0000）启动，而它把这两个分区叫
-        「kernel」「rootfs」= mtd5/mtd6 —— 与 OpenWrt 叫法完全一样。
-   真正名字相反的是**容器**：原厂「firmware」=0x800000(B 槽)、
-   「firmware_bak」=0x4800000(A 槽)；这两个 OpenWrt 不建模。
+    A 槽 = 0x4700000 u-boot / 0x4880000 kernel / 0x4FC0000 rootfs = mtd9/10/11
+    B 槽 = 0x0700000 u-boot / 0x0880000 kernel / 0x0FC0000 rootfs = mtd4/5/6
 
-⇒ 槽位编号在两种固件下一致（见 SLOT_A / SLOT_B 常量），可以只按编号定位。
-  但分区**数量与长度**不同，所以本脚本不硬编码长度，每次都从目标机 /proc/mtd 读。
-  （原厂 mtd5=0x400000，我们 mtd5=0x740000；同一槽、不同视图。）
+  boot_flag = 55aa4246 00000001 ⇒ 一级 u-boot 先检 image_1(B 槽)，
+  过了就用 B 槽的 u-boot 起。image_2 = A 槽。
+
+★★★ 我在这一节犯过的两次错（留档，别再犯）★★★
+
+  错误 1：「原厂/我们的 mtd 名字互为主备」。不成立。实测原厂 shell 里
+          md5sum /dev/mtdblock10 = 2868d8e9… = mtd10_kernel_bak.bin = 0x4880000。
+          原厂把 0x4880000 叫 kernel_bak、把 0x880000 叫 kernel_bak ——
+          名字和 OpenWrt 一模一样，没有互换。
+  错误 2：「两边编号完全一致，A 槽 = mtd5/mtd6」。也是错的，而且更危险。
+          原厂视角 mtd5 = 0x880000（B 槽），OpenWrt 视角 mtd5 = 0x4880000（A 槽）。
+          同一编号在两个固件里指不同物理位置。
+
+  取证方法（两次都是靠这个纠正的）：
+      cat /sys/class/mtd/mtdN/offset   ← 绝对偏移，不会骗人
+  教训：偏移只能从设备读，不能凭 md5 反推，更不能凭「能启动」推断。
+        我们 kit 的 tpimg_boot_slot() 只验 magic + 长度，md5 错了照样启动。
 
 ★★★ 第二道陷阱：原厂 mtd10 只有 4 MiB，装不下 OpenWrt 内核 ★★★
 
     OpenWrt 内核 FIT totalsize = 0x41526c (4,280,940)
-    原厂  mtd10 "kernel_bak"   = 0x400000 (4,194,304)   ← 差 0x1526c，会被截断
+    A 槽 kernel 分区（mtd10）  = 0x400000 (4,194,304)   ← 差 0x1526c，会被截断
 
     但原厂还有一个 **容器分区** mtd13 "firmware_bak" = 0x4800000 起、0x2620000 长，
     它完整覆盖 A 槽。容器内实测映射（dd + hexdump 逐字节核对过）：
@@ -123,6 +139,10 @@ import time
 
 ELINK_PORT = 32768
 SRV_PORT = 8099
+NC_BACKUP_PORT = 8098   # 设备 `dd | nc PC 8098` 把整片推回来，PC 侧监听
+
+# 我们的 u-boot kit 的 md5（mtd4 / mtd9 应为它）
+KIT_UBOOT_MD5 = "d0ada9f76e4f1aba9b96a559a5220cee"
 
 # OpenWrt 完整包布局（实测 wta301-op-25.12.6-p29.bin，总长 0x1060000）
 #   0x000000  头 0x20000
@@ -137,33 +157,59 @@ PKG_TOTAL = 0x1060000
 DD_BS = 0x20000  # 128 KiB；上述所有偏移与长度都是它的整数倍
 
 
-# ★★★ A/B 槽在【两种固件下的 mtd 编号完全相同】（实测：原厂 4.4.60 与我们的
-# OpenWrt 各读一次 /proc/mtd 逐条比对）。
-# 注意分区【数量】不同：原厂 17 条、OpenWrt 17 条，但内容不同：
-#   原厂 = 15 个物理分区 mtd0..mtd14 + 2 个 UBI 卷
-#          mtd15 0x0003e000 erasesize 0x1f000 "0"   ← mtd3 config   里的卷
-#          mtd16 0x0139e000 erasesize 0x1f000 "0"   ← mtd7 rootfs_data 里的卷
-#          （这两条 erasesize 不是 0x20000、且有子页，一眼能认出来。绝不能 dd 它们）
-#   我们的 OpenWrt 不建 UBI 卷条目，但把两个容器建模了。
-# 但 5/6/10/11 这四个槽位编号与物理偏移在两边完全一致：
-#     mtd5  = 0x04880000  A 槽 kernel   （原厂名 kernel，    我们名 kernel）
-#     mtd6  = 0x04FC0000  A 槽 rootfs   （原厂名 rootfs，    我们名 rootfs）
-#     mtd10 = 0x00880000  B 槽 kernel   （原厂名 kernel_bak，我们名 kernel_bak）
-#     mtd11 = 0x00FC0000  B 槽 rootfs   （原厂名 rootfs_bak，我们名 rootfs_bak）
-# 实测证据：原厂 shell 里 `md5sum /dev/mtdblock10` = 2868d8e975da7c641e54c72b6beb8f26
-#          = work/backup/mtd10_kernel_bak.bin 的 md5。
-# 另外实测 mtd5 头 = d00dfeed、mtd6 头 = 68737173(hsqs) —— 原厂当前就是
-# 从 A 槽起动的，所以它把 A 槽叫「kernel」「rootfs」。
-# ⇒ 刷写目标可以只按编号定位，不必依赖分区名。
-SLOT_A = {"kernel": 5, "rootfs": 6}    # 0x04880000 / 0x04FC0000 —— 只动这里
-SLOT_B = {"kernel": 10, "rootfs": 11}  # 0x00880000 / 0x00FC0000 —— 只读，回退用
+# ★★★ 分区编号陷阱（改代码前务必读完）
+#
+# 一级 u-boot 的双槽镜像：
+#     image_1 = B 槽 = 0x0080000 容器 / 0x0880000 kernel / 0x0FC0000 rootfs
+#     image_2 = A 槽 = 0x4800000 容器 / 0x4880000 kernel / 0x4FC0000 rootfs
+# boot_flag(mtd14) = 55aa4246 00000001 -> 先验 image_1(B)，通过就用它。
+#
+# 【编号】只在同一固件内稳定，跨固件会错位：
+#     原厂 4.4.60 视角：    mtd5  = 0x880000  (B kernel)
+#                          mtd10 = 0x4880000 (A kernel)
+#     我们 OpenWrt 视角：   mtd5  = 0x4880000 (A kernel)
+#   所以 mtd5 在原厂是 B 槽内核、在 OpenWrt 是 A 槽内核。按编号跨固件搬运
+#   必然写错槽，判断落点只能用物理偏移（MTD_OFFSET）。
+#
+# 【分区数量】也不同。原厂 17 条 = 15 个物理分区 + 2 个 UBI 卷：
+#     mtd15 erasesize 0x1f000 名字 "0"  <- mtd3 config 里的卷
+#     mtd16 erasesize 0x1f000 名字 "0"  <- mtd7 rootfs_data 里的卷
+#   erasesize 不是 0x20000 的一律不是物理分区，绝不能 dd。
+#
+# ★ 这里我犯过的错（留档防再犯）：
+#   先写「原厂/我们的 mtd 名字互为主备」，又改成「编号完全一致、
+#   A 槽 = mtd5/mtd6」。两次都错。用 /sys/class/mtd/mtdN/offset 一查就清楚。
+#   教训：偏移只能从设备读，不能凭 md5 或「能启动」反推。
+SLOT_A = {"kernel": 10, "rootfs": 11}  # 0x04880000 / 0x04FC0000，只动这里
+SLOT_B = {"kernel": 5, "rootfs": 6}    # 0x00880000 / 0x00FC0000，回退用
+
+# 权威分区偏移（板上 /sys/class/mtd/mtdN/offset 实测，十进制换算成十六进制）。
+# 这张表是唯一真源：mtd 名字是陷阱，编号只在同一固件内稳定，物理偏移才不变。
+MTD_OFFSET = {
+    0: 0x0000000,   # factory_boot   （永不写）
+    1: 0x0400000,   # factory_info   （永不写）
+    2: 0x0480000,   # art            （永不写）
+    3: 0x0500000,   # config         UBI，内含卷 mtd15
+    4: 0x0700000,   # normal_boot    u-boot B 槽
+    5: 0x0880000,   # kernel         kernel B 槽
+    6: 0x0FC0000,   # rootfs         rootfs B 槽
+    7: 0x6A00000,   # rootfs_data    原厂 overlay，内含卷 mtd16
+    8: 0x0800000,   # firmware       容器 B 槽
+    9: 0x4700000,   # normal_boot_bak u-boot A 槽
+    10: 0x4880000,  # kernel_bak     kernel A 槽
+    11: 0x4FC0000,  # rootfs_bak     rootfs A 槽
+    12: 0x6A00000,  # rootfs_data_bak（与 mtd7 同一块）
+    13: 0x4800000,  # firmware_bak   容器 A 槽
+    14: 0x4000000,  # boot_flag
+}
+
 
 # 正在运行的那个 rootfs 分区。两种固件都从它起根，写它就是写脚下的地板。
 #   原厂   内置 cmdline: root=/dev/mtdblock6（编译进 vmlinux，忽略 u-boot 传参）
 #   OpenWrt DTS bootargs-append: root=/dev/mtdblock6
 # ⇒ 两种固件下都是 mtd6。写它的那一步必须放最后，且写完立刻 reboot，
 #   中间绝不能再从它读任何东西（squashfs 是只读挂载，缺页时才去 flash 取）。
-LIVE_ROOT_MTD = 6
+LIVE_ROOT_MTD = 6   # 两种固件的 cmdline 都写 root=/dev/mtdblock6；见 live_root_abs()
 
 # 已知的原厂镜像集（md5 已用全盘原厂镜像 flash_full_128M.bin 逐段 dd 验证）：
 #   A_kernel 0x4880000/0x400000 = 170b2188… = mtd5_kernel.bin
@@ -180,6 +226,13 @@ STOCK_SETS = [
      "rootfs": "mtd11_rootfs_bak.bin", "rootfs_md5": "bf2f92ceaf509093c8854825f2dc8d5e"},
 ]
 
+# 把 STOCK_SETS 汇总成 md5 对 -> 版本名，用于「这段内容是不是原厂」的判定。
+# 判定必须认【全部】已知版本，不能只认一套 —— 实测这台板子的 A 槽装的是
+# 旧版 4.4.60（2868d8e9 / bf2f92ce），按 2.0.2 那套比对就会误报「非原厂」。
+def stock_md5_pairs():
+    return {(x["kernel_md5"], x["rootfs_md5"]): x["name"] for x in STOCK_SETS}
+
+
 # 旧版兼容：bslot 模式拿它做硬门禁
 STOCK_KNOWN_MD5 = {
     "kernel": "2868d8e975da7c641e54c72b6beb8f26",
@@ -190,10 +243,13 @@ STOCK_KNOWN_MD5 = {
 STOCK_LEN = {"kernel": 0x400000, "rootfs": 0xC00000}
 
 
-def find_stock_set(extra_dir=None):
+def find_stock_set(extra_dir=None, prefer=None):
     """在几个常规位置找一对【md5 完全对得上】的原厂镜像。
 
     绝不按文件名信 —— 文件名可以随便取。只认 md5。
+
+    prefer="bslot" 时优先找 B 槽那组（2868d8e9 / bf2f92ce），
+    因为修 B 槽必须写回 B 槽头上的 md5 对应的那两份内容。
     """
     here = os.path.dirname(os.path.abspath(__file__))
     dirs = [
@@ -213,7 +269,10 @@ def find_stock_set(extra_dir=None):
         if d in seen or not os.path.isdir(d):
             continue
         seen.add(d)
-        for s in STOCK_SETS:
+        order = STOCK_SETS
+        if prefer == "bslot":
+            order = [x for x in STOCK_SETS if x["kernel_md5"] == STOCK_KNOWN_MD5["kernel"]]
+        for s in order:
             kp = os.path.join(d, s["kernel"])
             rp = os.path.join(d, s["rootfs"])
             if not (os.path.exists(kp) and os.path.exists(rp)):
@@ -239,11 +298,7 @@ def _md5_file(path, chunk=1 << 20):
     return h.hexdigest()
 
 # 各 mtd 的 flash 绝对起始（用于换算 dd seek → 绝对地址，做重叠检查）
-MTD_ABS = {
-    4: 0x4700000, 5: 0x4880000, 6: 0x4FC0000, 7: 0x6A00000,
-    8: 0x4800000, 9: 0x700000, 10: 0x880000, 11: 0xFC0000,
-    12: 0x1BC0000, 13: 0x4800000, 14: 0x4000000,
-}
+MTD_ABS = MTD_OFFSET   # 历史变量名，build_plan 用它换算绝对地址
 
 # 某些落点的 mtd 编号在不同固件下语义不同，显式登记 (mtd, seek) → 由 MTD_ABS 换算
 FLASH_ABS = {}
@@ -256,26 +311,24 @@ FLASH_ABS = {}
 #   max_len   : 该落点能容纳的字节数（硬上限，超过就拒绝写）
 FLASH_TARGETS = {
     "stock": {
-        # 当前跑的是原厂：mtd5(kernel) 只有 4 MiB，装不下 OpenWrt 的 FIT（0x41526c）
-        # ⇒ 内核走 A 槽容器 mtd13 的 +0x80000（= 绝对 0x4880000，同一位置）。
-        # rootfs 直接走 mtd6（= 绝对 0x4FC0000，0xC00000，装得下 0xBC0000）。
-        #
-        # ★ 修正过的错误：这里曾写 rootfs → mtd11。mtd11 是 0x0FC0000，
-        #   属于【B 槽】。实测后果：把 OpenWrt rootfs 烤进了 B 槽，
-        #   mtd11 的 md5 从 bf2f92ce(原厂) 变成了 3df05b56(OpenWrt)。
-        #   ⇒ 「只动 A 槽」的承诺被破坏了。现已改为 mtd6。
+        # 当前跑原厂：目标是【A 槽】。
+        #   kernel -> mtd13(容器 0x4800000) +0x80000 = 0x4880000
+        #             直写 mtd10 只有 0x400000，装不下 FIT 的 0x41526c
+        #   rootfs -> mtd11 = 0x4FC0000（原厂视角的 rootfs_bak）
+        #             ★ 不能写 mtd6！mtd6 = 0xFC0000 属 B 槽，
+        #               而原厂此时正从 mtd6 起根，写它就是在写活分区。
         "kernel": {"dst_mtd": 13, "dst_seek": 4, "max_len": 0x480000,
                    "why": "A 槽容器 firmware_bak +0x80000（= 0x4880000）；"
-                          "若直写 mtd5 只有 4MiB，装不下 0x41526c 会被截断"},
-        "rootfs": {"dst_mtd": 6, "dst_seek": 0, "max_len": 0xC00000,
-                   "why": "A 槽 rootfs（= 0x4FC0000），装得下 0xBC0000"},
+                          "直写 mtd10 只有 4MiB，装不下 0x41526c 会被截断"},
+        "rootfs": {"dst_mtd": 11, "dst_seek": 0, "max_len": 0xC00000,
+                   "why": "A 槽 rootfs（原厂视角 mtd11 = 0x4FC0000），装得下 0xBC0000"},
     },
     "openwrt": {
-        # 当前跑的是 OpenWrt：我们的 DTS 把 mtd5 定义为 0x740000，直写即可。
+        # 当前跑 OpenWrt：我们的 DTS 视角下 A 槽就是 mtd5/mtd6。
         "kernel": {"dst_mtd": 5, "dst_seek": 0, "max_len": 0x740000,
                    "why": "A 槽 kernel 分区（我们的 DTS 给了 7.25MiB）"},
         "rootfs": {"dst_mtd": 6, "dst_seek": 0, "max_len": 0xC00000,
-                   "why": "A 槽 rootfs 分区"},
+                   "why": "A 槽 rootfs 分区（OpenWrt 视角 mtd6 = 0x4FC0000）"},
     },
 }
 
@@ -375,7 +428,8 @@ def setup_alias(addrs, pc_ip):
             else:
                 added.append(a)
                 info("   + 别名 %s/32 (SkipAsSource)" % a)
-        for name, port in (("WTA_ELINK", ELINK_PORT), ("WTA_SRV", SRV_PORT)):
+        for name, port in (("WTA_ELINK", ELINK_PORT), ("WTA_SRV", SRV_PORT),
+                           ("WTA_BKUP", NC_BACKUP_PORT)):
             _run("netsh advfirewall firewall add rule name=%s dir=in action=allow "
                  "protocol=TCP localport=%d" % (name, port))
             info("   + 防火墙放行 TCP %d (%s)" % (port, name))
@@ -386,7 +440,7 @@ def setup_alias(addrs, pc_ip):
                       "Remove-NetIPAddress -IPAddress %s -PrefixLength 32 "
                       "-Confirm:$false -ErrorAction SilentlyContinue" % a])
                 info("   - 删除别名 %s" % a)
-            for name in ("WTA_ELINK", "WTA_SRV"):
+            for name in ("WTA_ELINK", "WTA_SRV", "WTA_BKUP"):
                 _run("netsh advfirewall firewall delete rule name=%s" % name)
             info("   - 删除防火墙规则")
         return cleanup
@@ -531,18 +585,34 @@ class Telnet:
             pass
 
     def sh(self, cmd, wait=2.0):
+        self.send(cmd)
+        return self.drain(wait)
+
+    def send(self, cmd):
+        """只发命令，不读回显。给「命令要跑很久、输出走别的通道」用。
+
+        为什么需要：`dd | nc` 的输出走 nc 的 socket，不走 telnet。
+        若照 sh() 那样 sleep 完再 recv，会和后续命令抢同一个套接字 ——
+        实测后果是 mtd9~mtd14 整批失败（命令串到一起）。
+        """
         self.s.sendall(cmd.encode() + b"\n")
+
+    def drain(self, wait=2.0, hard_timeout=2.0):
+        """读走已到达的输出。可重复调用；超时即返回已收内容。"""
         time.sleep(wait)
         buf = b""
-        self.s.settimeout(2.0)
         try:
-            while True:
+            self.s.settimeout(hard_timeout)
+        except OSError:
+            return ""
+        while True:
+            try:
                 d = self.s.recv(65535)
-                if not d:
-                    break
-                buf += d
-        except Exception:
-            pass
+            except Exception:
+                break
+            if not d:
+                break
+            buf += d
         return buf.decode("utf-8", "replace").replace("\r", "")
 
     def close(self):
@@ -550,6 +620,27 @@ class Telnet:
             self.s.close()
         except Exception:
             pass
+
+
+def live_root_abs(tn):
+    """返回当前运行中 rootfs 的【物理绝对偏移】，取不到就返回 None。
+
+    为什么不能用 mtd 编号或名字：
+      原厂 cmdline  root=/dev/mtdblock6 -> mtd6 = 0x0FC0000（B 槽）
+      OpenWrt cmdline root=/dev/mtdblock6 -> mtd6 = 0x4FC0000（A 槽）
+    编号都是 6，物理位置完全不同。只有偏移是唯一真源。
+    """
+    out = tn.sh("cat /proc/cmdline", 4.0)
+    m = re.search(r"root=/dev/mtdblock(\d+)", out)
+    if not m:
+        return None
+    idx = int(m.group(1))
+    raw = tn.sh("cat /sys/class/mtd/mtd%d/offset" % idx, 4.0)
+    for line in raw.splitlines():
+        t = line.strip()
+        if t.isdigit():
+            return int(t)
+    return None
 
 
 def detect_firmware(tn):
@@ -892,6 +983,326 @@ def _first_hex4(tn, mtd_idx):
     return ""
 
 
+# ---------------------------------------------------------------------------
+# 备份：设备 `dd | nc` 把整片推回 PC
+# ---------------------------------------------------------------------------
+
+class NcSink:
+    """监听一个 TCP 端口，收设备推过来的字节流写入文件。
+
+    busybox 有 nc（板上实测 HAVE:nc），所以不需要 base64 / hexdump 绕路。
+    一次只收一个连接。
+    """
+
+    def __init__(self, port=NC_BACKUP_PORT, bind="0.0.0.0"):
+        self.port = port
+        self.sock = socket.socket()
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.sock.bind((bind, port))
+        self.sock.listen(1)
+        self.sock.settimeout(120)
+
+    def recv_to(self, path, timeout=180):
+        """接一个连接写到 path，返回实收字节数（-1 = 超时没人连）。"""
+        n = 0
+        self.sock.settimeout(timeout)
+        try:
+            conn, _ = self.sock.accept()
+        except socket.timeout:
+            return -1
+        conn.settimeout(60)
+        try:
+            with open(path, "wb") as f:
+                while True:
+                    try:
+                        b = conn.recv(1 << 16)
+                    except socket.timeout:
+                        break
+                    if not b:
+                        break
+                    f.write(b)
+                    n += len(b)
+        finally:
+            conn.close()
+        return n
+
+    def close(self):
+        try:
+            self.sock.close()
+        except Exception:
+            pass
+
+
+# 备份时跳过 mtd15/mtd16 —— 它们是 mtd3/mtd7 里的 UBI 卷视图，不是独立区域，
+# 抓下来只会重复数据，而且 erasesize 不一致还会误导判定。
+BACKUP_SKIP = {15, 16}
+
+
+def do_backup(tn, mtd_table, pc_ip, outdir):
+    os.makedirs(outdir, exist_ok=True)
+    sink = NcSink()
+    info("")
+    info("[B1] 备份到 %s" % os.path.abspath(outdir))
+    info("     PC 侧监听 TCP %d，设备侧 `dd if=/dev/mtdblockN | nc <PC> %d`"
+         % (NC_BACKUP_PORT, NC_BACKUP_PORT))
+
+    manifest = []
+    ok = True
+    for idx in sorted(mtd_table):
+        if idx in BACKUP_SKIP:
+            continue
+        size, name = mtd_table[idx]
+        base = "mtd%d_%s.bin" % (idx, re.sub(r"[^A-Za-z0-9_.-]", "_", name))
+        path = os.path.join(outdir, base)
+        info("")
+        info("   mtd%-2d %-18s 0x%08x ..." % (idx, name, size))
+
+        # 单线程：发命令 -> 从 nc 收数据 -> 排空 telnet。
+        # 绝不能把 tn.sh 丢进线程，会和主线程抢同一个套接字。
+        tn.send("dd if=/dev/mtdblock%d bs=65536 2>/dev/null | md5sum" % idx)
+        want = _first_md5(tn.drain(max(4.0, size / 4194304.0), hard_timeout=4.0))
+
+        tn.send("dd if=/dev/mtdblock%d bs=65536 2>/dev/null | nc %s %d"
+                % (idx, pc_ip, NC_BACKUP_PORT))
+        got = sink.recv_to(path, timeout=max(60.0, size / 1048576.0) * 3)
+        tn.drain(0.3)
+
+        local = _md5_file(path) if os.path.exists(path) else ""
+        if got != size:
+            # 已知现象：mtd11/mtd13 这类「内容之后全是擦除态」的分区，
+            # 内核读到实际数据结尾就返回 EOF（板上 wc -c 实测同样长度）。
+            # 所以短读不一定是错误，但要显式标出来，不能当完整备份用。
+            info("     PARTIAL 实收 0x%x / 分区 0x%x（设备返回 EOF）"
+                 % (max(got, 0), size))
+            info("       尾部 0x%x 字节读不到（多为擦除态 0xFF）"
+                 % (size - max(got, 0)))
+            if want and local and got > 0:
+                dev_head = _first_md5(tn.sh(
+                    "dd if=/dev/mtdblock%d bs=65536 count=%d 2>/dev/null | md5sum"
+                    % (idx, got // 65536), max(20.0, got / 2097152.0)))
+                if dev_head == local:
+                    info("       前 0x%x 字节 md5 与设备一致 -> 缺的只是尾部" % got)
+                    manifest.append((idx, name, got, local, base + " (PARTIAL)"))
+                    continue
+            ok = False
+            continue
+        if local != want:
+            info("     !! md5 不符  设备 %s  本地 %s" % (want or "?", local))
+            ok = False
+            continue
+        info("     OK 0x%x  md5=%s" % (got, local))
+        manifest.append((idx, name, size, local, base))
+
+    sink.close()
+
+    mf = os.path.join(outdir, "MD5SUMS.txt")
+    with open(mf, "w", encoding="utf-8") as f:
+        f.write("# WTA301 分区备份清单\n")
+        f.write("# 每行: md5  大小  分区号  分区名  文件名\n")
+        for idx, name, size, md5, base in manifest:
+            f.write("%s  %10d  mtd%-2d  %-18s  %s\n" % (md5, size, idx, name, base))
+    info("")
+    info("[B2] 清单: %s（%d 个分区）" % (mf, len(manifest)))
+    if not ok:
+        info("   !! 有分区未备份成功（上面标 !! 的）")
+    return ok
+
+
+# ---------------------------------------------------------------------------
+# 修 B 槽（把离线原厂镜像写回去）
+# ---------------------------------------------------------------------------
+
+def restore_bslot(tn, args, mtd_table, pc_ip, kset, kpath, rpath):
+    """把原厂 kernel/rootfs 写到 B 槽（mtd10/mtd11）。
+
+    为什么这个操作比写 A 槽安全得多：我们正从 A 槽（mtd5/mtd6）跑，
+    mtd10/mtd11 不是活动分区 -> 写完可以放心回读校验，没有半写窗口。
+
+    写回后 B 槽头（0x800000 的 +0xa0/+0xb0）记录的 md5 又与内容对上，
+    一级 u-boot 的 `Dual image validation` 就能重新通过。
+    """
+    info("")
+    info("[R1] 修 B 槽：mtd5 (kernel 0x880000) + mtd6 (rootfs 0xFC0000)")
+    info("     写回后 B 槽头（0x800000 的 +0xa0/+0xb0）md5 又能对上，")
+    info("     一级 u-boot 的双槽校验就会重新通过。")
+
+    # 跑在原厂固件时 B 槽 rootfs(mtd6) 就是活动分区，写它要特殊处理。
+    # 这里换成按物理偏移判断，不靠分区名/编号。
+    live_abs = live_root_abs(tn)
+
+    parts = []
+    # B 槽 = mtd5 (0x880000) / mtd6 (0xFC0000)
+    for part, mtd_idx, path, want in (
+            ("kernel", 5, kpath, kset["kernel_md5"] if kset else None),
+            ("rootfs", 6, rpath, kset["rootfs_md5"] if kset else None)):
+        if mtd_idx not in mtd_table:
+            info("   !! mtd%d 不存在" % mtd_idx)
+            return 4
+        if not path or not os.path.exists(path):
+            info("   !! 找不到 %s 的源文件" % part)
+            return 4
+        size, name = mtd_table[mtd_idx]
+        fsz = os.path.getsize(path)
+        if fsz != size:
+            info("   !! %s 有 0x%x，但 mtd%d 分区是 0x%x" % (part, fsz, mtd_idx, size))
+            return 4
+        md5 = _md5_file(path)
+        if want and md5 != want:
+            info("   !! %s md5 %s 与 B 槽头期望的 %s 不同" % (part, md5, want))
+            info("      写进去槽头依然对不上，一级 u-boot 不会认这个槽。")
+            return 4
+        info("   %-6s %-22s 0x%x  md5=%s  -> mtd%d"
+             % (part, os.path.basename(path), fsz, md5, mtd_idx))
+        parts.append((part, mtd_idx, name, path, size, md5))
+
+    if args.dry_run:
+        info("")
+        info("   --dry-run：未写入任何东西")
+        return 0
+    if not _confirm(args, "确认把原厂镜像写回 B 槽？"):
+        return 0
+
+    for part, mtd_idx, name, path, size, md5 in parts:
+        url = "http://%s:%d/%s" % (pc_ip, SRV_PORT, os.path.basename(path))
+        info("")
+        info("[R2] 写 %s -> mtd%d (%s)" % (part, mtd_idx, name))
+        out = tn.sh("cd /tmp && wget -O r.bin '%s' 2>&1 | tail -1" % url, 40.0)
+        info("   下载: %s" % _last_line(out)[:110])
+        got = _first_md5(tn.sh("md5sum /tmp/r.bin", 20.0))
+        if got != md5:
+            info("   !! 下载后 md5 %s != %s，中止" % (got or "?", md5))
+            return 5
+        info("   设备侧 md5 = %s" % got)
+
+        if live_abs is not None and MTD_OFFSET.get(mtd_idx) == live_abs:
+            # B 槽 rootfs 正是当前活动的（跑原厂时就是）。写完必须立刻重启，
+            # 中间不能再读任何东西，否则内核缺页会读到半写状态。
+            tn.sh("dd if=/tmp/r.bin of=/dev/mtdblock%d bs=%d 2>&1; sync; sync; reboot"
+                  % (mtd_idx, DD_BS), 10.0)
+            info("   活动分区已写入 -> sync -> reboot 已下发（同一条命令）")
+            info("   不回读（回读窗口里缺页会崩）；源 md5 写前已验过。")
+            return 0
+
+        out = tn.sh("dd if=/tmp/r.bin of=/dev/mtdblock%d bs=%d 2>&1"
+                    % (mtd_idx, DD_BS), max(30.0, size / 2097152.0) * 2)
+        info("   写入: %s" % _last_line(out)[:150])
+        tn.sh("rm -f /tmp/r.bin", 3.0)
+
+        info("[R3] 回读校验 %s" % part)
+        back = _first_md5(tn.sh("dd if=/dev/mtdblock%d bs=65536 2>/dev/null | md5sum"
+                               % mtd_idx, max(25.0, size / 2097152.0)))
+        if back != md5:
+            info("   !! 回读 %s != %s" % (back or "?", md5))
+            return 5
+        info("   OK %s" % back)
+
+    info("")
+    info("[R4] B 槽已恢复")
+    info("   这两个分区不是活动分区，所以【不需要重启】，也不影响当前系统。")
+    info("   下次重启一级 u-boot 会重新验 B 槽并通过 -> 回退出口恢复。")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# 安全审计（只读，什么都不写）
+# ---------------------------------------------------------------------------
+
+def do_verify(tn, mtd_table):
+    """把全部逃生出口列出来：现在到底有几条命。"""
+    info("")
+    info("[V] 安全审计（只读，不写任何东西）")
+    exits = 0
+
+    def head4(idx):
+        out = tn.sh("dd if=/dev/mtdblock%d bs=4 count=1 2>/dev/null | hexdump -C | head -1"
+                    % idx, 6.0)
+        for line in out.splitlines():
+            s = line.strip()
+            if s.startswith("00000000"):
+                return "".join(s.split()[1:5]).lower()
+        return ""
+
+    info("")
+    if 14 in mtd_table:
+        flag = head4(14)
+        info("   boot_flag (mtd14) 头 = %s" % (flag or "读不到"))
+        if flag == "55aa4246":
+            info("     -> magic OK，一级 u-boot 能选槽")
+            exits += 1
+        else:
+            info("     !! magic 不是 55aa4246")
+    else:
+        info("   !! mtd14 boot_flag 不存在")
+
+    info("")
+    ub_ok = 0
+    for idx, label in ((4, "normal_boot"), (9, "normal_boot_bak")):
+        if idx not in mtd_table:
+            info("   mtd%-2d %-16s 不存在" % (idx, label))
+            continue
+        md5 = _first_md5(tn.sh("dd if=/dev/mtdblock%d bs=65536 2>/dev/null | md5sum" % idx, 15.0))
+        if md5 == KIT_UBOOT_MD5:
+            tag = "= 我们的 kit"
+            ub_ok += 1
+        elif md5 and md5 != "0" * 32:
+            tag = "(非 kit，可能是原厂二级 u-boot)"
+            ub_ok += 1
+        else:
+            tag = "!! 空/读不到"
+        info("   mtd%-2d %-16s md5=%s %s" % (idx, label, md5 or "?", tag))
+    if ub_ok > 0:
+        exits += 1
+
+    info("")
+    pairs = stock_md5_pairs()
+    for label, ki, ri in (("A 槽", 10, 11), ("B 槽", 5, 6)):
+        if ki not in mtd_table or ri not in mtd_table:
+            continue
+        kmd5 = _first_md5(tn.sh("dd if=/dev/mtdblock%d bs=65536 2>/dev/null | md5sum" % ki,
+                               max(20.0, mtd_table[ki][0] / 2097152.0)))
+        rmd5 = _first_md5(tn.sh("dd if=/dev/mtdblock%d bs=65536 2>/dev/null | md5sum" % ri,
+                               max(30.0, mtd_table[ri][0] / 2097152.0)))
+        kind_k = "FIT" if head4(ki) == "d00dfeed" else "?"
+        kind_r = "squashfs" if head4(ri) == "68737173" else "?"
+        info("   %s  mtd%-2d/%-2d  kernel %-9s %s   rootfs %-9s %s"
+             % (label, ki, ri, kind_k, (kmd5 or "?")[:12], kind_r, (rmd5 or "?")[:12]))
+        if kind_k != "FIT" or kind_r != "squashfs":
+            info("         -> 头部不对，不可启动")
+            continue
+        exits += 1
+        ver = pairs.get((kmd5, rmd5))
+        if ver:
+            info("         -> 可启动，原厂内容：%s" % ver)
+        else:
+            # 内核 md5 能对上某个原厂版本就算可识别的内核
+            kver = next((n for (k, r), n in pairs.items() if k == kmd5), None)
+            if kver:
+                info("         -> 可启动，内核是原厂（%s）" % kver)
+                info("            !! rootfs 不是任何已知原厂版本（%s）" % (rmd5 or "?")[:12])
+                info("               这个槽的原厂回退能力已经不完整。")
+            else:
+                info("         -> 可启动，但内容非原厂（可能是 OpenWrt 或其它）")
+
+    info("")
+    info("   离线原厂镜像（PC 侧）:")
+    kset, kp, rp = find_stock_set()
+    if kset:
+        info("     可用：%s" % kset["name"])
+        exits += 1
+    else:
+        info("     !! 没找到（--flash-stock auto 会失败）")
+
+    info("")
+    info("   == 结论 ==")
+    if exits >= 3:
+        info("   逃生出口 %d 条，够用。mtd0/mtd1/mtd2/mtd14 都未动，TTL 可救。" % exits)
+    else:
+        info("   !! 只有 %d 条出口，建议先用 --flash-stock 把 A 槽写回原厂。" % exits)
+    info("   注：槽头（0x800000 / 0x4800000）不在任何 mtd 分区内，Linux 读不到，")
+    info("       只能上 u-boot 时用 tplcheck 看。本条审计覆盖不到，靠离线备份。")
+    return 0
+
+
 def _last_line(text):
     """取输出最后一行有效内容 —— 必须跳过命令回显与 shell 提示符。
 
@@ -927,10 +1338,17 @@ def print_stock_plan(plan):
     info("   A 槽 = 0x04880000 kernel / 0x04FC0000 rootfs")
     info("   B 槽 = 0x00880000 kernel / 0x00FC0000 rootfs   ← 不动")
     info("   mtd0 (factory_boot) / mtd4 / mtd9 / mtd14 (boot_flag) 全部不碰")
-    info("")
-    info("   !! 写 mtd6 时 OpenWrt 正从 mtd6 跑。脚本把 mtd6 放最后，")
-    info("      写完在同一命令行里 sync+reboot，中间不读任何东西。")
-    info("      所以【重启前会看起来卡住几秒】—— 那是正常的。")
+    live = [p for p in plan["parts"].values() if p["dst_mtd"] == LIVE_ROOT_MTD]
+    if live:
+        info("")
+        info("   !! 目标里有活动 rootfs（mtd%d）。它是 squashfs 只读挂载，" % LIVE_ROOT_MTD)
+        info("      缺页时才去 flash 取，写到一半被读到就当场崩。")
+        info("      脚本把它放最后，写完在同一条命令里 sync+reboot，中间不读任何东西。")
+        info("      代价：放弃 rootfs 回读校验（源镜像 md5 已在写前验过）。")
+        info("      所以【重启前会看起来卡住几秒】—— 那是正常的。")
+    else:
+        info("")
+        info("   目标都不是活动分区，写完可以做完整回读校验，不需要立刻重启。")
 
 
 def do_flash_stock(tn, plan, pc_ip, mode):
@@ -1031,7 +1449,10 @@ def main():
     info("     [2] 刷 OpenWrt（完整包）")
     info("     [3] 只刷 u-boot kit（保留当前固件）")
     info("     [4] 刷回原厂固件")
-    info("     [5] 查看分区表与风险说明")
+    info("     [5] 安全审计（列出生路，不写任何东西）")
+    info("     [6] 整片备份到本机")
+    info("     [7] 修 B 槽（把原厂镜像写回回退槽）")
+    info("     [8] 查看分区表与风险说明")
     info("     [0] 退出")
     info("")
 
@@ -1044,6 +1465,35 @@ def main():
     if choice == "0" or choice == "":
         return 0
     if choice == "5":
+        return run_cli(["--verify", "--interactive-ok"])
+
+    if choice == "6":
+        info("")
+        info("   把设备所有分区整片拷到本机的 backup 目录（约 126 MB）。")
+        info("   用 nc 直连，pc 侧监听 8098，会逐区比 md5。")
+        info("")
+        try:
+            d = input("   目标目录（直接回车用默认 backup）: ").strip().strip('"')
+        except (EOFError, KeyboardInterrupt):
+            info("")
+            return 0
+        return run_cli(["--backup", d or "backup", "--interactive-ok"])
+
+    if choice == "7":
+        info("")
+        info("   B 槽是回退出口。如果你之前把它刷坏过，这里可以写回原厂。")
+        info("   写的时候我们跑在 A 槽，B 槽不是活动分区 -> 比写 A 槽安全。")
+        info("")
+        try:
+            ok = input("   继续？[y/N] ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            info("")
+            return 0
+        if ok not in ("y", "yes", "是"):
+            return 0
+        return run_cli(["--restore-bslot", "--interactive-ok"])
+
+    if choice == "8":
         info("")
         info(__doc__)
         return 0
@@ -1146,6 +1596,12 @@ def run_cli(argv):
                          "bslot=从 B 槽拷（md5 必须等于原厂值）；"
                          "files=从 --stock-kernel / --stock-rootfs 读")
     ap.add_argument("--stock-dir", default=None, help="auto 模式优先搜索该目录")
+    ap.add_argument("--restore-bslot", action="store_true",
+                    help="把离线原厂镜像写回 B 槽（mtd10/mtd11），修回退出口")
+    ap.add_argument("--backup", nargs="?", const="backup", default=None,
+                    metavar="DIR", help="把设备各分区整片备份到 DIR（用 nc，默认 backup）")
+    ap.add_argument("--verify", action="store_true",
+                    help="安全审计：列出全部逃生出口，不写任何东西")
     ap.add_argument("--stock-kernel", metavar="PATH", default=None,
                     help="--flash-stock files 模式的原厂内核（4 MiB，FIT）")
     ap.add_argument("--stock-rootfs", metavar="PATH", default=None,
@@ -1167,8 +1623,11 @@ def run_cli(argv):
         return 0
     if not args.flash_op and not args.flash_uboot and not args.flash_stock:
         pass  # 只取 root
-    if sum(1 for x in (args.flash_op, args.flash_uboot, args.flash_stock) if x) > 1:
-        die("--flash-op / --flash-uboot / --flash-stock 只能选一个")
+    n_modes = sum(1 for x in (args.flash_op, args.flash_uboot, args.flash_stock,
+                              args.restore_bslot, args.backup) if x)
+    if n_modes > 1:
+        die("--flash-op / --flash-uboot / --flash-stock / --restore-bslot / --backup "
+            "只能选一个")
     if args.flash_stock == "files" and not (args.stock_kernel and args.stock_rootfs):
         die("--flash-stock files 需要同时给 --stock-kernel 与 --stock-rootfs")
 
@@ -1184,6 +1643,10 @@ def execute(args):
         what = "  +  刷入 u-boot kit(A 槽)"
     elif args.flash_stock:
         what = "  +  刷回原厂(A 槽)"
+    elif args.restore_bslot:
+        what = "  +  修 B 槽(写回原厂)"
+    elif args.backup:
+        what = "  +  整片备份"
     else:
         what = ""
 
@@ -1222,6 +1685,21 @@ def execute(args):
     elif args.flash_uboot:
         payload_path = _stage_file(args.flash_uboot, serve_dir, 0x40000, "u-boot kit")
         pkg_name = os.path.basename(payload_path)
+    elif args.restore_bslot:
+        info("")
+        info("   搜索原厂 B 槽镜像（kernel 2868d8e9 / rootfs bf2f92ce）…")
+        kset, kp, rp = find_stock_set(args.stock_dir, prefer="bslot")
+        if not kset:
+            info("")
+            info("!! 没找到 B 槽原厂镜像。需要（两个都要）：")
+            info("     mtd10_kernel_bak.bin  md5 %s" % STOCK_KNOWN_MD5["kernel"])
+            info("     mtd11_rootfs_bak.bin  md5 %s" % STOCK_KNOWN_MD5["rootfs"])
+            info("   放在脚本同目录、./stock/、../work/backup/、或 --stock-dir")
+            return 4
+        args.stock_kernel, args.stock_rootfs = kp, rp
+        args.stock_set_name = kset["name"]
+        _stage_any(kp, serve_dir, "B 槽原厂内核")
+        _stage_any(rp, serve_dir, "B 槽原厂 rootfs")
     elif args.flash_stock in ("auto", "files"):
         if args.flash_stock == "auto":
             # auto 必须在起服务之前解析好，否则镜像不在服务目录里，设备下不到
@@ -1282,6 +1760,13 @@ def execute(args):
                     rc = flash_uboot(tn, args, fw, mtd, pc_ip, pkg_name)
                 elif args.flash_stock:
                     rc = flash_stock(tn, args, fw, mtd, pc_ip)
+                elif args.restore_bslot:
+                    kset, kp, rp = find_stock_set(args.stock_dir, prefer="bslot")
+                    rc = restore_bslot(tn, args, mtd, pc_ip, kset, kp, rp)
+                elif args.backup:
+                    rc = 0 if do_backup(tn, mtd, pc_ip, args.backup) else 5
+                elif args.verify:
+                    rc = do_verify(tn, mtd)
                 else:
                     info("")
                     info("   分区表（仅供核对，未写入任何东西）:")
