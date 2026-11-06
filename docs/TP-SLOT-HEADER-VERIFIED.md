@@ -242,3 +242,162 @@ iminfo 0x44000000
 
 ⚠️ 打断一级的窗口只有 **500 ms**（不是 3 s），必须用连续字符洪泛，
 不能靠人手按键。本次实现见 `C:\Users\null\grab2.py`（reboot 后延迟 1.2 s 起洪泛 `#`）。
+
+---
+
+## 10. ★ 已实测的完整刷写流程（2026-11-07，从 OpenWrt 回原厂）
+
+本节记录**实际执行过并成功**的一条路径。前置：板子当前跑 OpenWrt（A 槽），
+我们的 kit 在两处 u-boot。全程不插 TTL 之外的工具、不用 TFTP。
+
+### 10.1 为什么不用 sysupgrade
+
+`platform_check_image` 要求 tar 成员 `kernel` / `root`，原厂包是 TP 容器格式
+⇒ **版本校验就否掉了，`-F` 也绕不过**（`platform_do_upgrade` 里还会再 check 一次）。
+
+### 10.2 关键洞察：原厂内核本来就在板上
+
+`0x880000` 是原厂主槽内核（`boot_flag=1` 选的就是它），我们**从没写过那一片**。
+所以不需要从电脑传 4 MB，直接在 u-boot 里把它搬一个位置即可。
+
+### 10.3 实际操作（在 kit 提示符下）
+
+```text
+printenv ; nand read 0x44000000 0x880000 0x400000   # 原厂内核 -> RAM
+crc32 0x44000000 0x400000                           # 必须等于本地文件 crc32
+printenv ; nand erase 0x4880000 0x480000            # 只清 A 槽内核区
+printenv ; nand write 0x44000000 0x4880000 0x400000
+printenv ; nand read 0x45000000 0x4880000 0x400000  # 回读到【不同】地址
+crc32 0x45000000 0x400000                           # 再算一次
+```
+
+**实测输出（`[本板实证]`）**：
+
+```
+crc32 for 44000000 ... 443fffff ==> 7d03d5fb     ← RAM 源
+crc32 for 45000000 ... 453fffff ==> 7d03d5fb     ← 回读
+本地 mtd10_kernel_bak.bin                       7d03d5fb
+```
+
+三段一致才继续。`0x480000` 是写到 `0x4C80000` 为止，**不碰 `0x4fc0000` 的 rootfs**。
+
+⚠️ 所有写命令都必须带 `printenv ;` 前缀（`guard.py` 白名单要求），
+且 `0x4880000/0x480000` 在 `guard.py` 里是 **OPEN** 区，无需 override 标志。
+
+### 10.4 复位后的启动链（实测日志）
+
+```
+Dual image validation, image_1 pass. So boot to image_1     ← 一级选 B 槽
+U-Boot 2016.01-9ce3157-dirty                                 ← 我们的 kit
+tplboot: image_2 kernel 0x480000 @0x04880000 -> 0x44000000   ← kit 试 A 槽
+tplboot: bootargs="console=ttyMSM0,115200,n8 rw rootwait"
+Starting kernel ...
+[0.000000] Kernel command line: console=ttyMSM0,115200n8 root=/dev/mtdblock6 ...
+```
+
+⇒ kit 传给 u-boot 的 `bootargs` **被原厂内核完全忽略**，
+内核用它编译进 vmlinux 的内置 cmdline。
+
+### 10.5 分区命名陷阱（最容易搞错的地方）
+
+原厂和我们的 mtd 编号**互为主备**：
+
+| 偏移 | 原厂叫法 | 我们的 OpenWrt 叫法 |
+|---|---|---|
+| `0x700000` | **normal_boot** | normal_boot_bak |
+| `0x880000` | **kernel** | kernel_bak |
+| `0xfc0000` | **rootfs** | rootfs_bak |
+| `0x4700000` | normal_boot_bak | normal_boot |
+| `0x4880000` | **kernel_bak** | kernel |
+| `0x4fc0000` | **rootfs_bak** | rootfs |
+
+来源：原厂内核启动时的分区打印（`bootm_test.log`），不是推断：
+
+```
+[0.905953] 0x000000700000-0x000000740000 : "normal_boot"
+[0.907586] 0x000000880000-0x000000c80000 : "kernel"
+[0.925939] 0x000000fc0000-0x000001bc0000 : "rootfs"
+[1.025914] 0x000004880000-0x000004c80000 : "kernel_bak"
+[1.029967] 0x000004fc0000-0x000005bc0000 : "rootfs_bak"
+```
+
+⇒ 在原厂 root shell 里回刷 OpenWrt，目标应是 `/dev/mtdblock5`(`kernel_bak`)
+和 `/dev/mtdblock6`(`rootfs_bak`)。**这一条尚未实测**，标为未验证。
+
+---
+
+## 11. ★ 擦 `rootfs_data` 让原厂重建可写层（已实测）
+
+### 11.1 症状
+
+原厂启动后 `/proc` 整个不可用：
+
+```
+cat /proc/mtd        -> No such file or directory
+ls /dev/mtdblock*    -> No such file or directory
+ls /dev              -> 只有 console 一个
+mount                -> no /proc/mounts
+```
+
+内核日志：
+
+```
+[3.638076] UBIFS error (ubi0:0 pid 227): ubifs_read_superblock:
+           on-flash format version is w5/r0, but software only supports up to version w4/r0
+[3.639...] UBIFS (ubi0:0): only R/O mounting is possible
+switching to jffs2
+jffs2 not ready yet; using ramdisk
+mount: mounting /dev/mtdblock7 on /rom/overlay failed: No such device
+```
+
+`/dev/mtdblock7` 挂不上 `/rom/overlay` ⇒ preinit 无法建立 `/dev` `/proc`。
+
+### 11.2 原因
+
+OpenWrt 6.12 的 UBIFS 把 `0x6a00000` 那 22 MB 写成了 **w5/r0** 格式；
+原厂 4.4.60 的 UBIFS 只支持到 **w4/r0**。两者不兼容。
+
+### 11.3 修复（在 kit 提示符下）
+
+```text
+printenv ; nand erase 0x6a00000 0x1600000
+```
+
+`0x6a00000 + 0x1600000 = 0x8000000` = flash 末尾，正好擦干净。
+`guard.py` 判为 OPEN，无需 override。实测擦除耗时 < 1 s。
+
+### 11.4 结果（`[本板实证]`）
+
+```
+[4.021994] UBIFS (ubi0:0): default file-system created
+[4.047298] UBIFS (ubi0:0): mounted UBI device 0, volume 0, name "0"
+[4.073400] UBIFS (ubi0:0): media format: w4/r0 (latest is w4/r0), ...
+```
+
+`mount /rom/overlay failed` 与 `jffs2 not ready yet` **两条都消失**。
+随后 `/proc/mtd` 列出 15 个分区、`/dev/mtdblock0..16` 齐全。
+
+### 11.5 但写层仍在 RAM（重要，别误解）
+
+卷名是 `"0"` 而不是 `rootfs_data`，原厂 init 没认：
+
+```
+overlayfs:/tmp/overlay/root on /etc type overlay (rw, upperdir=/tmp/overlay/root, ...)
+cat /sys/class/ubi/ubi0_0/name  ->  0
+```
+
+⇒ `/etc` 的修改**重启即丢**。要真正持久化，还需要把 UBI 卷建成
+`rootfs_data` 这个名字并格式化为 UBIFS。**这条未做，标为未验证。**
+
+### 11.6 附带发现：这台机器本来就没有可写层
+
+`boot_cart2.log`（我们动手**之前**的原厂首次启动）里同样报错：
+
+```
+[3.624138] UBIFS error (ubi0:0 pid 226): init_constants_early: too few LEBs (2), min. is 17
+jffs2 not ready yet; using ramdisk
+mount: mounting /dev/mtdblock7 on /rom/overlay failed: No such device
+```
+
+⇒ 不能把「没有持久 overlay」归因于我们的移植。
+
