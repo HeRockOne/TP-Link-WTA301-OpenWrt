@@ -137,13 +137,23 @@ grep -rn "⛔\|不能\|不支持\|不做" docs/USER-MANUAL.md README.md | head -
 
 | # | 问题 | 影响 | 可能的解法 |
 |---|---|---|---|
-| 1 | `patches/bdf/` 里是**本机 ART 校准数据** | IP 上不干净；但运行时校准始终来自使用者自己的 ART（`12-wta301-caldata` hotplug），功能上不影响别人 | 写 `tools/mk_board2_from_art.sh`：从使用者自己的 ART 生成 `board-2.bin`，仓库只留脚本 + 通用模板 |
+| 1 | ~~`patches/bdf/` 里是**本机 ART 校准数据**~~ | ✅ **已解决**：`tools/mk_board2_from_art.py` 可从使用者自己的 ART 生成，已逐字节验证与仓库自带文件相同 | — |
 | 2 | u-boot 基座 **commit 未固定**（codelinaro `NHSS.QSDK.12.5`） | 跨机器重建不保证 md5 一致 | 找一个确实存在的 commit 钉死，或在 CI 里记录首次成功时的 commit |
 | 3 | `patches/factory/*.dtb`、`pin/s7-actual-dtb.dtb` 是厂商固件内容 | 仅分析对照用，不参与构建 | 也可删掉，代价是失去 `fdtdiff.py` 的对照基线 |
-| 4 | `deliver/build_wta301.sh` 里是早期硬编码绝对路径 | 别人拿去跑不了 | 已在文件头标注 legacy，正路是 `build_j1.sh`（支持 `UBOOT_TREE` / `TOOLCHAIN_BIN` 环境变量） |
-| 5 | 没有任何 CI | 回归靠手工 | 可加一个只做「补丁能 `git apply --check`」的 workflow，成本低收益明确 |
+| 4 | `patches/uboot/build/build_wta301.sh` 里是早期硬编码绝对路径 | 已在文件头标注 LEGACY，正路是 `build_j1.sh` | 可删，但保留能追溯当时跑的命令 |
+| 5 | 没有任何 CI | 回归靠手工 | 可加一个只做 `verify-repro.sh` + `git apply --check` 的 workflow，成本低收益明确 |
 
-第 1 条是**最该先做**的。其余四条都不影响别人把仓库跑起来。
+第 2 条现在是**唯一剩下的硬缺口**。
+
+### 4.1 已解决的（这一轮）
+
+| 问题 | 解法 | 验证 |
+|---|---|---|
+| `patches/bdf/` 的 IP 问题 | `tools/mk_board2_from_art.py`（新） | 用本机 ART dump 生成的两个文件与仓库自带**逐字节相同** |
+| 出包依赖仓库外文件（`work/out-final/flash_release.py`、`work/op-build/mk_single_img.py`） | 新增 `tools/mk_web_img.py`，迁入 `mk_single_img.py` | 重构后重跑全链，四个 md5 与已发布包逐个相同 |
+| 脚本硬编码本机绝对路径（30 处） | `deliver/lib-paths.sh` 统一参数化 | `verify-repro.sh` §2 逐脚本扫描 |
+| `tools/parse_board2.py` 用大端解析（**工具是坏的**，跑仓库自带 BDF 就崩） | 改小端 + 完整回读校验 | 两个 BDF 都能解析，数值与 `M12` 文档记载一致 |
+| `make-release.sh` 不解析 `--version/--stage` | 实现 getopt | `FINGERPRINT.json` 现在写真实版本号 |
 
 ---
 

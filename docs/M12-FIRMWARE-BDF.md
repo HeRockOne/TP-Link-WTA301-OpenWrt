@@ -85,7 +85,25 @@ board data（`board-2.bin`，含 variant 名匹配）和 caldata（`caldata.bin`
 2. **所有 u32 是小端**。读 `0x18` 时按大端会得到 `0x50000200`（无意义），
    按小端才是 `0x00020050 = 131152`。
 
-### 2.2 variant 名必须与 DTS 完全一致
+> **本节曾经被代码背离过**：`tools/parse_board2.py` 用的是大端（`>I`），
+> 跑仓库自带的两个 BDF 直接 `struct.error: unpack requires a buffer of 4 bytes`。
+> 文档一直是对的，代码没跟上，而且这个工具不在任何构建/验收路径上，
+> 所以坏了很久没人发现。现已修成小端，并接进 `deliver/verify-repro.sh` §8 自检。
+
+### 2.2 自己生成这两个文件
+
+`tools/mk_board2_from_art.py` 从**你自己的** ART 分区生成，四种输入形态都接：
+ART 分区 dump（gzip）/ tar / `virtual_art.bin` / 裸 128 KiB BDF。
+
+```bash
+python3 tools/mk_board2_from_art.py --art /dev/mtdblock2 --outdir /tmp/bdf
+```
+
+**已验证**：用本工程作者的 `mtd2_art.bin` 跑出来，与 `patches/bdf/*.bin`
+**逐字节相同**（`78f5b21b…` / `e4904f13…`）。换一台机器跑出来 md5 不同是
+**正常且正确**的 —— 校准是逐台的。完整推导见 `THIRD-PARTY.md` §2。
+
+### 2.3 variant 名必须与 DTS 完全一致
 
 DTS：`qcom,ath11k-calibration-variant = "TP-Link-WTA301"`
 board-2.bin：`…,variant=TP-Link-WTA301`

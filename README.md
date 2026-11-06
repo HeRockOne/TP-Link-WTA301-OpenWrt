@@ -95,7 +95,7 @@
 | `patches/kernel-6.12/` | 内核补丁：UNIPHY PCS、stmmac DWMAC、gephy 时钟、dt-binding |
 | `patches/mac80211/` | ath11k 低内存 DP ring 尺寸 |
 | `patches/fstools/` | `fstools_overlay_name` 支持（overlay 用自定义 UBI 卷名） |
-| `patches/bdf/` | 两个 `board-2.bin`（Wi-Fi 板型容器）—— **上游任何仓库都没有** |
+| `patches/bdf/` | 两个 `board-2.bin`（Wi-Fi 板型容器）—— **上游任何仓库都没有**。可用 `tools/mk_board2_from_art.py` 从你自己的 ART 分区重新生成 |
 | `files/` | DTS + 设备树覆盖 |
 | `files-rootfs/` | rootfs overlay：`net-tune` 守护、sysctl、LuCI 温度面板、rpcd 数据源 |
 | `files-base-files/` | base-files overlay：出厂无线配置、uci-defaults |
@@ -196,4 +196,3 @@ bash patches/uboot/build/build_j1.sh
 - **kenzok8 / jerrykuku** —— Argon 主题
 - 所有在 OpenWrt 论坛、linux-arm-msm、lore.kernel.org 上留下实证记录的人 ——
   本工程大部分的「可行 / 不可行」结论，先是他们的，然后才是我们验证的
-

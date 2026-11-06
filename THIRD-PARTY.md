@@ -69,9 +69,24 @@ ath11k 分别加载 board data（`board-2.bin`）与 caldata（`cal-*.wifi.bin`�
    **不覆盖 `board-2.bin` / `caldata.bin`** —— 上游明确「这两个不提供」。
    我们在本仓库分发，等于把一台机器自己的校准数据公开。
 
-2. **要不要因此删掉**：删了仓库就不能直接构建出可用固件（缺 variant 匹配 → Wi-Fi 起不来）。
-   折中方案是提供生成脚本、让使用者从**自己的 ART** 生成。目前**没有实现**这个脚本，
-   已列入 `docs/OPEN-SOURCE-RELEASE.md` 的待办。
+2. **要不要因此删掉**：现在**不需要删**了。
+   `tools/mk_board2_from_art.py` 可以从**你自己的** ART 分区生成等价文件：
+
+   ```bash
+   # 板子上直接跑
+   scp tools/mk_board2_from_art.py root@192.168.1.1:/tmp/
+   python3 /tmp/mk_board2_from_art.py --art /dev/mtdblock2 --outdir /tmp/bdf
+   # 或先 dump 再本地跑
+   dd if=/dev/mtdblock2 of=/tmp/art.bin
+   python3 tools/mk_board2_from_art.py --art art.bin --outdir /tmp/bdf
+   ```
+
+   **已验证**：用本工程作者的 ART dump 跑出来的两个文件，与仓库自带的
+   `patches/bdf/*.bin` **逐字节相同**（`78f5b21b…` / `e4904f13…`）。
+
+   仓库现在保留 `patches/bdf/` 只为了一个目的：让**没有本机硬件**的环境
+   （CI、想先构建后刷机的人）也能产出固件。如果你不接受这一点，
+   就用上面的工具自己生成两份、覆盖 `patches/bdf/` 后构建。
 
 **如果你是要基于本仓库做二次分发**：请自行决定是否保留 `patches/bdf/`，
 或改用自己的 ART 数据。我们保留它们是因为这个工程的可复现性依赖它。

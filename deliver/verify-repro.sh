@@ -83,6 +83,8 @@ REQUIRED=(
 	# 仓库内工具（出包必需；早期它们只在 work/ 里，别人 clone 下来跑不了）
 	tools/mk_op_pack.py
 	tools/mk_web_img.py
+	tools/mk_board2_from_art.py
+	tools/parse_board2.py
 	tools/mk_single_img.py
 	tools/mk_fingerprint.py
 	tools/verify_single_bin.py
@@ -314,6 +316,15 @@ for b in patches/bdf/board2-wta301-ipq5018-2g.bin patches/bdf/board2-wta301-qcn6
 	else
 		bad "$(basename "$b") 里没有 variant=TP-Link-WTA301（ath11k 会 -12 加载失败）"
 	fi
+	# 容器结构必须能被仓库自带的解析器读通。
+	# parse_board2.py 曾在用大端（`>I`）解析小端字段，跑仓库自带的两个 BDF
+	# 直接 `struct.error` —— 工具是坏的而没人发现，因为它不在任何脚本路径上。
+	# 把它接进自检，以后改坏了会立刻报。
+	if python3 "$SRC/tools/parse_board2.py" "$f" >/dev/null 2>&1; then
+		ok "$(basename "$b") 能被 parse_board2.py 解通（小端结构正确）"
+	else
+		bad "$(basename "$b") parse_board2.py 解不通 —— 容器结构或字节序有问题"
+	fi
 done
 # DTS 里两个射频各一行 calibration-variant，两行必须相同；用 sort -u 合并
 distinct=$(grep -o 'qcom,ath11k-calibration-variant = "[^"]*"' "$DTS" 2>/dev/null \
@@ -365,3 +376,4 @@ echo "    3) bash deliver/make-deliverable.sh <ver>"
 echo "    4) bash deliver/make-open-release.sh <VER>"
 echo "    5) 上板：verify-p26.sh / verify-p28.sh"
 exit 0
+
