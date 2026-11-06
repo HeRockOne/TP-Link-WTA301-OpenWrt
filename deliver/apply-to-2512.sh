@@ -406,4 +406,35 @@ fi
  echo "  packet steering:"
  grep -E "packet_steering|steering_flows" $BB/etc/uci-defaults/99-wta301-net | sed 's/^/    /'
 
+ # ---------------------------------------------------------------
+ # P28 —— 让 sysupgrade 能在这块板上工作（不再必须进 u-boot）
+ # ---------------------------------------------------------------
+ # 上游 ipq50xx/platform.sh 的 platform_do_upgrade() case 里没有 tplink,wta301，
+ # 落到 *) default_do_upgrade，而它写的是 ${PART_NAME:-image}（默认 "firmware"）。
+ # 本板没有叫 firmware 的分区 ⇒ LuCI / 命令行刷写必失败。
+ #
+ # 本板是裸固定分区（kernel/rootfs 不在 UBI 里），overlay 在 mtd12 的 UBI 卷
+ # wta301data —— 所以写 mtd5/mtd6 根本不碰配置，升级后设置和已装包全保留。
+ #
+ # 整份替换而不是 sed：与上面的 base-files 同样理由（可复现、抗上游上下文漂移）。
+ # 来源：OpenWrt v25.12.6
+ #   target/linux/qualcommax/ipq50xx/base-files/lib/upgrade/platform.sh
+ #   md5 bf8e145b265335d818efed942a7c7fc9，仅新增 wta301 分支与检查。
+ echo "== 5g. sysupgrade：ipq50xx/platform.sh 加 tplink,wta301 分支 =="
+ cp -f $SRC/files-ipq50xx-upgrade/lib/upgrade/platform.sh \
+       $T/ipq50xx/base-files/lib/upgrade/platform.sh
+ chmod 0755 $T/ipq50xx/base-files/lib/upgrade/platform.sh
+ echo "  wta301 分支:"
+ grep -n "tplink,wta301" $T/ipq50xx/base-files/lib/upgrade/platform.sh | sed 's/^/    /'
+ echo "  拒绝刷写的判据:"
+ grep -E "does not fit|not squashfs|not a sysupgrade tar|has no " \
+      $T/ipq50xx/base-files/lib/upgrade/platform.sh | sed 's/^\s*/    /'
+ sh -n $T/ipq50xx/base-files/lib/upgrade/platform.sh && echo "    sh -n OK"
+
+ # kernel 分区必须声明 0x740000：FIT 是 4,280,940 B（0x41526c），比 factory 表的
+ # 0x400000 大 86,636 B。声明小了 mtd write 会直接拒绝，sysupgrade 就写不进内核。
+ echo "  DTS kernel 分区（必须 0x740000）:"
+ grep -A3 'kernel@4880000' $T/files/arch/arm64/boot/dts/qcom/ipq5018-wta301.dts \
+      | grep 'reg = ' | sed 's/^\s*/    /'
+
  echo "== DONE =="

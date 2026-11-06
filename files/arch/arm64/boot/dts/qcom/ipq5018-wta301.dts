@@ -287,9 +287,28 @@
 				reg = <0x4700000 0x40000>;
 			};
 
+			/*
+			 * Declared 0x740000, NOT the factory table's 0x400000.
+			 *
+			 * The factory table allocates 4 MiB here but the region that
+			 * is actually free before rootfs@4fc0000 is 0x740000, and the
+			 * stock u-boot reads the FIT using the length stored in the TP
+			 * header rather than trusting this partition entry.  Our FIT is
+			 * 4,280,940 B (FDT totalsize 0x0041526c), i.e. 86,636 B LARGER
+			 * than 0x400000 -- u-boot has always written that overhang and
+			 * the board boots from it.
+			 *
+			 * Declaring only 0x400000 makes `mtd write - kernel` (what
+			 * sysupgrade does) fail or truncate, so an in-OS upgrade would
+			 * brick the board.  Widening to 0x740000 changes nothing that
+			 * is on flash: offset and index stay identical, rootfs stays
+			 * index 6 so root=/dev/mtdblock6 keeps working.
+			 *
+			 * 0x4880000 + 0x740000 = 0x4fc0000 = rootfs start, exact fit.
+			 */
 			kernel@4880000 {
 				label = "kernel";
-				reg = <0x4880000 0x400000>;
+				reg = <0x4880000 0x740000>;
 			};
 
 			rootfs@4fc0000 {

@@ -111,7 +111,20 @@ ls -la $OUT/pack/
 
 echo "== 6. FINGERPRINT.json + tphdr 自洽复核 =="
 python3 --version >/dev/null
-python3 "$W/wta301-2512/tools/mk_fingerprint.py" $OUT/pack --version P26-2512 --stage P26 --purpose "25.12.6 / 6.12.112 / P26 成体系性能优化（packet_steering=2 + eth0 IRQ->CPU1 + netdev_budget=1000 + 5G ch161/HE80 + 2.4G ch11/HT20）" --bootargs "root=/dev/mtdblock6 rootfstype=squashfs rootwait coherent_pool=2M ubi.mtd=rootfs_data3 fstools_overlay_name=wta301data" --rollback-to S7 --rollback-kernel 53bd0490 --rollback-rootfs c2e227c6 --rollback-tphdr 3ccbcfc4   || die "mk_fingerprint 失败"
+python3 "$W/wta301-2512/tools/mk_fingerprint.py" $OUT/pack --version P28-2512 --stage P28 --purpose "25.12.6 / 6.12.112 / P28 系统内 sysupgrade（platform.sh tplink,wta301 + kernel 分区 0x740000）＋ P26 性能优化（packet_steering=2 + eth0 IRQ->CPU1 + netdev_budget=1000 + 5G ch161/HE80 + 2.4G ch11/HT20）" --bootargs "root=/dev/mtdblock6 rootfstype=squashfs rootwait coherent_pool=2M ubi.mtd=rootfs_data3 fstools_overlay_name=wta301data" --rollback-to S7 --rollback-kernel 53bd0490 --rollback-rootfs c2e227c6 --rollback-tphdr 3ccbcfc4   || die "mk_fingerprint 失败"
+
+echo "== 7. sysupgrade 包（系统内升级用，不必进 u-boot）=="
+# 这是 OpenWrt 原生 tar：sysupgrade-<board>/{CONTROL,kernel,root} + fwtool 元数据尾。
+# 从 P28 起 ipq50xx/platform.sh 有了 tplink,wta301 分支，可以直接刷这个包：
+#   LuCI -> 系统 -> 备份/刷写固件  或  sysupgrade -v <包>
+# 只写 mtd5(kernel) + mtd6(rootfs)，不碰 mtd12 上的 overlay 卷 wta301data
+# => 全部 UCI 配置和已装包自动保留。
+# 救砖 / 换 u-boot 仍然必须用上面的 u-boot 网页包（那个能写 normal_boot 和重做 UBI）。
+cp -f "$SYSUP" $OUT/pack/ || die "复制 sysupgrade 包失败"
+SYSUPNAME=$(basename "$SYSUP")
+( cd $OUT/pack && md5sum "$SYSUPNAME" > "$SYSUPNAME.md5" )
+echo "  $SYSUPNAME  $(stat -c%s "$OUT/pack/$SYSUPNAME") B"
+echo "  md5 $(cut -d' ' -f1 "$OUT/pack/$SYSUPNAME.md5")"
 
 echo
 echo "== 完成：$OUT/pack =="
