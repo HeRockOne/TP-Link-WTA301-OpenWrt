@@ -9,6 +9,13 @@ die(){ echo "*** FAIL: $*"; exit 1; }
 need_tree || exit 1
 need_tool mk_op_pack.py || exit 1
 
+# ★ 变量语义冲突提醒：lib-paths.sh 的 OUT 是「交付目录」（$REL/deliver），
+#   而本脚本历史上用 OUT 指「出包根」，产物在 $OUT/pack。两者不能混。
+#   这里显式改回出包根，否则 pack 会跑到 $REL/deliver/pack，
+#   而 make-deliverable.sh 找的是 $REL/pack。
+OUT=$REL
+PACK=$OUT/pack
+
 # ── 参数解析（以前这里没有，--version/--stage 被默默丢弃，-- ★ 真 bug）──
 VERSION=""
 STAGE=""

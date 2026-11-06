@@ -115,14 +115,16 @@ python patches/uboot/build/mk_uboot_slot.py u-boot.bin <输出目录>
 | 环节 | 状态 | 证据 |
 |---|---|---|
 | `files/` 覆盖后与当前源树一致 | ✅ **已实证** | 23/23 `cmp` 逐字节相同 |
-| `mk_uboot_slot.py` 能重出槽镜像 | ✅ **已实证** | 用仓库版重跑 → `d0ada9f7…` / `0xCB2D3108`，与已刷板子的 `work/images/kit-p21c/uboot_slot_0x40000.bin` **逐字节一致** |
-| `build_j1.sh` 从零跑一遍出 `u-boot.bin` | ⬜ **未实跑** | 脚本仅改写为可移植（`UBOOT_TREE` / `TOOLCHAIN_BIN` 环境变量），**未在本轮执行**。已按用户指示跳过，不为它再开一轮编译。 |
+| `mk_uboot_slot.py` 能重出槽镜像 | ✅ **已实证（复验两次）** | 且已接入 `deliver/make-deliverable.sh`：只要找到 556,032 B 的 `u-boot.bin` 就现造槽镜像，再造不出来才回落历史成品 |
+| 输入 `u-boot.bin` 指纹 | ✅ **已核对** | `src/u-boot-2016/u-boot.bin` 556,032 B / md5 `3a4cb00e37065936e5ff89cb5710a519`，与 §3 判据逐字相同 |
+| `u-boot.bin` → 槽镜像（端到端） | ✅ **已实证** | `mk_uboot_slot.py u-boot.bin` → 262,144 B / md5 `d0ada9f7…` / crc32 `0xCB2D3108`，往返校验通过（解压后与 `u-boot.bin` 逐字节相等） |
+| `build_j1.sh` 从零跑一遍出 `u-boot.bin` | ⬜ **未实跑** | 脚本已参数化（`UBOOT_TREE` / `TOOLCHAIN_BIN` 环境变量），**未在本轮执行**。已按用户指示跳过，不为它再开一轮编译。 |
 | 跨机器全链路（新基座 + 本 overlay → 同 md5） | ⬜ **未验证** | 受 §1.1 基座 commit 未固定所限，本就不可能保证 |
 
-> **读法**：出槽镜像那一步是闭环可复现的（已逐字节对过板子上的实物）。
-> 编译那一步脚本是照本机实跑记录写的，但要先有源码树和工具链才能跑；
-> 基座 commit 未固定，所以跨机器首次成功也不能指望 md5 一致。
-> 真要卡死复现，唯一的办法是把 codelinaro 基座的 commit 钉下来并写进 §1.1。
+> **读法**：从 `u-boot.bin` 到可刷槽镜像是**完全闭环**的（逐字节对过板子上的实物，本轮又复验一次）。
+> 唯一的缺口是上一级：**从基座源码编出那个 `u-boot.bin`** —— 脚本已参数化但未实跑，
+> 而且基座 commit 未固定，跨机器首次成功也不能指望 md5 一致。
+> 真要卡死复现，唯一办法是把 codelinaro 基座的 commit 钉下来并写进 §1.1。
 
 ---
 
