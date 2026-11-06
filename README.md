@@ -16,10 +16,14 @@
 | P9–P11 overlay 持久化 | ✅ | `docs/P11-OVERLAY-PERSISTENCE.md` |
 | P16/P17 中文 LuCI + Argon + 按键 | ✅ | `docs/P16-VERIFIED.md` · `docs/P17-ARGON-KEYS.md` |
 | P18–P21 u-boot 网页刷机 | ✅ 链路闭环，余 `factory_no_fit` 真刷未验 | `docs/P20-UBOOT-UI.md` · `docs/P21-DECODE-OOM.md` |
+| P22 存储布局实测 | ✅ 已实测并决策（mtd8 保留不动） | `docs/P22-STORAGE-LAYOUT.md` |
 
 **复现**：见 `docs/REPRODUCE.md`（OpenWrt）与 `patches/uboot/README.md`（u-boot kit）。
 
-**待服务决策**（不影响当前可用性）：WiFi 默认密码、reset 长按阈值、是否开 WAN、是否用 mtd8 的 22 MB。
+**待服务决策**（不影响当前可用性）：WiFi 默认密码、reset 长按阈值、是否开 WAN。
+
+**已决策**：mtd8 的 22 MB 保留不动 —— `/overlay` 还剩 27.7 MB，190 个包只占 508 KB，
+改分区表风险大于收益。实测数据与理由见 `docs/P22-STORAGE-LAYOUT.md`。
 
 ---
 
