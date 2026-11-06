@@ -291,3 +291,16 @@ P28 之后所有版本              → 都可以在 LuCI 里直接刷
 | DTS kernel 分区 | `files/arch/arm64/boot/dts/qcom/ipq5018-wta301.dts` | `apply-to-2512.sh` §2 |
 | sysupgrade 分支 | `files-ipq50xx-upgrade/lib/upgrade/platform.sh` | `apply-to-2512.sh` §5g |
 | 出 sysupgrade 包 | — | `make-release.sh` §7 |
+| 出交付四件套 | `deliver/README-刷机说明.txt` | `make-deliverable.sh` |
+| 刷后验收 | — | `verify-p28.sh`（B1~B7） |
+
+完整流水线（P28 实测跑通）：
+
+```bash
+bash deliver/apply-to-2512.sh          # 铺源码（DTS 改动会触发内核重编）
+make -j6 world && make -j6 target/install
+bash deliver/make-release.sh           # 出 u-boot 四区 + sysupgrade 包
+bash deliver/make-deliverable.sh p28   # 出网页/串口/系统内三种包 + 自检
+```
+`make-deliverable.sh` 末尾会自动跑 `verify_single_bin.py`，并硬校验
+0x1060000 / 0x1380000 两个长度与 TPIMG 头 +0x5c/+0x64 自洽。
