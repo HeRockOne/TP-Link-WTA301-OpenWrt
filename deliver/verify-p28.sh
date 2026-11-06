@@ -36,8 +36,8 @@ echo ""
 echo "B2. 分区序号没被改动（root=/dev/mtdblock6 靠这个）"
 _n=$(grep -c '"rootfs"' /proc/mtd 2>/dev/null)
 chk "名为 rootfs 的分区" "1" "$_n"
-_r=$(sed -n '7p' /proc/mtd 2>/dev/null | sed 's/.*"\(.*\)"/\1/')
-chk "/proc/mtd 第 7 行 = mtd6 的名字" "rootfs" "$_r"
+_r=$(sed -n '8p' /proc/mtd 2>/dev/null | sed 's/.*"\(.*\)"/\1/')
+chk "/proc/mtd 第 8 行 = mtd6 的名字" "rootfs" "$_r"
 _cmd=$(cat /proc/cmdline)
 case "$_cmd" in
 	*"root=/dev/mtdblock6"*) ok "bootargs 仍是 /dev/mtdblock6" ;;
@@ -68,8 +68,10 @@ case "$_m" in
 	*ubi0_0*) ok "/overlay = ubi0_0 ($_m)" ;;
 	*) bad "/overlay 不是 ubi 卷: $_m" ;;
 esac
-_v=$(ubinfo -N wta301data 2>/dev/null | grep -c 'Name: *wta301data')
-[ "$_v" -ge 1 ] && ok "UBI 卷 wta301data 存在" || bad "找不到 UBI 卷 wta301data"
+# 注意：busybox/mtd-utils 的 ubinfo -N 需要同时给 -d，只给名字会失败；
+# 直接读 sysfs 更省事，且不依赖 mtd-utils 版本。
+_v=$(cat /sys/class/ubi/ubi0_0/name 2>/dev/null)
+chk "UBI 卷名（sysfs）" "wta301data" "$_v"
 case "$(cat /proc/cmdline)" in
 	*"fstools_overlay_name=wta301data"*) ok "bootargs 指向 wta301data" ;;
 	*) bad "bootargs 没有 fstools_overlay_name=wta301data" ;;

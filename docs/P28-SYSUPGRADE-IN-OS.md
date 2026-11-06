@@ -253,6 +253,64 @@ sysupgrade -T /tmp/op-sysupgrade.bin && echo "check OK"
 sysupgrade -v /tmp/op-sysupgrade.bin
 ```
 
+### 4.4 ★ 实测结果（2026-10-17，真机）
+
+首次刷 P28 走 u-boot 网页包，重启后实测：
+
+```
+# cat /sys/class/mtd/mtd5/size
+7602176                      ← 0x740000，分区表已生效
+
+# hexdump -C -n 8 /dev/mtd5
+d0 0d fe ed 00 41 52 6c      ← FIT totalsize 0x0041526c = 4,280,940 B
+                               ≤ 7,602,176 ⇒ 系统内刷写不再被拒
+```
+
+#### verify-p28.sh（B1~B7）
+
+```
+B1 kernel 分区声明          OK  mtd5 size 7602176 / offset 76021760
+B2 分区序号未变              OK  /proc/mtd 第 8 行 = mtd6 "rootfs"
+B3 platform.sh wta301 分支  OK  tplink,wta301 ×2 / wta301_write_member 存在
+B4 overlay 在 mtd12 UBI 卷  OK  ubi0_0 → wta301data，27.9M/76K
+B5 sysupgrade 干跑          OK  kernel 4280940<=7602176  root 9100288<=12582912
+B6 fwtool 元数据            OK  supported_devices=["tplink,wta301","wta301"]
+B7 救砖路径                OK  boot_flag 55aa4246 00000002 完好
+
+汇总: OK=23  FAIL=0  SKIP=0
+```
+
+`sysupgrade -T` 自己在板上的原话：
+```
+upgrade: wta301 kernel 4280940 / 7602176, rootfs 9100288 / 12582912
+```
+
+#### verify-p26.sh（调优项未被刷机丢掉）
+
+```
+A1 packet_steering=2, phy0/phy1/eth0 rps_cpus=3, br-lan=0     OK
+A2 eth0 irq22 effective_affinity=1，计数 CPU0=7 CPU1=6089     OK
+A3 netdev_budget=1000, rps_sock_flow_entries=4096             OK
+A4 net-tune 存活，日志：rps phy0-ap0 0→3 / eth0 irq22 0-1→1 /
+                      rps phy1-ap0 0→3                       OK
+A5 5G 161/HE80/CN 实际 80MHz；2.4G 11/HT20 实际 20MHz        OK
+A6 旧 rps-watch / init.d/rps / S99rps 全部不存在               OK
+
+汇总: OK=24  FAIL=0  SKIP=0
+```
+
+`A4` 那三条日志就是 R26-1 修复的行为证据：冷启动时 `phy1-ap0` 先被建为 `rps_cpus=0`，
+`net-tune` 的自检循环 6 秒后把它补成 3。
+
+#### 首次跑验收时踩到的两个脚本 bug（已修）
+
+| 症状 | 真因 | 修法 |
+|---|---|---|
+| `[FAIL] /proc/mtd 第 7 行 = mtd6 的名字` | `/proc/mtd` 第 1 行是表头 `dev: size erasesize name`，所以 mtd6 在第 8 行 | `sed -n '8p'` |
+| `[FAIL] 找不到 UBI 卷 wta301data` | `ubinfo -N <name>` 必须同时给 `-d <dev>`，只给名字返回空 | 改读 `/sys/class/ubi/ubi0_0/name`（不依赖 mtd-utils 版本） |
+
+两个都是脚本错，板子状态本身是对的（`sed -n '8p'` 与 `ubinfo -a` 实测确认为 `rootfs` / `wta301data`）。
+
 ---
 
 ## 5. 现在两条路各自的适用范围
