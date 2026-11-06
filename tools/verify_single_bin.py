@@ -168,8 +168,30 @@ def main():
             sz = os.path.getsize(p)
             if sz == TPIMG_UBOOT_SLOT_LEN:
                 verify_uboot(p)
-            elif sz > 1024 * 1024:
+                continue
+            # 裸 tphdr（只有 0x20000 头、没载荷）不是网页整包。
+            # 它的头 8 字节也是合法 TPIMG magic，若不先拦住，verify_op 会
+            # 在 “avail >= kernel_len” 上假报 FAIL。
+            if sz <= TPIMG_HDR_LEN:
+                print('\n=== 跳过 %s (%d B) ===' % (n, sz))
+                print('  裸 tphdr（只有头，无 kernel/rootfs 载荷），不是网页整包。')
+                continue
+            # 判据改成「看 magic」而不是「看大小」。
+            # 原逻辑 sz > 1MB 就当网页包，会误判 op_kernel_0x480000.bin /
+            # op_rootfs_0xbc0000.bin 这类**分区载荷**（它们以 d00dfeed / hsqs
+            # 开头），从而刷一屏假 FAIL。
+            # ★ TPIMG magic 是 **8 字节** 0000010055aa9dd1，不是 4 字节的
+            #  55aa9dd1（后者只是它的后 4 字节）——这一条先钐过：
+            #  用前 4 字节判会把真正的网页包也跳过去。
+            with open(p, 'rb') as f:
+                head8 = f.read(8)
+            if head8 == TPIMG_MAGIC:
                 verify_op(p)
+            elif sz > 1024 * 1024:
+                print('\n=== 跳过 %s (%d B) ===' % (n, sz))
+                print('  头 8 字节 %s 不是 TPIMG magic %s'
+                      % (head8.hex(), TPIMG_MAGIC.hex()))
+                print('  ⇒ 分区载荷/UBI 镜像，不是网页整包，本工具不检查。')
         rdir = os.path.join(a.dir, 'rescue')
         if os.path.isdir(rdir):
             for n in sorted(os.listdir(rdir)):

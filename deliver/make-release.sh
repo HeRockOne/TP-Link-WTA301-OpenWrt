@@ -111,7 +111,7 @@ ls -la $OUT/pack/
 
 echo "== 6. FINGERPRINT.json + tphdr 自洽复核 =="
 python3 --version >/dev/null
-python3 "$W/wta301-2512/tools/mk_fingerprint.py" $OUT/pack         --version P3-2512 --stage P3         --purpose "25.12.6 / kernel 6.12.112 首次真机验证"         --bootargs "root=/dev/mtdblock6 rootfstype=squashfs rootwait coherent_pool=2M ubi.mtd=rootfs_data3 fstools_overlay_name=wta301data"         --rollback-to S7 --rollback-kernel 53bd0490 --rollback-rootfs c2e227c6 --rollback-tphdr 3ccbcfc4   || die "mk_fingerprint 失败"
+python3 "$W/wta301-2512/tools/mk_fingerprint.py" $OUT/pack --version P26-2512 --stage P26 --purpose "25.12.6 / 6.12.112 / P26 成体系性能优化（packet_steering=2 + eth0 IRQ->CPU1 + netdev_budget=1000 + 5G ch161/HE80 + 2.4G ch11/HT20）" --bootargs "root=/dev/mtdblock6 rootfstype=squashfs rootwait coherent_pool=2M ubi.mtd=rootfs_data3 fstools_overlay_name=wta301data" --rollback-to S7 --rollback-kernel 53bd0490 --rollback-rootfs c2e227c6 --rollback-tphdr 3ccbcfc4   || die "mk_fingerprint 失败"
 
 echo
 echo "== 完成：$OUT/pack =="
