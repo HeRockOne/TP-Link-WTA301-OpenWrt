@@ -1,0 +1,102 @@
+'use strict';
+
+// wta301: 一次性读取 CPU 计数器与全部温度传感器，供 LuCI 概览页使用（WTA301 定制固件）。
+//
+// 为什么单独做一个 rpcd 对象：
+//   luci-mod-status-index 的 file ACL 只放了 /etc/board.json 和两个 nf_conntrack 路径，
+//   前端 JS 直接 fs.read('/sys/class/thermal/...') 会被 rpcd 拒绝。
+//   放在 rpcd 里读，ACL 只需授权这一个 ubus 方法，不放开任何文件路径。
+//
+// 返回（单位：mC 毫摄氏度）：
+//   { cpu: {total, idle}, ncpu: 2,
+//     thermal: [ {name, mC, trip_mC}, ... ],
+//     radio:   [ {phy, mC}, ... ] }
+
+import { readfile, glob, basename } from 'fs';
+
+function rd(path) {
+	try {
+		return trim(readfile(path));
+	} catch (e) {
+		return null;
+	}
+}
+
+function num(path) {
+	const v = rd(path);
+	return (v == null) ? null : +v;
+}
+
+// /proc/stat 首行: cpu  user nice system idle iowait irq softirq steal ...
+function cpuCounters() {
+	const line = split(rd('/proc/stat') ?? '', '\n')[0] ?? '';
+	const fields = split(trim(substr(line, 3)), regexp('[ \t]+'));
+	let total = 0, idle = 0;
+
+	for (let i = 0; i < length(fields); i++) {
+		const v = +(fields[i] || 0);
+
+		if (fields[i] == '')
+			continue;
+
+		total += v;
+
+		// idle + iowait 才算「没在干活」
+		if (i == 3 || i == 4)
+			idle += v;
+	}
+
+	return { total: total, idle: idle };
+}
+
+function thermalZones() {
+	const rv = [];
+
+	for (let dir in sort(glob('/sys/class/thermal/thermal_zone[0-9]*'))) {
+		const name = rd(dir + '/type');
+		const mC = num(dir + '/temp');
+
+		if (name == null || mC == null)
+			continue;
+
+		push(rv, {
+			name: name,
+			mC: mC,
+			// passive（降频）优先，没有就退到 critical
+			trip_mC: num(dir + '/trip_point_1_temp') ?? num(dir + '/trip_point_0_temp')
+		});
+	}
+
+	return rv;
+}
+
+function radioTemps() {
+	const rv = [];
+
+	for (let phy in sort(glob('/sys/class/ieee80211/phy[0-9]*'))) {
+		// 实测路径是 phy0/hwmon4/，不是 phy0/hwmon/hwmon4/ —— 中间没有额外一层
+		for (let hw in sort(glob(phy + '/hwmon[0-9]*'))) {
+			const mC = num(hw + '/temp1_input');
+
+			if (mC != null)
+				push(rv, { phy: basename(phy), mC: mC });
+		}
+	}
+
+	return rv;
+}
+
+const methods = {
+	status: {
+		call: function() {
+			return {
+				cpu: cpuCounters(),
+				ncpu: length(glob('/sys/devices/system/cpu/cpu[0-9]*')),
+				thermal: thermalZones(),
+				radio: radioTemps()
+			};
+		}
+	}
+};
+
+return { wta301: methods };

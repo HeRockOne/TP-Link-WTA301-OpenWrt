@@ -1,0 +1,10 @@
+{
+	"luci-mod-status-index-wta301": {
+		"description": "Grant access to WTA301 CPU load and thermal sensor readings",
+		"read": {
+			"ubus": {
+				"wta301": [ "status" ]
+			}
+		}
+	}
+}
