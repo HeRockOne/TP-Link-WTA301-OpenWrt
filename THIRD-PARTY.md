@@ -144,16 +144,32 @@ failsafe/modules/tplinkinfo.c
    GPL-2.0 §1（保留版权声明）。
    `deliver/verify-repro.sh` §7 会逐文件校验，删了立刻报 FAIL。
 
-2. 构建包装钉在 `9ce31573`，并且**由产物自证** —— 已交付的 `u-boot.bin` 里
+2. **修改声明在 `patches/uboot/CHANGES.md`**（GPL-2.0 §2(a) 要求）。
+   包含：23 个文件的逐文件改动说明 + 对应源码声明（§3）。
+   改 `patches/uboot/files/` 里任何东西时，**同一提交里更新 CHANGES.md**。
+
+3. 构建包装钉在 `9ce31573`，并且**由产物自证** —— 已交付的 `u-boot.bin` 里
    版本横幅就是 `U-Boot 2016.01-9ce3157-dirty`。这是本工程唯一一个精确固定
    到 commit 的 u-boot 侧引用。
 
-3. 如果日后把 `patches/uboot/` 拆成独立仓库（类似上游 uBootKit 那样按机型
+4. 如果日后把 `patches/uboot/` 拆成独立仓库（类似上游 uBootKit 那样按机型
    收录），开头必须写明「基于 `chenxin527/uboot-qsdk12.5-build` 派生」。
 
-4. **不要把它叫「uBootKit」而不提来源**。上游同名项目的作者是 chenxin527；
+5. **不要把它叫「uBootKit」而不提来源**。上游同名项目的作者是 chenxin527；
    已有一个叫 `chenxin527/uboot-qsdk12.5-build` 的仓库用这个名。
    建议对外用「WTA301 u-boot kit」或「WTA301 U-Boot 复现包」避免混淆。
+
+### 3.3 能不能开源（一句话回答）
+
+**能。** 基座是 GPL-2.0/GPL-2.0+，我们也用 GPL-2.0，许可兼容无冲突。
+GPL 只要求「标明 + 给源码」，不禁止分发。
+
+本项目已做到：版权头保留（逐文件自检）· 修改声明（`CHANGES.md`）·
+对应源码（overlay + 构建脚本 + 上游引用）。
+
+**唯一的真缺口是工程问题，不是法务**：内层 codelinaro commit 未固定，
+所以「逐字节可复现」做不到。GPL **不**要求 bit-identical 构建，
+所以不构成违规，但对外应如实说明。
 
 ---
 

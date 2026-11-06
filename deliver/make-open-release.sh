@@ -73,6 +73,10 @@ md5sums_of "$OUT/firmware" MD5SUMS.txt '\.(bin|json|txt)$'
 echo "== 2. u-boot kit =="
 [ -d "$SRC/patches/uboot" ] || die "没有 patches/uboot"
 cp -a "$SRC/patches/uboot/README.md" "$OUT/uboot-kit/README.md"
+# CHANGES.md 是 GPL-2.0 §2(a)/§3 的合规文件，**必须进发布包**。
+# 少它一个，发布包就变成“分发二进制但没修改声明也没对应源码声明”。
+cp -a "$SRC/patches/uboot/CHANGES.md" "$OUT/uboot-kit/CHANGES.md" \
+	|| die "缺 patches/uboot/CHANGES.md（GPL-2.0 合规必需）"
 cp -a "$SRC/patches/uboot/files"     "$OUT/uboot-kit/files"
 cp -a "$SRC/patches/uboot/build"     "$OUT/uboot-kit/build"
 [ -f "$DELIVER/wta301-uboot-p21c.bin" ] && \

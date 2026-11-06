@@ -357,6 +357,23 @@ for who in chenxin527 MediaTek; do
 	fi
 done
 
+# GPL-2.0 §2(a)：改过的文件要有修改声明。
+# §3：分发二进制要有对应源码声明。两者都在 CHANGES.md。
+CH="$SRC/patches/uboot/CHANGES.md"
+if [ ! -f "$CH" ]; then
+	bad "缺 patches/uboot/CHANGES.md —— GPL-2.0 §2(a)/§3 要求修改声明与对应源码声明"
+else
+	grep -q '§2(a)\|2(a)' "$CH" && grep -q '对应源码\|Corresponding Source' "$CH" \
+		&& ok "CHANGES.md 含 §2(a) 修改声明 + §3 对应源码声明" \
+		|| bad "CHANGES.md 缺 §2(a) 或 §3 声明"
+	# 23 个 overlay 文件是否在 CHANGES.md 里都有逐文件说明
+	MISS=0
+	while IFS= read -r rel; do
+		grep -qF "\`$rel\`" "$CH" || { MISS=$((MISS+1)); warn "CHANGES.md 未描述 $rel"; }
+	done < <(cd "$SRC/patches/uboot/files" && find . -type f | sed 's|^\./||')
+	[ "$MISS" -eq 0 ] && ok "CHANGES.md 覆盖全部 23 个 overlay 文件"
+fi
+
 # 如果能找到本机 u-boot 源树（不在仓库内），校验 files/ 与它无内容差异。
 # 为什么忽略末尾换行：仓库侧按 POSIX 习惯给 19 个文件补了末尾换行，
 # 源树里是从 tar 解出来的无换行版本。两者内容一致、编译产物一致，
