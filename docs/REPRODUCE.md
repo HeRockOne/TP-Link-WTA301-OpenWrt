@@ -168,11 +168,16 @@ LZMA 解压上限。为什么不能用 `verify_pack.py`：那个验的是**四�
 
 ## 4. 已知不可复现 / 弱环节
 
+> 完整实测记录见 **[`REPRODUCTION-VERIFICATION.md`](REPRODUCTION-VERIFICATION.md)**。
+> 那里逐条附判据，包括「全新树 apply 后与已编译树零实质差异」的实证。
+
 | 项 | 状况 | 影响 |
 |---|---|---|
-| u-boot 基座 commit | **未固定**（只记了分支 `NHSS.QSDK.12.5`） | 同代基座可过；跨大版本要人工对 |
+| **squashfs 时间戳** | ❌ **确定做不到逐字节复现**。`TARGET_DIR` 里的文件 mtime = 构建时刻，而 `Image/mkfs/squashfs-common` 的 `mksquashfs4` 调用**没有 `-all-time`** | 每次构建 md5 都不同。上游 OpenWrt 也不保证 |
+| u-boot 内层基座 commit | ⚠️ 只到 QSDK 发布标签 `AU_LINUX_QSDK_NHSS.QSDK.12.5_TARGET_ALL.12.5.2783.2994`（外层包装 `9ce31573` 已由产物自证） | 同代基座可过；不到「同一棵树」 |
 | UBI overlay 镜像字节 | `mkfs.ubifs` 写入当前时间戳，`SOURCE_DATE_EPOCH` 在 host 工具上不生效 | 只影响字节，不影响功能（首启会重格式化） |
 | ~~绝对路径~~ | ✅ **已修**：所有脚本走 `deliver/lib-paths.sh`，`OWTREE`/`WORK`/`REL`/`ARGON_SRC`/`HOSTBIN` 全部可环境变量覆盖 | 已无此项 |
+| ~~feeds 未钉死~~ | ✅ **不是问题**：`feeds.conf.default` 是上游 git 文件，5 个 feed 全部 `^commit`，实测检出后 0 本地改动 | 已无此项 |
 | 工具链 | 不进仓库（`staging_dir` 有数百 MB，随基座走） | 属正常实践 |
 | 整包尺寸常量 | `0x1060000`/`0x1380000`/`0x740000` 写在多处（出包脚本、`mk_web_img.py`、DTS），改一处必须改一片 | `verify-repro.sh` §6/§9 会交叉比对并报错 |
 
