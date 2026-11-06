@@ -311,6 +311,58 @@ A6 旧 rps-watch / init.d/rps / S99rps 全部不存在               OK
 
 两个都是脚本错，板子状态本身是对的（`sed -n '8p'` 与 `ubinfo -a` 实测确认为 `rootfs` / `wta301data`）。
 
+### 4.5 ★ 系统内真刷一次（端到端闭环实证）
+
+#### 第一次尝试：SSH 被捉断，但拿不到内容证据
+
+`sysupgrade -v /tmp/su.bin` 在板子上启动后，SSH 在 12 秒内直接被断：
+
+```
+FATAL ERROR: Remote side unexpectedly closed network connection
+```
+
+这是 `sysupgrade` 调 `reboot -f` 杀掉 sshd 的特征（若 check 不过，它会报错并留在系统里，SSH 不会断）。
+但重启后比对 mtd5/mtd6 的 md5：
+
+| | 刷前 | 刷后 |
+|---|---|---|
+| mtd5 前 128B | `b9b5541f…` | `b9b5541f…` |
+| mtd6 前 128B | `8e0917ec…` | `8e0917ec…` |
+| mtd5 @0/1M/2M/…/7M | 8 个采样 md5 | **全部相同** |
+
+**同包刷同包，内容必然相同 ⇒ 内容比对只能证明「没写坏」，不能证明「写过」。**
+这是本节最容易走错的判断，必须避开。
+
+#### 第二次：把日志落 /overlay 拿铁证
+
+`/tmp` 是 tmpfs，重启就清，所以直接把 `sysupgrade` 的输出重定向到 overlay：
+
+```sh
+pscp wta301-op-25.12.6-p28-sysupgrade.bin root@192.168.1.1:/overlay/su.bin
+setsid sh -c 'sysupgrade -v /overlay/su.bin > /overlay/su2.log 2>&1; sync' </dev/null >/dev/null 2>&1 &
+```
+
+**3 秒后就在板上读到了原始输出**（由 `platform_do_upgrade` 自己的 `echo` 打出，不是我们编的）：
+
+```
+Sat Oct 17 21:51:44 GMT 2026 upgrade: Image not in /tmp, copying...
+Sat Oct 17 21:51:46 GMT 2026 upgrade: wta301 kernel 4280940 / 7602176, rootfs 9100288 / 12582912
+```
+
+这行字就是铁证：
+- `wta301` = 走的是**我们新加的分支**，不是 `default_do_upgrade`
+- `kernel 4280940 / 7602176` = 内核尺寸 / mtd5 分区尺寸，**放得下**（旧分区 4194304 会在这里报错）
+- `rootfs 9100288 / 12582912` = 同上
+
+#### 为什么不能用 `/tmp` 存日志
+
+第一次刷机日志写在 `/tmp/su.log`，重启后：
+```
+ls: /tmp/su.log: No such file or directory
+```
+⇒ 验证剧本里**任何想跨重启保留的证据都必须放 `/overlay`**。
+
+
 ---
 
 ## 5. 现在两条路各自的适用范围
