@@ -304,6 +304,84 @@ else
 	bad "u-boot files/ 只有 $NF 个文件，像是残留的 diff 而非整份 overlay"
 fi
 
+# ★ 上游归属：每个文件的原作者版权头都不能少。
+#   删掉即违反 GPL-2.0 §1（保留版权声明）。这是整个仓库最容易
+#   在某次“清理注释”中被无意破坏、而且破了不会报错的东西。
+#
+#   注意：这些文件不是同一个上游的！第一版检查假设“全部是 chenxin527”
+#   就直接报了假 FAIL（upgrade.c 实际是 MediaTek 的代码）。必须逐文件声明。
+CHK_OWNER() {
+	# $1 = 相对路径  $2 = 应包含的版权串（空 = 只查有版权头即可）
+	local f="$SRC/patches/uboot/files/$1" want="$2"
+	if [ ! -f "$f" ]; then
+		bad "u-boot 归属：缺 $1"; return
+	fi
+	if [ -z "$want" ]; then
+		grep -qiE 'copyright' "$f" && ok "归属在位：$1" \
+			|| warn "$1 无版权头（见 THIRD-PARTY.md §3.1 的来历说明）"
+		return
+	fi
+	if grep -qF "$want" "$f"; then
+		ok "归属在位：$1 ← $want"
+	else
+		bad "$1 丢了版权头「$want」（违反 GPL-2.0 §1）"
+	fi
+}
+
+CHK_OWNER board/qca/arm/common/failsafe.c "Copyright (C) 2026 chenxin527"
+CHK_OWNER board/qca/arm/common/fw_dec.c  "Copyright (C) 2026 chenxin527"
+CHK_OWNER failsafe/failsafe.c            "Copyright (C) 2026 chenxin527"
+CHK_OWNER failsafe/modules/modules.h     "Copyright (C) 2026 chenxin527"
+CHK_OWNER include/failsafe/fw_dec.h      "Copyright (C) 2026 chenxin527"
+# upgrade.c 是 OpenWrt 原版 failsafe，来自 MediaTek —— 与 chenxin527 无关
+CHK_OWNER failsafe/modules/upgrade.c     "Copyright (C) 2022 MediaTek Inc."
+# 这 4 个文件无 copyright 头（来历不确定），但必须有 SPDX 声明许可
+for rel in board/qca/arm/common/tplink_tpimg.c drivers/net/ipq5018/rtl8367s.c \
+           failsafe/modules/tplinkinfo.c include/failsafe/tplink_tpimg.h; do
+	f="$SRC/patches/uboot/files/$rel"
+	if [ ! -f "$f" ]; then
+		bad "u-boot 归属：缺 $rel"
+	elif grep -q 'SPDX-License-Identifier' "$f"; then
+		ok "SPDX 在位：$rel"
+	else
+		bad "$rel 没有 SPDX-License-Identifier（发布包不应有完全无许可声明的文件）"
+	fi
+done
+
+# THIRD-PARTY.md 必须同时声明两个上游，否则对外发布时无人知晓
+for who in chenxin527 MediaTek; do
+	if grep -qi "$who" "$SRC/THIRD-PARTY.md" 2>/dev/null; then
+		ok "THIRD-PARTY.md 已声明 $who 归属"
+	else
+		bad "THIRD-PARTY.md 没提 $who —— 对外发布缺 GPL 归属"
+	fi
+done
+
+# 如果能找到本机 u-boot 源树（不在仓库内），校验 files/ 与它无内容差异。
+# 为什么忽略末尾换行：仓库侧按 POSIX 习惯给 19 个文件补了末尾换行，
+# 源树里是从 tar 解出来的无换行版本。两者内容一致、编译产物一致，
+# 逐字节比会报 19 个假 FAIL（我在 e33c9a7 就制造过这个坑）。
+UBT=""
+for c in "$(dirname "$SRC")/src/u-boot-2016" "$WORK/../src/u-boot-2016"; do
+	[ -d "$c" ] && { UBT="$c"; break; }
+done
+if [ -n "$UBT" ]; then
+	CNT=0; DIFFS=0; REALS=0
+	while IFS= read -r rel; do
+		a="$UBT/$rel"; b="$SRC/patches/uboot/files/$rel"
+		[ -f "$a" ] || { REALS=$((REALS+1)); bad "u-boot: $rel 在源树里不存在"; continue; }
+		CNT=$((CNT+1))
+		if [ "$(printf '%s' "$(cat "$a")")" != "$(printf '%s' "$(cat "$b")")" ]; then
+			REALS=$((REALS+1)); bad "u-boot: $rel 与源树**内容**不同（不只是行尾）"
+		fi
+	done < <(cd "$SRC/patches/uboot/files" && find . -type f | sed 's|^\./||')
+	if [ "$REALS" -eq 0 ]; then
+		ok "u-boot files/ 与源树内容一致（$CNT 个文件，已忽略末尾换行）"
+	fi
+else
+	warn "未找到 u-boot 源树（正常：树不进仓库），files/ 与源树的比对已跳过"
+fi
+
 # ══════════════════════════════════════════════════════════════════
 sec "8. BDF 与板级匹配（Wi-Fi 起不来的经典原因）"
 # ══════════════════════════════════════════════════════════════════
@@ -376,4 +454,3 @@ echo "    3) bash deliver/make-deliverable.sh <ver>"
 echo "    4) bash deliver/make-open-release.sh <VER>"
 echo "    5) 上板：verify-p26.sh / verify-p28.sh"
 exit 0
-

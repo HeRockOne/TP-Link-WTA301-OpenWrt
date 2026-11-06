@@ -99,10 +99,61 @@ ath11k 分别加载 board data（`board-2.bin`）与 caldata（`cal-*.wifi.bin`�
 |---|---|---|
 | OpenWrt | `v25.12.6` = `64900e756efa667774214f9c6b17c113222e01f7` | GPL-2.0 |
 | Linux 内核 | 6.12.112（OpenWrt 树内） | GPL-2.0 |
-| u-boot 2016.01 | 分支 `NHSS.QSDK.12.5`（commit 未固定，见 `patches/uboot/README.md` §1.1） | GPL-2.0+ |
+| **`chenxin527/uboot-qsdk12.5-build`**（u-boot 构建包装 + failsafe 框架） | **`9ce31573`** "Merge pull request #4 from webbrain-one/webbrain/readme-improvement" | GPL-2.0 |
+| u-boot 2016.01（QSDK 12.5 基座） | 分支 `NHSS.QSDK.12.5`，对应发布标签 `AU_LINUX_QSDK_NHSS.QSDK.12.5_TARGET_ALL.12.5.2783.2994`；**commit 未固定**，见 `patches/uboot/README.md` §1.1 | GPL-2.0+ |
 | 工具链 | `arm_cortex-a7_gcc-5.2.0_musl-1.1.16_eabi` | GPL / LGPL 组合 |
 | ath11k 固件（q6/m3） | `ath11k-firmware-ipq5018-qcn6122` `2024.10.14~15f05012-r2` | Qualcomm 专有，可再分发（见该包 `Notice.txt`） |
 | Argon 主题 | `v3.1.0` | MIT（上游声明） |
+
+### 3.1 u-boot 侧的上游归属（**必须保留**）
+
+本工程的 u-boot 不是从 codelinaro 裸树改起，而是基于
+[`chenxin527/uboot-qsdk12.5-build`](https://github.com/chenxin527/uboot-qsdk12.5-build)
+（GPL-2.0，自称 "uBootKit"）—— 它提供了 failsafe（网页恢复）框架、`fw_dec.c` 等
+基础设施。我们在此基础上加了 TP-Link WTA301 的板级支持。
+
+**这份归属没有商量的余地。** `patches/uboot/files/` 里实际有 **4 个不同上游**：
+
+| 版权持有人 | 文件 | 来历 |
+|---|---|---|
+| **chenxin527**（2026） | `board/qca/arm/common/failsafe.c`<br>`board/qca/arm/common/fw_dec.c`<br>`failsafe/failsafe.c`<br>`failsafe/modules/modules.h`<br>`include/failsafe/fw_dec.h` | uBootKit 框架 |
+| **MediaTek Inc. / Weijie Gao**（2022） | `failsafe/modules/upgrade.c` | **OpenWrt 原版 failsafe**（不是 chenxin527 的） |
+| **The Linux Foundation / Qualcomm**（2013–2021） | `board/qca/arm/ipq5018/ipq5018.c`<br>`drivers/net/ipq5018/ipq5018_gmac.c`<br>`board/qca/arm/common/cmd_bootqca.c` 等 | QSDK 原始代码 |
+| **Google Inc.**（2009） | `arch/arm/cpu/armv7/qca/common/smem.c` 中的片段 | U-Boot / Linux ARM 渊源 |
+
+**四个文件的版权头缺失（诚实告知）**：
+
+```
+board/qca/arm/common/tplink_tpimg.c
+include/failsafe/tplink_tpimg.h
+drivers/net/ipq5018/rtl8367s.c
+failsafe/modules/tplinkinfo.c
+```
+
+这四个文件**没有任何 copyright 头**。它们是在 chenxin527 的通用 TP-Link 代码
+基础上改的，但我们**没有保留基座 commit 的副本**，所以无法逐行判断哪些是
+原作者写的、哪些是我们加的 —— 因此**不往上面加我们的署名**（那可能是错的）。
+它们在仓库里以 **GPL-2.0** 分发，与全仓一致。
+
+⚠️ **如果你要重用这四个文件，请自行追溯来源**，不要把它们当成我们的原创。
+
+### 3.2 硬性约束
+
+1. **任何版权头都不得删除。** 包括 `chenxin527` 的 5 个、MediaTek 的 1 个、
+   Linux Foundation 的、以及散在文件里的 Google 片段。删任何一个即违反
+   GPL-2.0 §1（保留版权声明）。
+   `deliver/verify-repro.sh` §7 会逐文件校验，删了立刻报 FAIL。
+
+2. 构建包装钉在 `9ce31573`，并且**由产物自证** —— 已交付的 `u-boot.bin` 里
+   版本横幅就是 `U-Boot 2016.01-9ce3157-dirty`。这是本工程唯一一个精确固定
+   到 commit 的 u-boot 侧引用。
+
+3. 如果日后把 `patches/uboot/` 拆成独立仓库（类似上游 uBootKit 那样按机型
+   收录），开头必须写明「基于 `chenxin527/uboot-qsdk12.5-build` 派生」。
+
+4. **不要把它叫「uBootKit」而不提来源**。上游同名项目的作者是 chenxin527；
+   已有一个叫 `chenxin527/uboot-qsdk12.5-build` 的仓库用这个名。
+   建议对外用「WTA301 u-boot kit」或「WTA301 U-Boot 复现包」避免混淆。
 
 ---
 

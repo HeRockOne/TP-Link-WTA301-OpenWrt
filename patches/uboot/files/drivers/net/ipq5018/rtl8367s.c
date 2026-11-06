@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Realtek RTL8367S bring-up for the TP-Link WTA301 (IPQ5018).
  *

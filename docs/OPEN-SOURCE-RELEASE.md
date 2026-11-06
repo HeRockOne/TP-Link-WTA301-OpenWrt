@@ -138,12 +138,27 @@ grep -rn "⛔\|不能\|不支持\|不做" docs/USER-MANUAL.md README.md | head -
 | # | 问题 | 影响 | 可能的解法 |
 |---|---|---|---|
 | 1 | ~~`patches/bdf/` 里是**本机 ART 校准数据**~~ | ✅ **已解决**：`tools/mk_board2_from_art.py` 可从使用者自己的 ART 生成，已逐字节验证与仓库自带文件相同 | — |
-| 2 | u-boot 基座 **commit 未固定**（codelinaro `NHSS.QSDK.12.5`） | 跨机器重建不保证 md5 一致 | 找一个确实存在的 commit 钉死，或在 CI 里记录首次成功时的 commit |
+| 2 | ~~u-boot 基座 **commit 未固定**~~ | ⚠️ **已大幅收敛**（详见下表）。构建包装钉到 `9ce31573` **由二进制自证**；codelinaro 裸树仍只到同代（QSDK 发布标签已写明） | 只剩「本机树 vs 公开镜像是否逐字节相同」未对过，影响小 |
 | 3 | `patches/factory/*.dtb`、`pin/s7-actual-dtb.dtb` 是厂商固件内容 | 仅分析对照用，不参与构建 | 也可删掉，代价是失去 `fdtdiff.py` 的对照基线 |
 | 4 | `patches/uboot/build/build_wta301.sh` 里是早期硬编码绝对路径 | 已在文件头标注 LEGACY，正路是 `build_j1.sh` | 可删，但保留能追溯当时跑的命令 |
 | 5 | 没有任何 CI | 回归靠手工 | 可加一个只做 `verify-repro.sh` + `git apply --check` 的 workflow，成本低收益明确 |
 
-第 2 条现在是**唯一剩下的硬缺口**。
+### 4.0 u-boot 归属与复现（本轮查清）
+
+| 项 | 结论 | 证据强度 |
+|---|---|---|
+| 我们的 u-boot 基于 `chenxin527/uboot-qsdk12.5-build` | **是** | ✅ 硬证：6 个文件带 `Copyright (C) 2026 chenxin527` |
+| 构建包装 commit = `9ce31573` | **是** | ✅ **二进制自证**：`strings u-boot.bin` → `U-Boot 2016.01-9ce3157-dirty` |
+| QSDK 发布标签 | `AU_LINUX_QSDK_NHSS.QSDK.12.5_TARGET_ALL.12.5.2783.2994` | ✅ 公开镜像 README 明写 |
+| 公开镜像 | `1980490718/u-boot-2016`（GPL-2.0） | ✅ 不用登录 codelinaro |
+| 本机树 == 该镜像 | **未对过** | ⬜ 未验证（不影响同代 overlay） |
+| failsafe Web UI 是不是厂商的 | **不是** | ✅ 自研：中文、自研 CSS 变量，`tplink` 仅作型号名/API 路径 |
+| `patches/uboot/files/` 有无二进制 blob | **无** | ✅ `file(1)` 全部 text |
+
+**法务必读**：`THIRD-PARTY.md` §3.1 已写入归属声明，并明确禁止删除那 6 个
+`chenxin527` 版权头（删了就是违反 GPL-2.0 §1）。
+
+第 2 条已从「硬缺口」降为「细节残留」。
 
 ### 4.1 已解决的（这一轮）
 

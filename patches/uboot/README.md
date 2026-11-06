@@ -13,20 +13,45 @@
 | 项 | 值 | 出处 |
 |---|---|---|
 | u-boot 源码 | `u-boot-2016`，分支 **`NHSS.QSDK.12.5`** | `https://git.codelinaro.org/clo/qsdk/oss/boot/u-boot-2016` |
-| 构建包装 | `chenxin527/uboot-qsdk12.5-build` | `https://github.com/chenxin527/uboot-qsdk12.5-build` |
-| 本机构建时该包装的 HEAD | `9ce31573` "Merge pull request #4 from webbrain-one/webbrain/readme-improvement" | `src/.git` |
+| 对应的 QSDK 发布标签 | `AU_LINUX_QSDK_NHSS.QSDK.12.5_TARGET_ALL.12.5.2783.2994` | 同上 |
+| 公开镜像（不用登录 codelinaro 就能取） | `1980490718/u-boot-2016`（GPL-2.0，README 明写 “Stripped from `AU_LINUX_QSDK_NHSS.QSDK.12.5_TARGET_ALL.12.5.2783.2994`”） | `https://github.com/1980490718/u-boot-2016` |
+| 构建包装 + failsafe 框架 | `chenxin527/uboot-qsdk12.5-build`（**GPL-2.0**） | `https://github.com/chenxin527/uboot-qsdk12.5-build` |
+| 本机构建时该包装的 HEAD | **`9ce31573`** “Merge pull request #4 from webbrain-one/webbrain/readme-improvement” | 见下方铁证 |
 | 工具链 | `arm_cortex-a7_gcc-5.2.0_musl-1.1.16_eabi`（`arm-openwrt-linux-muslgnueabi-`） | OpenWrt 25.12.6 staging_dir |
 
-### ⚠️ 残余风险（必须知道）
+### 1.1 构建包装 commit 是硬证，不是回忆
 
-**codelinaro 那边没有固定 commit**，我们当时也没记。补救措施是本目录的
-`files/` 是**整份 overlay**（改过的文件全量收录），而不是 `diff`：
+已经交付的 `u-boot.bin`（556,032 B）里面直接带着版本横幅：
 
-- 只要基座是同一分支的同一代（2016.01 / QSDK 12.5），overlay 覆盖后结果正确；
-- 若基座换了大版本，理论上可能有编译不过的风险 —— 此时对照
-  `docs/P21-DECODE-OOM.md` 的产物尺寸（`u-boot.bin` 556,032 B）判断是否走偏。
+```
+$ strings u-boot.bin | grep '^U-Boot 2016'
+U-Boot 2016.01-9ce3157-dirty (2026-11-06 13:33:07 +0800)
+              ↑↑↑↑↑↑↑
+```
 
-**这就是为什么不留 diff**：diff 需要精确基座，overlay 只需要同代基座。
+`9ce3157` 就是 `9ce31573` 的缩写，`-dirty` 是因为叠加了本目录 `files/` 的改动。
+⇒ **构建包装确实钉在 `9ce31573`，已由产物自证。**
+
+### 1.2 残余风险：codelinaro 侧的 commit
+
+**codelinaro 裸树没有固定 commit**，我们当时也没记。但风险被两层兑掉了：
+
+1. **有发布标签可对**：`NHSS.QSDK.12.5` 分支对应 `AU_LINUX_QSDK_NHSS.QSDK.12.5_
+   TARGET_ALL.12.5.2783.2994`，同代基座只有这一个发布点；
+2. **有公开镜像可拿**：`1980490718/u-boot-2016`，不用登录 codelinaro；
+3. **overlay 而不是 diff**：本目录 `files/` 是**整份文件全量收录**，
+   只要基座是同一代（2016.01 / QSDK 12.5），覆盖后结果就对；
+   diff 才需要逐字节精确的基座。
+
+⚠️ **未验证的事**：本机原树与上面那个 GitHub 镜像**是否逐字节相同，没对过**。
+镜像自称剥自同一个发布标签，但只有亲自跑一遍编译、对出 `u-boot.bin` 556,032 B
+才算实证。**目前只到「同代」这个级别，未到「同一棵树」。**
+
+### 1.3 为什么旧读还会跑偏
+
+- `/root/ow2512` 里没有任何 u-boot 源码，**这里就是唯一入口**；
+- 别用 `src/.git` 找包装版本 —— `src/u-boot-2016/` 已无 `.git`（纯文件树），
+  能查的只有二进制里的版本横幅（§1.1）。
 
 ---
 
@@ -114,7 +139,7 @@ python patches/uboot/build/mk_uboot_slot.py u-boot.bin <输出目录>
 
 | 环节 | 状态 | 证据 |
 |---|---|---|
-| `files/` 覆盖后与当前源树一致 | ✅ **已实证** | 23/23 `cmp` 逐字节相同 |
+| `files/` 覆盖后与当前源树一致 | ✅ **已实证** | 23/23 内容相同。其中 4 个逐字节相同，19 个仅差**末尾换行**（仓库侧按 POSIX 习惯补了换行）。**无任何内容差异**。末尾换行在 `.c/.h/Makefile/.dts` 里不影响编译产物；唯一会被逐字节嵌入的 `index.html` 两侧都已有末尾换行。 |
 | `mk_uboot_slot.py` 能重出槽镜像 | ✅ **已实证（复验两次）** | 且已接入 `deliver/make-deliverable.sh`：只要找到 556,032 B 的 `u-boot.bin` 就现造槽镜像，再造不出来才回落历史成品 |
 | 输入 `u-boot.bin` 指纹 | ✅ **已核对** | `src/u-boot-2016/u-boot.bin` 556,032 B / md5 `3a4cb00e37065936e5ff89cb5710a519`，与 §3 判据逐字相同 |
 | `u-boot.bin` → 槽镜像（端到端） | ✅ **已实证** | `mk_uboot_slot.py u-boot.bin` → 262,144 B / md5 `d0ada9f7…` / crc32 `0xCB2D3108`，往返校验通过（解压后与 `u-boot.bin` 逐字节相等） |
