@@ -4,9 +4,12 @@
 wta301-getroot.py —— 一键在原厂固件上取得 root，并可继续刷入 OpenWrt（A 槽）
 
 用法：
-    python wta301-getroot.py                                  # 只取 root
+    python wta301-getroot.py                                  # 无参数 = 交互式菜单
     python wta301-getroot.py --flash-op PKG.bin               # 取完 root 刷 OpenWrt 到 A 槽
-    python wta301-getroot.py --flash-op PKG.bin --dry-run     # 只打印计划，不写入
+    python wta301-getroot.py --flash-uboot KIT.bin            # 只刷 u-boot kit，保留当前固件
+    python wta301-getroot.py --flash-stock auto               # 刷回原厂（自己找镜像，只认 md5）
+    python wta301-getroot.py --flash-stock bslot              # 刷回原厂（从 B 槽拷，需经 md5 门禁）
+    ... 任意一个加 --dry-run                                   # 只打印计划，不写入
 
 依赖：Python 3.8+，同目录或 ../work/net 下有 srv.py 与 elink_gw4.py（纯 stdlib + cryptography）
 权限：必须管理员（Windows）/ root（Linux）—— 要加 IP 别名与放行入站端口
@@ -23,20 +26,30 @@ wta301-getroot.py —— 一键在原厂固件上取得 root，并可继续刷�
 ★★★ 分区表 —— 最容易搞死的地方 ★★★
 ═══════════════════════════════════════════════════════════════════════════
 
-原厂固件和我们的 OpenWrt，mtd 名字**完全一样**，但指向**完全相反**：
+原厂 shell 实测（4.4.60，15 个分区）与我们的 OpenWrt（6.12，17 个分区）逐条比对：
 
-    绝对偏移     原厂叫法            我们的 OpenWrt 叫法
-    0x0700000    normal_boot         normal_boot_bak
-    0x0880000    kernel              kernel_bak          ← 原厂主槽，本脚本永不写
-    0x0fc0000    rootfs              rootfs_bak          ← 原厂主槽，本脚本永不写
-    0x4700000    normal_boot_bak     normal_boot
-    0x4800000    firmware_bak 容器   （不建模）
-    0x4880000    kernel_bak          kernel              ★ OpenWrt 内核
-    0x4fc0000    rootfs_bak          rootfs              ★ OpenWrt 根文件系统
+    偏移          原厂名字           OpenWrt 名字    说明
+    0x0700000    normal_boot      normal_boot     u-boot 槽
+    0x0880000    kernel_bak       kernel_bak      ★★ B 槽内核（原厂主槽…其实不是）
+    0x0fc0000    rootfs_bak       rootfs_bak      ★★ B 槽 rootfs
+    0x4700000    normal_boot_bak  normal_boot     u-boot 槽（两边都是我们的 kit）
+    0x4800000    firmware_bak     (未建模)         A 槽容器
+    0x4880000    kernel           kernel          ★★ A 槽内核
+    0x4fc0000    rootfs           rootfs          ★★ A 槽 rootfs
+    0x0080000    firmware         (未建模)         B 槽容器
 
-⇒ **绝对不能按名字找分区**。唯一可靠判据是 `uname -r`：
-      4.4.x   → 原厂，A 槽 = kernel_bak / rootfs_bak
-      6.x     → 我们的 OpenWrt，A 槽 = kernel / rootfs
+★★ 更正过的错误：我曾写「原厂/我们的 mtd 名字完全相反」，并把 kernel↔kernel_bak
+   说成互为主备。**实测不成立。** 证据：
+     1) 原厂 shell 里 `md5sum /dev/mtdblock10` = 2868d8e975da7c641e54c72b6beb8f26
+        = work/backup/mtd10_kernel_bak.bin（即 0x880000 的内容）→ mtd10 同位。
+     2) 原厂现在正从 A 槽（0x4880000/0x4fc0000）启动，而它把这两个分区叫
+        「kernel」「rootfs」= mtd5/mtd6 —— 与 OpenWrt 叫法完全一样。
+   真正名字相反的是**容器**：原厂「firmware」=0x800000(B 槽)、
+   「firmware_bak」=0x4800000(A 槽)；这两个 OpenWrt 不建模。
+
+⇒ 槽位编号在两种固件下一致（见 SLOT_A / SLOT_B 常量），可以只按编号定位。
+  但分区**数量与长度**不同，所以本脚本不硬编码长度，每次都从目标机 /proc/mtd 读。
+  （原厂 mtd5=0x400000，我们 mtd5=0x740000；同一槽、不同视图。）
 
 ★★★ 第二道陷阱：原厂 mtd10 只有 4 MiB，装不下 OpenWrt 内核 ★★★
 
@@ -97,6 +110,7 @@ import hashlib
 import json
 import os
 import platform
+import re
 import socket
 import subprocess
 import sys
@@ -122,6 +136,108 @@ PKG_TOTAL = 0x1060000
 
 DD_BS = 0x20000  # 128 KiB；上述所有偏移与长度都是它的整数倍
 
+
+# ★★★ A/B 槽在【两种固件下的 mtd 编号完全相同】（实测：原厂 4.4.60 与我们的
+# OpenWrt 各读一次 /proc/mtd 逐条比对）。
+# 注意分区【数量】不同：原厂 17 条、OpenWrt 17 条，但内容不同：
+#   原厂 = 15 个物理分区 mtd0..mtd14 + 2 个 UBI 卷
+#          mtd15 0x0003e000 erasesize 0x1f000 "0"   ← mtd3 config   里的卷
+#          mtd16 0x0139e000 erasesize 0x1f000 "0"   ← mtd7 rootfs_data 里的卷
+#          （这两条 erasesize 不是 0x20000、且有子页，一眼能认出来。绝不能 dd 它们）
+#   我们的 OpenWrt 不建 UBI 卷条目，但把两个容器建模了。
+# 但 5/6/10/11 这四个槽位编号与物理偏移在两边完全一致：
+#     mtd5  = 0x04880000  A 槽 kernel   （原厂名 kernel，    我们名 kernel）
+#     mtd6  = 0x04FC0000  A 槽 rootfs   （原厂名 rootfs，    我们名 rootfs）
+#     mtd10 = 0x00880000  B 槽 kernel   （原厂名 kernel_bak，我们名 kernel_bak）
+#     mtd11 = 0x00FC0000  B 槽 rootfs   （原厂名 rootfs_bak，我们名 rootfs_bak）
+# 实测证据：原厂 shell 里 `md5sum /dev/mtdblock10` = 2868d8e975da7c641e54c72b6beb8f26
+#          = work/backup/mtd10_kernel_bak.bin 的 md5。
+# 另外实测 mtd5 头 = d00dfeed、mtd6 头 = 68737173(hsqs) —— 原厂当前就是
+# 从 A 槽起动的，所以它把 A 槽叫「kernel」「rootfs」。
+# ⇒ 刷写目标可以只按编号定位，不必依赖分区名。
+SLOT_A = {"kernel": 5, "rootfs": 6}    # 0x04880000 / 0x04FC0000 —— 只动这里
+SLOT_B = {"kernel": 10, "rootfs": 11}  # 0x00880000 / 0x00FC0000 —— 只读，回退用
+
+# 正在运行的那个 rootfs 分区。两种固件都从它起根，写它就是写脚下的地板。
+#   原厂   内置 cmdline: root=/dev/mtdblock6（编译进 vmlinux，忽略 u-boot 传参）
+#   OpenWrt DTS bootargs-append: root=/dev/mtdblock6
+# ⇒ 两种固件下都是 mtd6。写它的那一步必须放最后，且写完立刻 reboot，
+#   中间绝不能再从它读任何东西（squashfs 是只读挂载，缺页时才去 flash 取）。
+LIVE_ROOT_MTD = 6
+
+# 已知的原厂镜像集（md5 已用全盘原厂镜像 flash_full_128M.bin 逐段 dd 验证）：
+#   A_kernel 0x4880000/0x400000 = 170b2188… = mtd5_kernel.bin
+#   A_rootfs 0x4fc0000/0xC00000 = 30f48741… = mtd6_rootfs.bin
+#   B_kernel 0x0880000/0x400000 = 2868d8e9… = mtd10_kernel_bak.bin
+#   B_rootfs 0x0fc0000/0xC00000 = bf2f92ce… = mtd11_rootfs_bak.bin
+# 列表顺序 = 优选顺序（先最新厂固件 2.0.2，再旧版 4.4.60）。
+STOCK_SETS = [
+    {"name": "原厂 2.0.2 (2024-12-04，A 槽出厂内容)",
+     "kernel": "mtd5_kernel.bin",  "kernel_md5": "170b2188884cc040d64ac5bed7ddc365",
+     "rootfs": "mtd6_rootfs.bin",  "rootfs_md5": "30f487419d90b2239b65035390f3b73f"},
+    {"name": "原厂 4.4.60 (2024-11-28，B 槽备份)",
+     "kernel": "mtd10_kernel_bak.bin", "kernel_md5": "2868d8e975da7c641e54c72b6beb8f26",
+     "rootfs": "mtd11_rootfs_bak.bin", "rootfs_md5": "bf2f92ceaf509093c8854825f2dc8d5e"},
+]
+
+# 旧版兼容：bslot 模式拿它做硬门禁
+STOCK_KNOWN_MD5 = {
+    "kernel": "2868d8e975da7c641e54c72b6beb8f26",
+    "rootfs": "bf2f92ceaf509093c8854825f2dc8d5e",
+}
+
+# 原厂镜像的整分区长度（B 槽实测：kernel 0x400000 / rootfs 0xC00000）
+STOCK_LEN = {"kernel": 0x400000, "rootfs": 0xC00000}
+
+
+def find_stock_set(extra_dir=None):
+    """在几个常规位置找一对【md5 完全对得上】的原厂镜像。
+
+    绝不按文件名信 —— 文件名可以随便取。只认 md5。
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    dirs = [
+        os.path.join(here, "stock"),
+        here,
+        os.path.join(os.path.dirname(here), "work", "backup"),
+        os.path.join(os.path.dirname(os.path.dirname(here)), "work", "backup"),
+        os.path.join(os.getcwd(), "stock"),
+        os.getcwd(),
+        os.path.join(os.getcwd(), "work", "backup"),
+    ]
+    if extra_dir:
+        dirs.insert(0, extra_dir)
+    seen = set()
+    for d in dirs:
+        d = os.path.abspath(d)
+        if d in seen or not os.path.isdir(d):
+            continue
+        seen.add(d)
+        for s in STOCK_SETS:
+            kp = os.path.join(d, s["kernel"])
+            rp = os.path.join(d, s["rootfs"])
+            if not (os.path.exists(kp) and os.path.exists(rp)):
+                continue
+            if _md5_file(kp) != s["kernel_md5"] or _md5_file(rp) != s["rootfs_md5"]:
+                info("   %s 里有同名文件但 md5 不对（不是原厂镜像），忽略：%s" % (d, s["name"]))
+                continue
+            info("   找到可用原厂镜像：%s" % s["name"])
+            info("     kernel %s (%s)" % (s["kernel_md5"], os.path.basename(kp)))
+            info("     rootfs %s (%s)" % (s["rootfs_md5"], os.path.basename(rp)))
+            return s, kp, rp
+    return None, None, None
+
+
+def _md5_file(path, chunk=1 << 20):
+    h = hashlib.md5()
+    with open(path, "rb") as f:
+        while True:
+            b = f.read(chunk)
+            if not b:
+                break
+            h.update(b)
+    return h.hexdigest()
+
 # 各 mtd 的 flash 绝对起始（用于换算 dd seek → 绝对地址，做重叠检查）
 MTD_ABS = {
     4: 0x4700000, 5: 0x4880000, 6: 0x4FC0000, 7: 0x6A00000,
@@ -140,17 +256,26 @@ FLASH_ABS = {}
 #   max_len   : 该落点能容纳的字节数（硬上限，超过就拒绝写）
 FLASH_TARGETS = {
     "stock": {
-        # 内核必须走 firmware_bak 容器，因为 kernel_bak 只有 4 MiB
+        # 当前跑的是原厂：mtd5(kernel) 只有 4 MiB，装不下 OpenWrt 的 FIT（0x41526c）
+        # ⇒ 内核走 A 槽容器 mtd13 的 +0x80000（= 绝对 0x4880000，同一位置）。
+        # rootfs 直接走 mtd6（= 绝对 0x4FC0000，0xC00000，装得下 0xBC0000）。
+        #
+        # ★ 修正过的错误：这里曾写 rootfs → mtd11。mtd11 是 0x0FC0000，
+        #   属于【B 槽】。实测后果：把 OpenWrt rootfs 烤进了 B 槽，
+        #   mtd11 的 md5 从 bf2f92ce(原厂) 变成了 3df05b56(OpenWrt)。
+        #   ⇒ 「只动 A 槽」的承诺被破坏了。现已改为 mtd6。
         "kernel": {"dst_mtd": 13, "dst_seek": 4, "max_len": 0x480000,
-                   "why": "firmware_bak 容器 +0x80000（kernel_bak 只有 4MiB，装不下 0x41526c）"},
-        "rootfs": {"dst_mtd": 11, "dst_seek": 0, "max_len": 0xC00000,
-                   "why": "rootfs_bak 直接写"},
+                   "why": "A 槽容器 firmware_bak +0x80000（= 0x4880000）；"
+                          "若直写 mtd5 只有 4MiB，装不下 0x41526c 会被截断"},
+        "rootfs": {"dst_mtd": 6, "dst_seek": 0, "max_len": 0xC00000,
+                   "why": "A 槽 rootfs（= 0x4FC0000），装得下 0xBC0000"},
     },
     "openwrt": {
+        # 当前跑的是 OpenWrt：我们的 DTS 把 mtd5 定义为 0x740000，直写即可。
         "kernel": {"dst_mtd": 5, "dst_seek": 0, "max_len": 0x740000,
-                   "why": "kernel 分区（我们的 DTS 给了 7.25MiB）"},
+                   "why": "A 槽 kernel 分区（我们的 DTS 给了 7.25MiB）"},
         "rootfs": {"dst_mtd": 6, "dst_seek": 0, "max_len": 0xC00000,
-                   "why": "rootfs 分区"},
+                   "why": "A 槽 rootfs 分区"},
     },
 }
 
@@ -579,35 +704,293 @@ def do_flash(tn, plan, pc_ip, pkg_name):
         die("整包 md5 不一致，中止（尚未写入任何分区）\n"
             "    期望 %s\n    实得 %s" % (plan["pkg_md5"], got))
 
-    for part in ("kernel", "rootfs"):
-        if part not in plan["parts"]:
-            continue
+    # 写入顺序：非活动分区先，活动 rootfs 必须最后（见 LIVE_ROOT_MTD 注释）。
+    # 颠倒就会在写 mtd6 的过程中被内核缺页读到半写状态。
+    order = [p for p in ("kernel", "rootfs") if p in plan["parts"]]
+    order.sort(key=lambda k: plan["parts"][k]["mtd"] == LIVE_ROOT_MTD)
+
+    for part in order:
         p = plan["parts"][part]
+        live = (p["mtd"] == LIVE_ROOT_MTD)
         info("")
-        info("[7] 写 %s → /dev/mtdblock%d (%s)" % (part, p["mtd"], p["name"]))
+        info("[7] 写 %s → /dev/mtdblock%d (%s)%s"
+             % (part, p["mtd"], p["name"], "   ← 正在使用的分区" if live else ""))
         cmd = ("dd if=/tmp/pkg.bin of=/dev/mtdblock%d bs=%d skip=%d seek=%d count=%d 2>&1"
                % (p["mtd"], DD_BS, p["src_skip"], p["dst_seek"], p["count"]))
-        out = tn.sh(cmd, 40.0 if part == "kernel" else 90.0)
+        if live:
+            # 写完立即重启，中间不插任何命令（包括回读）
+            tn.sh(cmd + "; sync; sync; reboot", 8.0)
+            info("   已写入。sync + reboot 已下发。")
+            info("   不回读校验的理由：回读 12MiB 要 20~30 秒，这时间里内核一旦缺页，")
+            info("   就会从写了一半的 squashfs 取页 → 当场崩。源包 md5 已在写前校验过。")
+            return True, True
+        out = tn.sh(cmd, 40.0)
         info("   " + out.strip().replace("\n", "\n   ")[:260])
 
-    tn.sh("sync", 3.0)
+        info("[7b] 回读校验 %s" % part)
+        rcmd = ("dd if=/dev/mtdblock%d bs=%d skip=%d count=%d 2>/dev/null | md5sum"
+                % (p["mtd"], DD_BS, p["dst_seek"], p["count"]))
+        got = _first_md5(tn.sh(rcmd, 35.0))
+        good = (got == p["md5"])
+        info("   %-6s 期望 %s  实得 %s  %s"
+             % (part, p["md5"], got or "(失败)", "OK" if good else "MISMATCH"))
+        if not good:
+            return False, False
 
+    tn.sh("sync", 3.0)
+    return True, False
+
+
+# ---------------------------------------------------------------------------
+# 刷回原厂（A 槽 ← B 槽，或 ← 本地文件）
+# ---------------------------------------------------------------------------
+
+def build_stock_plan(tn, mtd_table, mode, kpath=None, rpath=None, kset=None):
+    """算出把原厂固件写入 A 槽的计划。返回 (plan, problems)。
+
+    mode='files' : 从两个本地文件写（auto 解析成功后也走这里）
+    mode='bslot' : 从 B 槽（mtd10/mtd11）拷到 A 槽。md5 必须与已知原厂值完全相等，
+                   否则拒绝 —— 实测这台板子的 mtd11 已经被刷成了 OpenWrt rootfs
+                   (md5 3df05b56…)，盲目拷就会把 OP 烤进 A 槽。
+    """
+    problems = []
+    plan = {"src": mode, "parts": {}}
+
+    for part in ("kernel", "rootfs"):
+        dst_mtd = SLOT_A[part]
+        if dst_mtd not in mtd_table:
+            problems.append("%s: 目标 mtd%d 不存在" % (part, dst_mtd))
+            continue
+        dst_size, dst_name = mtd_table[dst_mtd]
+
+        if mode == "bslot":
+            src_mtd = SLOT_B[part]
+            if src_mtd not in mtd_table:
+                problems.append("%s: 源 mtd%d（B 槽）不存在" % (part, src_mtd))
+                continue
+            src_size, src_name = mtd_table[src_mtd]
+            if src_size > dst_size:
+                problems.append("%s: B 槽 mtd%d 有 0x%x，A 槽 mtd%d 只有 0x%x，装不下"
+                                % (part, src_mtd, src_size, dst_mtd, dst_size))
+                continue
+            count = min(src_size, dst_size) // DD_BS
+            info("")
+            info("   探测 B 槽 mtd%d (%s)…" % (src_mtd, src_name))
+            ver = _probe_stock_image(tn, part, src_mtd)
+            info("     %s" % ver["msg"])
+            if not ver["ok"]:
+                problems.append("%s: mtd%d 不是可启动的原厂镜像（%s）"
+                                % (part, src_mtd, ver["msg"]))
+                continue
+            prev = _first_md5(tn.sh("dd if=/dev/mtdblock%d bs=%d count=%d 2>/dev/null | md5sum"
+                                    % (src_mtd, DD_BS, count), 40.0))
+            info("     B 槽 md5 = %s" % (prev or "(读取失败)"))
+            if prev != STOCK_KNOWN_MD5[part]:
+                problems.append(
+                    "%s: B 槽 mtd%d 的 md5 %s 不是已知原厂值 %s\n"
+                    "        说明 B 槽已经被改过（实测这台板子的 mtd11 就被刷成了\n"
+                    "        OpenWrt rootfs）。拒绝拷贝，以免把 OpenWrt 烤进 A 槽。\n"
+                    "        改用 --flash-stock files 指定离线原厂镜像。"
+                    % (part, src_mtd, prev or "?", STOCK_KNOWN_MD5[part]))
+                continue
+            plan["parts"][part] = {
+                "dst_mtd": dst_mtd, "dst_name": dst_name, "dst_seek": 0,
+                "src_mtd": src_mtd, "src_name": src_name, "src_skip": 0,
+                "count": count, "bytes": count * DD_BS, "md5": prev,
+                "why": "B 槽 mtd%d → A 槽 mtd%d（B 槽只读）" % (src_mtd, dst_mtd),
+            }
+        else:
+            path = kpath if part == "kernel" else rpath
+            if not path or not os.path.exists(path):
+                problems.append("%s: 找不到文件 %s" % (part, path))
+                continue
+            size = os.path.getsize(path)
+            if size > dst_size:
+                problems.append("%s: 文件 0x%x 超过 mtd%d 分区 0x%x"
+                                % (part, size, dst_mtd, dst_size))
+                continue
+            count = (size + DD_BS - 1) // DD_BS
+            md5 = _md5_file(path)
+            ok, msg = _check_magic(part, open(path, "rb").read(262144))
+            info("")
+            info("   %s: %s (0x%x)" % (part, os.path.basename(path), size))
+            info("     %s" % msg)
+            if not ok:
+                problems.append("%s: %s" % (part, msg))
+                continue
+            want = kset["%s_md5" % part] if kset else None
+            if want and md5 != want:
+                info("     ! md5 %s 与已知原厂值 %s 不同 —— 仍允许，但你自己确认过这是原厂"
+                     % (md5, want))
+            plan["parts"][part] = {
+                "dst_mtd": dst_mtd, "dst_name": dst_name, "dst_seek": 0,
+                "src_file": os.path.basename(path), "src_path": path, "src_skip": 0,
+                "count": count, "bytes": count * DD_BS, "md5": md5,
+                "why": "本地文件 → A 槽 mtd%d" % dst_mtd,
+            }
+
+    return plan, problems
+
+
+def _check_magic(part, head):
+    """用头部字节判断这是不是那个东西。head 至少 4 字节。"""
+    if len(head) < 4:
+        return False, "文件太短"
+    magic = head[:4]
+    if part == "kernel":
+        if magic != b"\xd0\x0d\xfe\xed":
+            return False, "不是 FIT 镜像（头为 %s，应为 d00dfeed）" % magic.hex()
+        m = re.search(rb"Linux-(\d+\.\d+\.\d+)", head)
+        if not m:
+            return False, "FIT 里找不到 Linux-x.y.z 版本串"
+        return True, "FIT OK，内核 %s" % m.group(1).decode()
+    else:
+        if magic != b"hsqs":
+            return False, "不是 squashfs（头为 %s，应为 hsqs）" % magic.hex()
+        return True, "squashfs OK"
+
+
+def _probe_stock_image(tn, part, mtd_idx):
+    """直接从设备的分区里校验：是 FIT 内核（带 Linux-x.y.z）还是 squashfs。"""
+    head = _first_hex4(tn, mtd_idx)
+    if part == "kernel":
+        if head != "d00dfeed":
+            return {"ok": False, "msg": "头为 %s，应为 d00dfeed" % (head or "?")}
+        # FIT magic 过了还要确认里面真是 Linux 内核（不是别的东西套个 FIT 头）。
+        # busybox grep -o 对某些 BRE 写法支持不稳，退化成多档尝试（实测踩过
+        # `[0-9][0-9.]*` 返回空）。
+        base = "dd if=/dev/mtdblock%d bs=65536 count=4 2>/dev/null" % mtd_idx
+        for pat, label in (("Linux-[0-9][0-9.]*", "ver"),
+                           ("Linux-[0-9.]*", "ver"),
+                           ("Linux-", "loose")):
+            out = tn.sh("%s | grep -a -o '%s' | head -1" % (base, pat), 10.0)
+            got = _last_line(out)
+            if got.startswith("Linux-") and len(got) > len("Linux-"):
+                return {"ok": True, "msg": "FIT OK，%s" % got}
+            if got == "Linux-" and label == "loose":
+                return {"ok": True, "msg": "FIT OK，含 Linux 内核（版本串未解析出）"}
+        return {"ok": False, "msg": "FIT 头 OK 但找不到 Linux 内核版本串"}
+    else:
+        if head != "68737173":
+            return {"ok": False, "msg": "头为 %s，应为 hsqs" % (head or "?")}
+        return {"ok": True, "msg": "squashfs OK"}
+
+
+def _first_hex4(tn, mtd_idx):
+    """读出分区头 4 字节，返回小写 hex 字符串（如 d00dfeed）。"""
+    # 用 hexdump -C 而不是 -e：busybox 的 -e 格式语法与 util-linux 不完全一致，
+    # 实测 `-e '1/1 "%02x"'` 在板上返回空（踩过）。-C 已验证可用。
+    out = tn.sh("dd if=/dev/mtdblock%d bs=4 count=1 2>/dev/null | hexdump -C | head -1"
+                % mtd_idx, 6.0)
+    for line in out.splitlines():
+        s = line.strip()
+        # 形如： 00000000  d0 0d fe ed  ...
+        if len(s) > 10 and s[:8] == "00000000" and s[8:10].isspace():
+            hexpart = s.split(None, 1)[1][:11].split()
+            if len(hexpart) >= 4 and all(len(x) == 2 for x in hexpart[:4]):
+                return "".join(hexpart[:4]).lower()
+    return ""
+
+
+def _last_line(text):
+    """取输出最后一行有效内容 —— 必须跳过命令回显与 shell 提示符。
+
+    踩过：返回了 `(unreachable)/ #`，拿它去 startswith("Linux-") 永远失败。
+    """
+    for line in reversed(text.splitlines()):
+        s = line.strip()
+        if not s:
+            continue
+        if s.startswith("dd if=") or s.startswith("grep ") or s.startswith("|"):
+            continue
+        if s.endswith("#") and ("/ #" in s or s.startswith("(")):
+            continue
+        if s.startswith("BusyBox") or s == "ok":
+            continue
+        return s
+    return ""
+
+
+def print_stock_plan(plan):
     info("")
-    info("[8] 回读校验（从分区读回算 md5，与包内切片比）")
-    ok = True
+    info("[S2] 刷回原厂计划（写入 A 槽，B 槽只读）")
     for part in ("kernel", "rootfs"):
         if part not in plan["parts"]:
             continue
         p = plan["parts"][part]
-        cmd = ("dd if=/dev/mtdblock%d bs=%d skip=%d count=%d 2>/dev/null | md5sum"
-               % (p["mtd"], DD_BS, p["dst_seek"], p["count"]))
-        got = _first_md5(tn.sh(cmd, 35.0))
+        src = ("mtd%d %s" % (p["src_mtd"], p["src_name"]) if "src_mtd" in p
+               else p["src_file"])
+        info("   %-6s %-24s → mtd%-2d (%-10s) count=%-3d (0x%07x)"
+             % (part, src, p["dst_mtd"], p["dst_name"], p["count"], p["bytes"]))
+        info("          md5=%s" % p["md5"])
+    info("")
+    info("   A 槽 = 0x04880000 kernel / 0x04FC0000 rootfs")
+    info("   B 槽 = 0x00880000 kernel / 0x00FC0000 rootfs   ← 不动")
+    info("   mtd0 (factory_boot) / mtd4 / mtd9 / mtd14 (boot_flag) 全部不碰")
+    info("")
+    info("   !! 写 mtd6 时 OpenWrt 正从 mtd6 跑。脚本把 mtd6 放最后，")
+    info("      写完在同一命令行里 sync+reboot，中间不读任何东西。")
+    info("      所以【重启前会看起来卡住几秒】—— 那是正常的。")
+
+
+def do_flash_stock(tn, plan, pc_ip, mode):
+    # 先非活动分区（kernel），后活动分区（rootfs）
+    order = [p for p in ("kernel", "rootfs") if p in plan["parts"]]
+    order.sort(key=lambda k: plan["parts"][k]["dst_mtd"] == LIVE_ROOT_MTD)
+
+    ok_all = True
+    for part in order:
+        p = plan["parts"][part]
+        live = (p["dst_mtd"] == LIVE_ROOT_MTD)
+        info("")
+        info("[S3] 写 %s → /dev/mtdblock%d (%s)%s"
+             % (part, p["dst_mtd"], p["dst_name"], "   ← 正在使用的分区" if live else ""))
+
+        if "src_mtd" in p:
+            src = "/dev/mtdblock%d" % p["src_mtd"]
+        else:
+            src = "/tmp/stock_%s.img" % part
+            url = "http://%s:%d/%s" % (pc_ip, SRV_PORT, p["src_file"])
+            out = tn.sh("cd /tmp && wget -O stock_%s.img '%s' 2>&1 | tail -2"
+                        % (part, url), 40.0)
+            last = _last_line(out)
+            info("   下载 %s %s" % (p["src_file"], last[:110]))
+            if not tn.sh("test -s %s && echo YES" % src, 5.0).count("YES"):
+                info("   !! 设备侧文件没下载成功，中止（尚未写入）")
+                return False, False
+            got = _first_md5(tn.sh("md5sum %s" % src, 15.0))
+            info("   设备侧 %s md5 = %s" % (part, got or "(失败)"))
+            if got != p["md5"]:
+                info("   !! md5 不一致，中止（尚未写入任何分区）")
+                info("      期望 %s" % p["md5"])
+                info("      实得 %s" % (got or "?"))
+                return False, False
+
+        cmd = ("dd if=%s of=/dev/mtdblock%d bs=%d skip=%d seek=%d count=%d"
+               % (src, p["dst_mtd"], DD_BS, p["src_skip"], p["dst_seek"], p["count"]))
+        if live:
+            tn.sh(cmd + " 2>&1; sync; sync; reboot", 10.0)
+            info("   已写入 → sync → reboot 已下发（同一条命令，中间无间隙）")
+            info("   不回读：回读要 20~30 秒，这时间里缺页读到半写的 squashfs 会当场崩")
+            return ok_all, True
+
+        out = tn.sh(cmd + " 2>&1", 30.0)
+        info("   " + _last_line(out)[:200])
+
+        info("[S3b] 回读校验 %s" % part)
+        rcmd = ("dd if=/dev/mtdblock%d bs=%d skip=%d count=%d 2>/dev/null | md5sum"
+                % (p["dst_mtd"], DD_BS, p["dst_seek"], p["count"]))
+        got = _first_md5(tn.sh(rcmd, 30.0))
         good = (got == p["md5"])
-        ok = ok and good
         info("   %-6s 期望 %s  实得 %s  %s"
              % (part, p["md5"], got or "(失败)", "OK" if good else "MISMATCH"))
+        if not good:
+            info("   !! A 槽 %s 写坏了。B 槽未受影响，但 kit 会先试 A 槽…" % part)
+            info("      此时【不要重启】，重新跑一次即可重写。")
+            return False, False
+        ok_all = True
 
-    return ok
+    return ok_all, False
 
 
 def _first_md5(text):
@@ -647,7 +1030,8 @@ def main():
     info("     [1] 只获取 root（不刷任何东西）")
     info("     [2] 刷 OpenWrt（完整包）")
     info("     [3] 只刷 u-boot kit（保留当前固件）")
-    info("     [4] 查看分区表与风险说明")
+    info("     [4] 刷回原厂固件")
+    info("     [5] 查看分区表与风险说明")
     info("     [0] 退出")
     info("")
 
@@ -659,7 +1043,7 @@ def main():
 
     if choice == "0" or choice == "":
         return 0
-    if choice == "4":
+    if choice == "5":
         info("")
         info(__doc__)
         return 0
@@ -678,6 +1062,36 @@ def main():
         if not pkg:
             return 1
         return run_cli(["--flash-uboot", pkg, "--interactive-ok"])
+
+    if choice == "4":
+        info("")
+        info("   B 槽里本来就存着一份原厂固件（kernel 0x400000 / rootfs 0xC00000），")
+        info("   可以直接拷到 A 槽，不需要准备任何镜像文件。")
+        info("")
+        info("     [a] 自动找原厂镜像（推荐，只认 md5）")
+        info("     [b] 从 B 槽拷（md5 必须是原厂值，否则拒绝）")
+        info("     [f] 我自己有两个镜像文件")
+        info("     [x] 返回")
+        info("")
+        try:
+            sub = input("   选: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            info("")
+            return 0
+        if sub == "a":
+            return run_cli(["--flash-stock", "auto", "--interactive-ok"])
+        if sub == "b":
+            return run_cli(["--flash-stock", "bslot", "--interactive-ok"])
+        if sub == "f":
+            k = ask_file("原厂内核", "mtd10_kernel_bak.bin / mtd5_kernel.bin", 0)
+            if not k:
+                return 1
+            r = ask_file("原厂 rootfs", "mtd11_rootfs_bak.bin / mtd6_rootfs.bin", 0)
+            if not r:
+                return 1
+            return run_cli(["--flash-stock", "files", "--stock-kernel", k,
+                            "--stock-rootfs", r, "--interactive-ok"])
+        return 0
 
     info("   ! 无效选项")
     return 1
@@ -725,6 +1139,17 @@ def run_cli(argv):
                     help="取到 root 后把该 OpenWrt 完整包刷进 A 槽")
     ap.add_argument("--flash-uboot", metavar="BIN", default=None,
                     help="只刷 u-boot kit 到 A 槽（保留当前固件）")
+    ap.add_argument("--flash-stock", nargs="?", const="auto",
+                    choices=("auto", "bslot", "files"), default=None,
+                    metavar="auto|bslot|files",
+                    help="刷回原厂到 A 槽。auto=自己找原厂镜像（只认 md5）；"
+                         "bslot=从 B 槽拷（md5 必须等于原厂值）；"
+                         "files=从 --stock-kernel / --stock-rootfs 读")
+    ap.add_argument("--stock-dir", default=None, help="auto 模式优先搜索该目录")
+    ap.add_argument("--stock-kernel", metavar="PATH", default=None,
+                    help="--flash-stock files 模式的原厂内核（4 MiB，FIT）")
+    ap.add_argument("--stock-rootfs", metavar="PATH", default=None,
+                    help="--flash-stock files 模式的原厂 rootfs（12 MiB，squashfs）")
     ap.add_argument("--dry-run", action="store_true", help="只打印计划，不写入")
     ap.add_argument("--keep", action="store_true", help="保留 IP 别名与防火墙规则")
     ap.add_argument("--serve-dir", default=None, help="HTTP 服务根目录")
@@ -740,10 +1165,12 @@ def run_cli(argv):
     if args.explain:
         info(__doc__)
         return 0
-    if not args.flash_op and not args.flash_uboot:
+    if not args.flash_op and not args.flash_uboot and not args.flash_stock:
         pass  # 只取 root
-    if args.flash_op and args.flash_uboot:
-        die("--flash-op 与 --flash-uboot 只能选一个")
+    if sum(1 for x in (args.flash_op, args.flash_uboot, args.flash_stock) if x) > 1:
+        die("--flash-op / --flash-uboot / --flash-stock 只能选一个")
+    if args.flash_stock == "files" and not (args.stock_kernel and args.stock_rootfs):
+        die("--flash-stock files 需要同时给 --stock-kernel 与 --stock-rootfs")
 
     return execute(args)
 
@@ -755,6 +1182,8 @@ def execute(args):
         what = "  +  刷入 OpenWrt(A 槽)"
     elif args.flash_uboot:
         what = "  +  刷入 u-boot kit(A 槽)"
+    elif args.flash_stock:
+        what = "  +  刷回原厂(A 槽)"
     else:
         what = ""
 
@@ -793,6 +1222,25 @@ def execute(args):
     elif args.flash_uboot:
         payload_path = _stage_file(args.flash_uboot, serve_dir, 0x40000, "u-boot kit")
         pkg_name = os.path.basename(payload_path)
+    elif args.flash_stock in ("auto", "files"):
+        if args.flash_stock == "auto":
+            # auto 必须在起服务之前解析好，否则镜像不在服务目录里，设备下不到
+            info("")
+            info("   搜索本地原厂镜像（只认 md5，不认文件名）…")
+            kset, kp, rp = find_stock_set(args.stock_dir)
+            if not kset:
+                info("")
+                info("!! 没找到可用原厂镜像。需要下面任意一组文件（两个都要）：")
+                info("     放在脚本同目录、或 ./stock/、或 ../work/backup/、或 --stock-dir")
+                for st in STOCK_SETS:
+                    info("       %-22s md5 %s" % (st["kernel"], st["kernel_md5"]))
+                    info("       %-22s md5 %s" % (st["rootfs"], st["rootfs_md5"]))
+                    info("       （%s）" % st["name"])
+                return 4
+            args.stock_kernel, args.stock_rootfs = kp, rp
+            args.stock_set_name = kset["name"]
+        for p in (args.stock_kernel, args.stock_rootfs):
+            _stage_any(p, serve_dir, "原厂镜像")
     if payload_path:
         info("   镜像: %s (0x%x)" % (pkg_name, os.path.getsize(payload_path)))
 
@@ -832,6 +1280,8 @@ def execute(args):
                     rc = flash_op(tn, args, fw, mtd, pc_ip, pkg_name)
                 elif args.flash_uboot:
                     rc = flash_uboot(tn, args, fw, mtd, pc_ip, pkg_name)
+                elif args.flash_stock:
+                    rc = flash_stock(tn, args, fw, mtd, pc_ip)
                 else:
                     info("")
                     info("   分区表（仅供核对，未写入任何东西）:")
@@ -856,6 +1306,26 @@ def execute(args):
     info(" 退出码 %d —— %s" % (rc, "成功" if rc == 0 else "失败"))
     info("=" * 68)
     return rc
+
+
+def _stage_any(path, serve_dir, label):
+    """把任意文件拷进 HTTP 服务目录（不校验大小）。"""
+    if not path:
+        die("没指定%s路径" % label)
+    p = os.path.abspath(path)
+    if not os.path.exists(p):
+        die("找不到 %s: %s" % (label, p))
+    dst = os.path.join(serve_dir, os.path.basename(p))
+    if os.path.abspath(dst) != p:
+        info("   复制 %s 到服务目录…" % os.path.basename(p))
+        with open(p, "rb") as f, open(dst, "wb") as g:
+            while True:
+                b = f.read(1 << 20)
+                if not b:
+                    break
+                g.write(b)
+    info("   %s: %s (0x%x)" % (label, os.path.basename(p), os.path.getsize(p)))
+    return dst
 
 
 def _stage_file(path, serve_dir, expect_size, label):
@@ -898,19 +1368,83 @@ def flash_op(tn, args, fw, mtd_table, pc_ip, pkg_name):
         return 0
     if not _confirm(args, "确认写入 A 槽？"):
         return 0
-    if not do_flash(tn, plan, pc_ip, pkg_name):
+    ok, rebooted = do_flash(tn, plan, pc_ip, pkg_name)
+    if not ok:
         info("")
-        info("!! 回读不一致，不要重启。原厂主槽未受影响。")
+        info("!! 写坏了，不要重启。B 槽原厂未受影响。")
         return 5
     info("")
     info("[9] 全部校验通过")
-    info("")
-    info("[10] 重启")
-    tn.sh("reboot", 3.0)
+    if not rebooted:
+        info("")
+        info("[10] 重启")
+        tn.sh("reboot", 3.0)
     info("   预期启动链：")
     info("     一级 u-boot(boot_flag=1) → 验 B 槽通过 → 载入 B 槽 u-boot(我们的 kit)")
     info("     → kit 先试 A 槽 → bootm 0x4880000 → OpenWrt")
     info("   约 40 秒后 ssh root@192.168.1.1")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# 刷回原厂
+# ---------------------------------------------------------------------------
+
+def flash_stock(tn, args, fw, mtd_table, pc_ip):
+    mode = args.flash_stock  # "auto" / "bslot" / "files"
+    info("")
+    info("[S1] 当前固件: %s → 目标: 把 A 槽换成原厂" % fw)
+
+    kset = None
+    kpath = rpath = None
+    if mode == "bslot":
+        info("   源：B 槽 mtd10/mtd11（只读）。md5 必须等于已知原厂值，否则拒绝。")
+    else:
+        kpath = args.stock_kernel
+        rpath = args.stock_rootfs
+        if mode == "auto":
+            info("   源：搜索本地原厂镜像（只认 md5，不认文件名）…")
+            kset, kpath, rpath = find_stock_set(args.stock_dir)
+            if not kset:
+                info("")
+                info("!! 没找到可用原厂镜像。需要下面任意一组文件，放在：")
+                info("     %s" % os.path.dirname(os.path.abspath(__file__)))
+                info("   （或 --stock-dir 指定的目录、或当前目录、或 ../work/backup）")
+                for s in STOCK_SETS:
+                    info("     %-14s md5 %s" % (s["kernel"], s["kernel_md5"]))
+                    info("     %-14s md5 %s" % (s["rootfs"], s["rootfs_md5"]))
+                    info("     （%s，需两个都在）" % s["name"])
+                return 4
+
+    plan, problems = build_stock_plan(tn, mtd_table, mode, kpath, rpath, kset)
+    if problems:
+        info("")
+        for p in problems:
+            info("   !! " + p)
+        return 4
+    print_stock_plan(plan)
+    if args.dry_run:
+        info("")
+        info("   --dry-run：未写入任何东西")
+        return 0
+    if not _confirm(args, "确认把 A 槽换成原厂固件？"):
+        return 0
+    ok, rebooted = do_flash_stock(tn, plan, pc_ip, mode)
+    if not ok:
+        info("")
+        info("!! 写坏了。重启后 kit 会先试 A 槽，失败自动退到 B 槽原厂。")
+        info("   如果连 B 槽都不启动（不可能，除非动了 mtd0/flag），才需要 TTL。")
+        return 5
+    info("")
+    info("[S4] 原厂固件已写入 A 槽" + ("" if rebooted else ""))
+    if not rebooted:
+        info("")
+        info("[S5] 重启")
+        tn.sh("reboot", 3.0)
+    info("   预期启动链：")
+    info("     一级 u-boot(flag=1) → 验 B 槽通过 → 载入 B 槽 u-boot(我们的 kit)")
+    info("     → kit 先试 A 槽 → bootm 0x4880000 → 原厂 4.x（忽略 bootargs，自带 root=/dev/mtdblock6）")
+    info("   A 槽坏时 kit 自动退 image_1(0x800000) → B 槽原厂，永远不会变砖。")
     return 0
 
 
@@ -1033,9 +1567,16 @@ def scan_target(timeout=0.35):
         t.join()
     if not found:
         return None
+    # 排除我们自己：本机可能挂了 192.168.1.1 / 192.168.0.1 的 /32 别名，
+    # 那些端口会响应，扫出来就成了假阳性（实测踩过：选中 192.168.1.1 后
+    # 等 2323 永远等不到，因为 2323 开在设备上而不是我们本机）。
+    own = {"192.168.1.1", "192.168.0.1"}
     for ip, port in sorted(found):
-        info("   候选 %s:%d" % (ip, port))
-    return sorted(found)[0][0]
+        info("   候选 %s:%d%s" % (ip, port, "  (本机别名，跳过)" if ip in own else ""))
+    real = [x for x in sorted(found) if x[0] not in own]
+    if not real:
+        return None
+    return real[0][0]
 
 
 def detect_pc_ip(target):
