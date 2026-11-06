@@ -1,11 +1,11 @@
 'use strict';
 
-// WTA301 概览页 section：CPU 使用率 + 全部温度传感器（排在「系统」与「存储」之间）。
+// WTA301 概览页 section：CPU 使用率 + 全部温度传感器（排在「系统」与「内存」之间）。
 //
-// 为什么叫 22_：
+// 为什么叫 15_：
 //   LuCI 的 view/status/index.js 会 lsdir('view/status/include')，
 //   把目录里每个 *.js 按文件名字符串排序后 require —— 自动出现，
-//   不用改任何上游文件。数字前缀 = 页面顺序（20_memory < 22 < 25_storage）。
+//   不用改任何上游文件。数字前缀 = 页面顺序（10_system < 15 < 20_memory）。
 //
 // CPU 使用率靠两次轮询差分（LuCI 默认 5 秒），首次渲染显示「采样中」。
 
@@ -34,8 +34,13 @@ function bar(pct) {
 
 	var color = (pct >= 90) ? '#d9534f' : (pct >= 60) ? '#f0ad4e' : '#5cb85c';
 
-	return E('div', { 'class': 'cbi-progressbar', 'title': '%d%%'.format(pct) },
-		E('div', { 'style': 'width:%d%%;background:%s'.format(pct, color) }));
+	// 必须限定宽度且 inline-block，否则 cbi-progressbar 是 block，
+	// 会占满整行并把后面的百分比挤到下一行。
+	return E('div', {
+		'class': 'cbi-progressbar',
+		'style': 'width:200px;display:inline-block;vertical-align:middle;margin:0',
+		'title': '%d%%'.format(pct)
+	}, E('div', { 'style': 'width:%d%%;background:%s'.format(pct, color) }));
 }
 
 function row(label, value, color) {
@@ -94,7 +99,10 @@ return baseclass.extend({
 
 		table.appendChild(row(
 			_('CPU 使用率'),
-			E('span', {}, [ bar(d.pct), ' ', (d.pct == null) ? '' : '(%d 核)'.format(d.ncpu) ])
+			E('span', { 'style': 'white-space:nowrap' }, [
+				bar(d.pct),
+				(d.pct == null) ? '' : ' %d%%（%d 核）'.format(d.pct, d.ncpu)
+			])
 		));
 
 		table.appendChild(row(
@@ -125,3 +133,4 @@ return baseclass.extend({
 		return table;
 	}
 });
+
