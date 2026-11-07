@@ -184,8 +184,12 @@ make -j6 target/install
 | 6 | rootfs 里 `net-tune` md5 = `8eaaa52f11cc9a1e1e4c6e01edc421f9` | ⬜ |
 | 7 | rootfs 里 `15_sensors.js`、`rpcd/ucode/wta301` 在位 | ⬜ |
 | 8 | 产物尺寸与已发布一致（±UBI 时间戳带来的膨胀） | ⬜ |
+| 9 | **固件里真有 LuCI**（manifest ≥185 包 / ≥25 个 `luci*`） | ⬜ |
 
-### 这八条有脚本，不用手工判
+> 第 9 条是实测后加的。前八条里的尺寸判据能抓到「缺 LuCI」但只是间接的；
+> ⑨ 直接读 manifest。背景见 §4.1。
+
+### 这批判据有脚本，不用手工
 
 ```bash
 bash deliver/verify-scratch-build.sh \
@@ -196,11 +200,34 @@ bash deliver/verify-scratch-build.sh \
 ```
 
 ★ **别人 clone 下来自己编一遍，要判断「编的对不对」也直接跑这个**，
-不用回头读上面那张表。它把八条判据都做成了检查项，并把
+不用回头读上面那张表。它把九条判据都做成了检查项，并把
 `FAIL` 区分成「结构错了（会变砖）」与「只是缺工具」。
 
 脚本**有意不判 md5 相同** —— 那不可能，原因见 §3。
-它判的是：分区偏移、内嵌 DTB、关键文件内容、区域尺寸。
+它判的是：分区偏移、内嵌 DTB、关键文件内容、区域尺寸、LuCI 是否真在。
+
+### 4.1 首次从零构建时踩到的两个坑（已修）
+
+第一次从零跑，`make world` 返回 **0**、零报错，产物也看着像回事。
+但判据 ⑧⑨ 把它拦下来了：
+
+```
+manifest      163 个包（应 190）
+luci*           0 个（应 29）
+sysupgrade   12,677,397 B（应 13,394,197，小 5.4%）
+.config 里 CONFIG_PACKAGE_luci* = 0 个（母树 19 个）
+feeds/ 目录根本没建立
+```
+
+刷进去 = 没有 Web 界面。两条根因都是「不报错但结果错」：
+
+| # | 漏了什么 | 为何静默 | 现状 |
+|---|---|---|---|
+| ① | `./scripts/feeds install -a` | LuCI 全部来自 luci feed；包不存在时 Kconfig 就当没这个选项 | README 列为显式步骤；`apply-to-2512.sh` 直接 `exit 1` |
+| ② | `cp pin/ow2512-dot-config.txt .config` | 没有 `.config` 时 `apply-to-2512.sh` 会新建一个只有几行的，`make defconfig` 从最小集重算 | 同上，且检查 `CONFIG_PACKAGE_luci` ≥ 10 |
+
+两个拦截都实测验证过会 `exit 1`。这是「从零构建验证」真正吓人的地方：
+**成功返回码不等于正确**。
 
 改动 `/root/repro-verify2/**` 前后 `diff -rq` 应只差时间戳相关字节。
 

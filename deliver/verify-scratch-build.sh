@@ -257,6 +257,40 @@ else
 fi
 
 # ══════════════════════════════════════════════════════════════════
+sec "⑨ 固件里真的有 LuCI 吗（feeds/.config 漏步的直接证据）"
+# ⑧ 是间接证据（尺寸偏小）。这条是直接证据：看 manifest。
+# 背景：实测踩过 —— 没跑 feeds install 或没铺 pin/ow2512-dot-config.txt 时，
+# make world 返回 0、零报错，但 manifest 163 行（应190）、luci 包全无。
+MAN=$(ls -1 "$TREE"/bin/targets/qualcommax/ipq50xx/*tplink_wta301*.manifest 2>/dev/null | head -1)
+if [ -z "$MAN" ]; then
+	# 退一步：从 rootfs 里看 /usr/share/luci 在不在
+	if [ -n "$SQ" ] && [ -f "$SQ" ] && command -v unsquashfs >/dev/null; then
+		if unsquashfs -l "$SQ" 2>/dev/null | grep -q 'usr/share/luci/menu.d'; then
+			ok "⑨ rootfs 里有 usr/share/luci/menu.d（manifest 不在但有 LuCI）"
+		else
+			bad "⑨ rootfs 里没有 usr/share/luci/menu.d —— 没有 Web 界面"
+		fi
+	else
+		warn "⑨ 找不到 manifest 也读不了 rootfs，跳过"
+	fi
+else
+	npkg=$(wc -l < "$MAN")
+	nluci=$(grep -c '^luci' "$MAN" 2>/dev/null || :)
+	nluci=${nluci:-0}
+	# 发布版基线：190 个包，其中 luci* 29 个
+	if [ "$nluci" -ge 25 ] && [ "$npkg" -ge 185 ]; then
+		ok "⑨ manifest：$npkg 个包，其中 luci* $nluci 个"
+	else
+		bad "⑨ manifest：$npkg 个包，其中 luci* $nluci 个（应 ≥185 包 / ≥25 个 luci*）"
+		printf '         ★ 这说明 feeds 没装全，或没铺 pin/ow2512-dot-config.txt。\n'
+		printf '           两者都不会让 make world 报错 —— 见 README 构建章节的表。\n'
+	fi
+	# luci-base 必须在（没它就是真没 WebUI）
+	grep -q '^luci-base ' "$MAN" && ok "⑨ manifest 里有 luci-base" \
+		|| bad "⑨ manifest 里没有 luci-base"
+fi
+
+# ══════════════════════════════════════════════════════════════════
 sec "⑧ 尺寸必须与发布版同一量级（结构正确性）"
 
 chk_size() {  # chk_size <文件> <期望字节(可写 0x) > <名字> <容差百分比>

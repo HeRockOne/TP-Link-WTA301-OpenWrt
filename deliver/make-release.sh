@@ -73,9 +73,39 @@ echo "== 4. 打包（mk_op_pack.py，带 u-boot 槽让 +0x90 自洽）=="
 # --kblk 0x480000：内核区必须按 S7 的整区长度补齐，不能只对齐到 NAND 擦除块。
 # 依据：S7 tphdr +0x5c KERNEL_LEN=0x480000，且 +0xa0 = md5(kernel[0:0x480000] ‖ rootfs[0:0xbc0000])；
 # u-boot 按 KERNEL_LEN 从 NAND 读该长度算 md5，若只写 0x420000 则尾部残留旧数据 => 校验必失败。
+#
+# ★ u-boot 槽文件（262144 B）不在本仓库里（.gitignore 全 *.bin）。
+#   它只影响 tphdr +0x90 那 16 字节 —— 该字段 = 『最终会存在于 0x4700000
+#   的那 262144 字节』的 md5，一级 u-boot 拿它校验 A 槽 u-boot。
+#   三种情况：
+#     ① 你从 Releases 下了 wta301-uboot-p21c.bin → 放到下面任一位置，一次写对（推荐）
+#     ② 你不打算刷 u-boot（板上就是原厂）→ 保持原厂值就对了
+#     ③ 你要刷自己的 u-boot → 必须按「kernel/rootfs/tphdr 先、u-boot 最后」
+#        的顺序刷（flash_uboot_direct.py 会回写 +0x90），否则掉 B 槽
+UB_SLOT=${UBOOT_SLOT:-}
+if [ -z "$UB_SLOT" ]; then
+	for c in "$WORK/backup/mtd4_normal_boot.bin" \
+	         "$SRC/patches/uboot/wta301-uboot-p21c.bin" \
+	         "$SRC/patches/uboot/u-boot-slot.bin"; do
+		[ -f "$c" ] && { UB_SLOT=$c; break; }
+	done
+fi
+UB_ARGS=()
+if [ -n "$UB_SLOT" ] && [ -f "$UB_SLOT" ]; then
+	UB_ARGS=(--uboot "$UB_SLOT")
+else
+	cat >&2 <<'NOUB'
+   ⚠️ 没找到 u-boot 槽文件（262144 B）—— tphdr 的 +0x90 将保持原厂值。
+      这不影响本镜像的内核/rootfs；只影响「A 槽 u-boot 自身」的校验。
+      · 板上 u-boot 仍是原厂 → 原厂值就是对的，无需处理
+      · 要刷自编译 u-boot → 先刷 kernel/rootfs/tphdr，**最后**刷 u-boot
+        （flash_uboot_direct.py 会回写 +0x90）
+      · 想要一次写对 → 从 Releases 下 wta301-uboot-p21c.bin，放进
+        patches/uboot/ 或用 UBOOT_SLOT=<路径> 指定
+NOUB
+fi
 python3 "$TOOLS/mk_op_pack.py" --kernel "$K" --root "$R" --outdir $OUT/pack \
-        --kblk 0x480000 \
-        --uboot $WORK/backup/mtd4_normal_boot.bin || die "mk_op_pack 失败"
+        --kblk 0x480000 "${UB_ARGS[@]}" || die "mk_op_pack 失败"
 
 echo "== 5. UBI overlay：现造空卷，卷名必须是 wta301data =="
 # 卷名由 bootargs 的 fstools_overlay_name=wta301data 决定（与 S7 逐字一致）。

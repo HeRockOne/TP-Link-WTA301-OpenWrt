@@ -772,6 +772,60 @@ else
 fi
 
 # ══════════════════════════════════════════════════════════════════
+sec "14. 出包链路不能硬依赖仓库外的文件"
+# ══════════════════════════════════════════════════════════════════
+# 实测踩过：make-release.sh 原来写
+#     python3 mk_op_pack.py ... --uboot $WORK/backup/mtd4_normal_boot.bin || die
+# 而 $WORK 是仓库的**上级目录**，别人 clone 下来一定没有那个文件 ⇒
+# 出包在第 4 步直接死，报 FileNotFoundError，看不出是「可选输入缺失」。
+#
+# 判据：凡引用仓库外 $WORK/ 的地方，必须有回落或明确降级，不能 || die。
+MR=$SRC/deliver/make-release.sh
+if [ ! -f "$MR" ]; then
+	bad "缺 deliver/make-release.sh"
+else
+	# --uboot 必须是可选的（通过数组拼参数）
+	if grep -q 'UB_ARGS=(' "$MR" && grep -q 'UB_SLOT=' "$MR"; then
+		ok "make-release.sh 的 --uboot 是可选的（UB_SLOT + UB_ARGS 回落）"
+	else
+		bad "make-release.sh 的 --uboot 又变回硬依赖了（外部用户会 FileNotFoundError）"
+	fi
+	# 直接 --uboot \$WORK 后面跟 die 的老写法必须消失
+	if grep -qE -- '--uboot \$WORK/[^ ]* *\|\| *die' "$MR"; then
+		bad "make-release.sh 又出现「--uboot \$WORK/... || die」硬依赖"
+	else
+		ok "没有 --uboot \$WORK/... || die 硬依赖"
+	fi
+	# mk_op_pack.py 的 --uboot 参数本身必须 optional
+	if grep -q "add_argument('--uboot'" "$SRC/tools/mk_op_pack.py" 2>/dev/null; then
+		grep -q "add_argument('--uboot', default=None" "$SRC/tools/mk_op_pack.py" \
+			&& ok "mk_op_pack.py 的 --uboot 默认 None（可选）" \
+			|| warn "mk_op_pack.py 的 --uboot 可能不是可选"
+	else
+		warn "找不到 tools/mk_op_pack.py，跳过"
+	fi
+fi
+
+# make-deliverable.sh 的 u-boot 相关步骤必须降级而不是失败
+MD=$SRC/deliver/make-deliverable.sh
+if [ -f "$MD" ]; then
+	if grep -q '不影响固件刷写' "$MD"; then
+		ok "make-deliverable.sh 对缺 u-boot 明确降级（标注不影响刷写）"
+	else
+		bad "make-deliverable.sh 缺 u-boot 时可能硬失败"
+	fi
+fi
+
+# 构建前两步（feeds / 权威 .config）必须被 apply-to-2512.sh 拦住
+AP=$SRC/deliver/apply-to-2512.sh
+if [ -f "$AP" ]; then
+	grep -q 'feeds 没装全' "$AP" && ok "apply-to-2512.sh 拦 feeds 未装" \
+		|| bad "apply-to-2512.sh 不拦 feeds 未装（会编出没 WebUI 的固件）"
+	grep -q 'pin/ow2512-dot-config.txt' "$AP" && ok "apply-to-2512.sh 拦权威 .config 未铺" \
+		|| bad "apply-to-2512.sh 不拦 .config 未铺（luci 包会全丢）"
+fi
+
+# ══════════════════════════════════════════════════════════════════
 sec "总结"
 # ══════════════════════════════════════════════════════════════════
 echo ""
@@ -790,3 +844,4 @@ echo "    3) bash deliver/make-deliverable.sh <ver>"
 echo "    4) bash deliver/make-open-release.sh <VER>"
 echo "    5) 上板：verify-p26.sh / verify-p28.sh"
 exit 0
+
