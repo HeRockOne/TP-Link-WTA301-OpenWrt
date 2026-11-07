@@ -468,10 +468,22 @@ else
 		ok "没有写裸 /dev/mtdN（只写 mtdblock，由内核算 ECC）"
 	fi
 	# 同槽保护：擦运行中的槽会持 MTD 全局锁把系统卡死
-	if grep -q 'function Test-SameSlot' "$KITPS" && grep -q 'Test-SameSlot -Table' "$KITPS"; then
-		ok "有同槽保护（Test-SameSlot，交叉刷才放行）"
+	# 判据不能只看「函数存在」，要看调用点真把会话传进去了 —— 上一版就是
+	# 函数写对了、调用点漏上 -Sess，结果 $null.Kind 抛 Null 方法调用。
+	if grep -q 'function Test-SameSlot' "$KITPS" && \
+	   grep -q 'Test-SameSlot -Sess' "$KITPS"; then
+		ok "有同槽保护（Test-SameSlot，且调用点传了会话）"
 	else
-		bad "缺同槽保护 —— 擦运行中的槽会把系统卡死"
+		bad "缺同槽保护，或调用点没传 -Sess（会报 Null 值方法调用）"
+	fi
+	# 任何需要会话的内部函数，调用点必须传 -Sess；漏传必报 Null 方法调用。
+	# 只抓真带参数的调用形态（Get-LiveRootOffset -Xxx），注释和提示文字里的
+	# 字样不算，否则会把 Write-Err2 里的提示当成调用点误报。
+	calls=$(grep -oE 'Get-LiveRootOffset -[A-Za-z]+' "$KITPS" | sort -u)
+	if [ -z "$calls" ] || echo "$calls" | grep -qv -- '-Sess'; then
+		bad "有 Get-LiveRootOffset 调用点没传 -Sess（会报 Null 值方法调用）"
+	else
+		ok "Get-LiveRootOffset 所有调用点都传了 -Sess"
 	fi
 	# 永不写的分区必须按绝对偏移挡
 	if grep -q "0x4000000' = 'boot_flag" "$KITPS" && \

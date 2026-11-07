@@ -221,10 +221,16 @@ function Add-GatewayAlias {
 function Remove-GatewayAlias {
     param([int]$IfIndex, [string[]]$Addrs)
     # 只删「/32 + SkipAsSource」的别名 —— 那是本工具加的假网关。
-    # 真实网关是正常前缀的地址，不会被这条规则误删。
+    # 两个条件都要查：真网关是正常前缀（/24 之类），绝不会被这条规则误删。
+    #
+    # 为什么这里传的是「候选全集」而不是「本次新建的」：
+    # 上一次 getroot 建的别名会被下次复用（屏幕上显示「已在位（复用）」），
+    # 如果只删本次新建的，复用的那些就永远清不掉 —— 实测跑两轮后
+    # 192.168.1.1 / 192.168.0.1 都残留在本机，本机浏览器访问 192.168.1.1
+    # 会打到自己身上。所以收尾统一按候选全集清。
     foreach ($a in $Addrs) {
         $found = Get-NetIPAddress -IPAddress $a -ErrorAction SilentlyContinue |
-                 Where-Object { $_.PrefixLength -eq 32 }
+                 Where-Object { $_.PrefixLength -eq 32 -and $_.SkipAsSource }
         if (-not $found) { continue }
         foreach ($f in $found) {
             try {
@@ -251,10 +257,28 @@ function Enable-FirewallPort {
 }
 
 function Disable-FirewallPort {
-    try {
-        netsh advfirewall firewall delete rule name=WTA301 > $null 2>&1
-        Write-Info "- 删除防火墙规则"
-    } catch { }
+    # 删本工具建的**所有**防火墙规则，不只是 getroot 那一条。
+    #
+    # 曾经的 bug：原实现用 netsh delete name=WTA301，只能删 getroot 建的那一条；
+    # TTL 刷机建的 `wta301 sshd` / `wta301-tftp-udp69` 永远删不掉，
+    # 而且不管删没删成最后都无条件打印「- 删除防火墙规则」= 假成功。
+    # 现在改成：按 DisplayName 匹配本工具的命名（wta301 开头，不区分大小写）
+    # 全部删掉，然后**重新查一遍**，按真实结果说话。
+    $mine = @(Get-NetFirewallRule -ErrorAction SilentlyContinue |
+              Where-Object { $_.DisplayName -like 'wta301*' -or $_.DisplayName -eq 'WTA301' })
+    if ($mine.Count -eq 0) { Write-Info "- 防火墙：没有本工具的规则，无需清理"; return }
+    foreach ($r in $mine) {
+        try {
+            Remove-NetFirewallRule -Name $r.Name -ErrorAction Stop
+            Write-Info ("- 删除防火墙规则 {0}" -f $r.DisplayName)
+        } catch {
+            Write-Warn2 ("- 防火墙规则 {0} 删除失败：{1}" -f $r.DisplayName, $_.Exception.Message)
+        }
+    }
+    $left = @(Get-NetFirewallRule -ErrorAction SilentlyContinue |
+              Where-Object { $_.DisplayName -like 'wta301*' -or $_.DisplayName -eq 'WTA301' })
+    if ($left.Count -eq 0) { Write-Ok "- 防火墙已清干净（0 条残留）" }
+    else { Write-Warn2 ("- 防火墙还有 {0} 条残留" -f $left.Count) }
 }
 
 # ===========================================================================
@@ -1076,6 +1100,7 @@ function Get-DeviceFacts {
 # 当前运行中 rootfs 的物理绝对偏移（判活分区用）
 function Get-LiveRootOffset {
     param($Sess, $Table)
+    if (-not $Sess) { return $null }
     $o = Invoke-Cmd -Sess $Sess -Command "cat /proc/cmdline" -TimeoutSec 15
     $m = [regex]::Match($o, 'root=/dev/mtdblock(\d+)')
     if (-not $m.Success) { return $null }
@@ -1188,7 +1213,7 @@ function Invoke-GetRoot {
     if (-not (Test-PortOpen -Ip $DeviceIp -TcpPort 2323 -TimeoutMs 1000)) {
         Stop-BackgroundService -State $http  -Name 'HTTP'
         Stop-BackgroundService -State $elink -Name 'e-Link'
-        Remove-GatewayAlias -IfIndex $ifIdx -Addrs $addedAlias
+        Remove-GatewayAlias -IfIndex $ifIdx -Addrs $aliases
         Disable-FirewallPort
         throw "120 秒内设备没有回连。检查：网线是否插 LAN1、设备 IP 是否为 $DeviceIp、防火墙是否放行 32768。"
     }
@@ -1487,19 +1512,31 @@ function Test-SameSlot {
         跑 A 写 B ✓ / 跑 B 写 A ✓ / 跑 A 写 A ✗
         所以写之前必须确认：目标槽 != 当前根分区所在槽。
     #>
-    param($Table, [int64]$TargetAbs, [string]$What)
-    $live = Get-LiveRootOffset -Table $Table
-    if ($live -le 0) { return }
+    param($Sess, $Table, [int64]$TargetAbs, [string]$What)
+    # $Sess 是必填的：没它连不上设备，拿不到「当前根分区在哪」。
+    # 曾经漏传 → $Sess 为 $null → Invoke-Cmd 里 $Sess.Kind 直接抛
+    # 「不能对 Null 值表达式调用方法」，而且是在真正要写之前就炸。
+    if (-not $Sess) { throw "内部错误：Test-SameSlot 缺少会话对象，无法判断当前槽。" }
+
+    $live = Get-LiveRootOffset -Sess $Sess -Table $Table
+    if (-not $live -or $live -le 0) {
+        # 原厂 4.4.60 的 cmdline 由内核编译决定，可能没有 root=/dev/mtdblockN，
+        # 这时判不出当前槽。本工具固定「跑原厂刷 A 槽」= 天然交叉刷，所以放过，
+        # 但必须在屏幕上说清楚，不能静默跳过安全检查。
+        Write-Warn2 "判不出当前根分区所在的槽（cmdline 无 root=/dev/mtdblockN），跳过同槽检查"
+        return
+    }
     $liveSlot = if ($live -eq $script:SlotA.Rootfs) { 'A' }
                 elseif ($live -eq $script:SlotB.Rootfs) { 'B' } else { '?' }
     $tgtSlot  = if ($TargetAbs -eq $script:SlotA.Rootfs) { 'A' }
                 elseif ($TargetAbs -eq $script:SlotB.Rootfs) { 'B' } else { '?' }
     if ($liveSlot -ne '?' -and $liveSlot -eq $tgtSlot) {
-        $msg = (-f "同槽拒绝：当前根分区在 {0} 槽，却要写 {0} 槽的{1}。", $liveSlot, $What) + `
-               "擦运行中的槽会持 MTD 全局锁把系统卡死（ping 通但 22/80 断）。" + `
-               "请先从另一个槽启动：A 槽坏了就断电重启，一级 u-boot 会自动跳到 B 槽原厂。"
+        $msg = "同槽拒绝：当前根分区在 {0} 槽，却要写 {0} 槽的{1}。" -f $liveSlot, $What
+        $msg += "擦运行中的槽会持 MTD 全局锁把系统卡死（ping 通但 22/80 断）。"
+        $msg += "请先从另一个槽启动：A 槽坏了就断电重启，一级 u-boot 会自动跳到 B 槽原厂。"
         throw $msg
     }
+    Write-Info ("同槽检查通过：当前跑 {0} 槽，写 {1} 槽（交叉刷）" -f $liveSlot, $tgtSlot)
 }
 
 function Invoke-FlashOpenWrt {
@@ -1507,7 +1544,7 @@ function Invoke-FlashOpenWrt {
     $facts = Get-DeviceFacts -Sess $Sess -Table $Table
     Write-Info ("当前固件: {0}  内核 {1}" -f $facts.Kind, $facts.Kernel)
 
-    Test-SameSlot -Table $Table -TargetAbs $script:SlotA.Rootfs -What 'rootfs'
+    Test-SameSlot -Sess $Sess -Table $Table -TargetAbs $script:SlotA.Rootfs -What 'rootfs'
 
     $fsize = (Get-Item -LiteralPath $PkgPath).Length
     $kLen  = [int64]0x480000
@@ -2164,8 +2201,12 @@ function Close-GetRootHandle {
     if (-not $Handle) { return }
     if ($Handle.Http)  { Stop-BackgroundService -State $Handle.Http  -Name 'HTTP' }
     if ($Handle.Elink) { Stop-BackgroundService -State $Handle.Elink -Name 'e-Link' }
-    try { Remove-GatewayAlias -IfIndex $Handle.IfIndex -Addrs $Handle.NewAliases } catch { }
-    try { Disable-FirewallPort } catch { }
+    # 用候选全集，不用 NewAliases：复用的别名也要清掉，否则一直残留。
+    # 不静默吞错 —— 上次就是 {} 把失败吞了，屏幕上看着像清理成功。
+    try   { Remove-GatewayAlias -IfIndex $Handle.IfIndex -Addrs $Handle.Aliases }
+    catch { Write-Warn2 "清理别名报错：$($_.Exception.Message)" }
+    try   { Disable-FirewallPort }
+    catch { Write-Warn2 "清理防火墙报错：$($_.Exception.Message)" }
 }
 
 function Test-SessionAlive {
@@ -2264,6 +2305,25 @@ function Invoke-SelfTest {
             $bad++
         }
     }
+
+    Write-Info ""
+    Write-Info "内部函数防漏参（上一版就死在这里）:"
+    # Test-SameSlot 曾因漏传 -Sess 让 $Sess 变 $null，Invoke-Cmd 里 $Sess.Kind
+    # 直接抛「不能对 Null 值表达式调用方法」，用户看到的就那一句话，离根因很远。
+    # 这里直接验：传空会话必须抛明确错误，而不是 Null 引用。
+    $threw = $false
+    $m = ''
+    try { Test-SameSlot -Sess $null -Table @{} -TargetAbs 0x4FC0000 -What 'rootfs' }
+    catch { $threw = $true; $m = $_.Exception.Message }
+    if ($threw -and $m -like '*缺少会话对象*') { Write-Ok "Test-SameSlot 传空会话 -> 明确报错" }
+    elseif ($threw -and $m -like '*Null*')   { Write-Err2 "Test-SameSlot 仍报 Null 值方法调用：$m"; $bad++ }
+    else { Write-Err2 "Test-SameSlot 没拦住空会话（$m）"; $bad++ }
+
+    # Get-LiveRootOffset 同理：无会话时返回 $null，不得抛异常
+    $threw = $false
+    try { $r = Get-LiveRootOffset -Sess $null -Table @{} } catch { $threw = $true }
+    if ($threw) { Write-Err2 "Get-LiveRootOffset 传空会话时抛异常（应返回 `$null）"; $bad++ }
+    else { Write-Ok "Get-LiveRootOffset 传空会话 -> 返回 `$null，不抛" }
 
     Write-Info ""
     Write-Info "其他文件:"
