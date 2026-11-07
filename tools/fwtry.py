@@ -1,7 +1,10 @@
 # 只做 /upload（传内存+校验，不动 flash）。看官方包能不能过解析。
-import urllib.request, uuid, json, sys, hashlib, time
-HOST='http://192.168.1.1'
-PATH=r'C:\Users\null\Desktop\flash-by-huamn\fw_202.bin'
+import urllib.request, uuid, json, sys, os, hashlib, time
+HOST = os.environ.get('WTA_HOST', 'http://192.168.1.1')
+if len(sys.argv) < 2:
+    print('用法: python fwtry.py <固件文件>  (HOST 可用 WTA_HOST 覆盖)')
+    raise SystemExit(2)
+PATH = sys.argv[1]
 data=open(PATH,'rb').read()
 print('file %s  %d B  md5 %s' % (PATH, len(data), hashlib.md5(data).hexdigest()))
 bd='----WTA301'+uuid.uuid4().hex

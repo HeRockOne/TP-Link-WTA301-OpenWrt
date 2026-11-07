@@ -15,15 +15,19 @@
 #   TOOLCHAIN_BIN=/path/to/toolchain/bin \
 #   bash build_j1.sh
 #
-# 两者都可用环境变量给定；未给时按脚本位置猜（仓库旁的 src/ 布局）。
+# 两者都可用环境变量给定；未给时按脚本位置猜（支持仓库并列 / 仓库内嵌套两种布局）。
 set -u
 
 HERE=$(cd "$(dirname "$0")" && pwd)
+KITROOT=$(cd "$HERE/.." && pwd)
 
 # 1) u-boot 源码树
 UBOOT_TREE=${UBOOT_TREE:-}
 if [ -z "$UBOOT_TREE" ]; then
-	for c in "$HERE/../../../src/u-boot-2016" "$HERE/../../../../src/u-boot-2016" /root/ub/u-boot-2016; do
+	for c in "$KITROOT/../src/u-boot-2016" \
+	         "$KITROOT/../../../src/u-boot-2016" \
+	         "$KITROOT/../../../../src/u-boot-2016" \
+	         /root/ub/u-boot-2016; do
 		[ -f "$c/Makefile" ] && { UBOOT_TREE=$(cd "$c" && pwd); break; }
 	done
 fi
@@ -33,7 +37,8 @@ fi
 # 2) 工具链
 TOOLCHAIN_BIN=${TOOLCHAIN_BIN:-}
 if [ -z "$TOOLCHAIN_BIN" ]; then
-	for c in "$HERE/../../../src/staging_dir/toolchain-arm_cortex-a7_gcc-5.2.0_musl-1.1.16_eabi/bin" \
+	for c in "$KITROOT/../src/staging_dir/toolchain-arm_cortex-a7_gcc-5.2.0_musl-1.1.16_eabi/bin" \
+	         "$KITROOT/../../../src/staging_dir/toolchain-arm_cortex-a7_gcc-5.2.0_musl-1.1.16_eabi/bin" \
 	         "$UBOOT_TREE/../staging_dir/toolchain-arm_cortex-a7_gcc-5.2.0_musl-1.1.16_eabi/bin"; do
 		[ -x "$c/arm-openwrt-linux-muslgnueabi-gcc" ] && { TOOLCHAIN_BIN=$(cd "$c" && pwd); break; }
 	done
@@ -95,6 +100,6 @@ SIZE=$(stat -c%s u-boot.bin)
 
 echo
 echo "== 出槽镜像 =="
-OUTDIR=$(dirname "$0")/../../../../work/images/kit-repro
+OUTDIR=${OUTDIR:-$KITROOT/out}
 mkdir -p "$OUTDIR"
 python "$(dirname "$0")/mk_uboot_slot.py" u-boot.bin "$OUTDIR"

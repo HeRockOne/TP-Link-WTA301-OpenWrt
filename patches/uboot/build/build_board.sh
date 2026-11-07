@@ -1,16 +1,35 @@
 #!/bin/bash
 # Incremental rebuild of an arbitrary ipq5018 board in this tree.
 # NEVER run distclean/mrproper: it deletes our hand-added .dts files.
-# Usage: build_board.sh <defconfig-name-without-"_defconfig">
+# Usage: UBOOT_TREE=/path/to/u-boot-2016 build_board.sh <defconfig-name-without-"_defconfig">
 set -e
 B="$1"
-ROOT=/mnt/c/Users/Sophia/Downloads/Compressed/wta301e3tyv1_cn_1_0_10_up_boot/src
-cd "$ROOT"
+[ -n "${B:-}" ] || { echo "用法: build_board.sh <defconfig 名，不带 _defconfig>" >&2; exit 1; }
+
+# 源码树 / 工具链均可用环境变量覆盖；未给时按本仓与 src/ 并列的布局猜
+KITROOT=$(cd "$(dirname "$0")/.." && pwd)
+if [ -z "${UBOOT_TREE:-}" ]; then
+	for c in "$KITROOT/../src/u-boot-2016" /root/ub/u-boot-2016; do
+		[ -f "$c/Makefile" ] && { UBOOT_TREE=$(cd "$c" && pwd); break; }
+	done
+fi
+[ -n "${UBOOT_TREE:-}" ] || { echo "!! 请设 UBOOT_TREE=<u-boot-2016 目录>" >&2; exit 1; }
+
+if [ -z "${TOOLCHAIN_BIN:-}" ]; then
+	for c in "$KITROOT/../src/staging_dir/toolchain-arm_cortex-a7_gcc-5.2.0_musl-1.1.16_eabi/bin" \
+	         "$KITROOT/../../../src/staging_dir/toolchain-arm_cortex-a7_gcc-5.2.0_musl-1.1.16_eabi/bin" \
+	         "$UBOOT_TREE/../staging_dir/toolchain-arm_cortex-a7_gcc-5.2.0_musl-1.1.16_eabi/bin"; do
+		[ -x "$c/arm-openwrt-linux-muslgnueabi-gcc" ] && { TOOLCHAIN_BIN=$(cd "$c" && pwd); break; }
+	done
+fi
+[ -n "${TOOLCHAIN_BIN:-}" ] || { echo "!! 请设 TOOLCHAIN_BIN=<.../bin>" >&2; exit 1; }
+
+STAGING_DIR=$(dirname "$TOOLCHAIN_BIN")
 export ARCH=arm
 export CROSS_COMPILE=arm-openwrt-linux-muslgnueabi-
-export STAGING_DIR="$ROOT/staging_dir"
-export PATH="$ROOT/staging_dir/toolchain-arm_cortex-a7_gcc-5.2.0_musl-1.1.16_eabi/bin:$PATH"
-cd u-boot-2016
+export STAGING_DIR
+export PATH="$TOOLCHAIN_BIN:$PATH"
+cd "$UBOOT_TREE"
 
 echo "== defconfig: $B =="
 make "$B"_defconfig >/dev/null

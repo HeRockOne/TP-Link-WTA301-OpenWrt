@@ -2,8 +2,13 @@
 # ★ /result 必须空 body 且不设 Content-Type（net/httpd.c:549 会 400）。
 import urllib.request, uuid, json, sys, time, hashlib, os
 
-HOST = 'http://192.168.1.1'
-PATH = sys.argv[1] if len(sys.argv) > 1 else r'C:\Users\null\Desktop\flash-by-huamn\uboot_p21b_slot.bin'
+if len(sys.argv) < 2:
+    print('用法: python webflash_lap.py <槽镜像> [槽位 0=两槽 1=image_1 2=image_2]')
+    print('  环境变量 WTA_HOST 可覆盖目标地址（默认 http://192.168.1.1）')
+    raise SystemExit(2)
+
+HOST = os.environ.get('WTA_HOST', 'http://192.168.1.1')
+PATH = sys.argv[1]
 SLOT = sys.argv[2] if len(sys.argv) > 2 else '0'   # 0=两槽 1=image_1 2=image_2
 
 data = open(PATH, 'rb').read()

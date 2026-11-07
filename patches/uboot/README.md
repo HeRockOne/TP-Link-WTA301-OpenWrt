@@ -62,12 +62,25 @@ patches/uboot/
 ├── files/          ★ 当前有效代码（23 个文件，按 u-boot 树内相对路径）
 ├── build/          构建脚本
 │   ├── build_board.sh     官方流程（make defconfig → 清 DTB → make -j6）
-│   ├── build_j1.sh        本机实际用的（-j1 串行，见 §4 的坑）
+│   ├── build_j1.sh        ★ 推荐入口（-j1 串行，见 §4.1，跑完自动出槽镜像）
+│   ├── build_wta301.sh    LEGACY：当时跑的 `make -j6` 原样记录，只为追溯
 │   └── mk_uboot_slot.py   u-boot.bin → 256 KB LZMA 槽镜像（带往返校验）
 ├── p18/ p19/ p20/ p21/   历史快照（**不要直接用，见 §5**）
-├── ub_01_*.dts …         从低版本 u-boot 提取的 DTS 参考
+├── ub_01_*.dts …         从低版本 u-boot 提取的 DTS 参考（逆向证据）
 └── .._048xxx.dts
 ```
+
+> **这个目录还有一个独立仓库**（`wta301-uboot-kit`），内容与本目录一致，
+> 单独发布是因为 u-boot 侧的可复现性与板子无关。那边多两样东西：
+> `THIRD-PARTY.md`（4 个上游版权方 / 真实许可分布）与 `verify-kit.sh`
+> （30 项静态自检）。两边的 `files/` 必须保持一致 —— 改一边就在另一边同步。
+>
+> 三个构建脚本已参数化，两种目录布局都能自动找到源码树与工具链：
+> ```
+> 本仓内：  wta301-2512/patches/uboot/build/   → ../../../src/{u-boot-2016,staging_dir}
+> 独立仓：  wta301-uboot-kit/build/            →     ../src/{u-boot-2016,staging_dir}
+> 显式指定：UBOOT_TREE=... TOOLCHAIN_BIN=... bash build/build_j1.sh
+> ```
 
 ### files/ 内容（23 个）
 

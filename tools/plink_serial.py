@@ -43,8 +43,9 @@ HOSTKEY = os.environ.get('LAP_HOSTKEY',
                          'SHA256:WBOjCwfzqKkzQdXepdVSFLYIBQPQ563Xb8t1eAQsNAM')
 COM = os.environ.get('WTA_COM', 'COM5')
 BAUD = os.environ.get('WTA_BAUD', '115200')
-PYTHON = os.environ.get('WTA_REMOTE_PYTHON',
-                        r'C:\Users\null\AppData\Local\Programs\Python\Python312\python.exe')
+# 笔记本上用于串口中继的 Python。默认就用 PATH 里的 python.exe，
+# 因为笔记本型号不同，写死某个安装路径对别人无意义。
+PYTHON = os.environ.get('WTA_REMOTE_PYTHON', 'python.exe')
 REMOTE = os.environ.get('WTA_RAWSERIAL', r'C:\wta301\rawserial.py')
 PORT = int(os.environ.get('WTA_PORT_NUM', '7001'))
 PIDFILE = os.path.join(ROOT, 'work', 'scratch', 'plink_serial.pid')

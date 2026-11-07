@@ -76,8 +76,13 @@ def main():
         print('用法: python web_flash.py <本地web包> [笔记本路径] [--dry]')
         return 1
     src = args[0]
-    remote = args[1] if len(args) > 1 else \
-        r'C:\Users\sophia\Downloads\wta\op\v21web.bin'
+    remote = args[1] if len(args) > 1 else None
+    if src.startswith('--') or (remote or '').startswith('--'):
+        print('用法: python web_flash.py <本地web包> <笔记本上的落库路径> [--dry]')
+        return 1
+    if not remote:
+        print('需要第二个参数：目标包在【笔记本】上的路径（u-boot httpd 从那取包）')
+        return 1
     if not os.path.isfile(src):
         print('找不到 %s' % src)
         return 1
