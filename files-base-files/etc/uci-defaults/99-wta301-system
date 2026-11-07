@@ -1,0 +1,40 @@
+#!/bin/sh
+# WTA301 开箱即用：时区 / NTP / 主机名
+#
+# 为什么需要这个：默认固件是 GMT0 + 国外 NTP 源，国内用户看到的系统时间是错的
+# （日志时间戳错位、证书校验失败、计划任务错点）。装完就是对的，用户不用进 LuCI 改。
+
+. /lib/functions.sh
+
+# ── 时区 ────────────────────────────────────────────────────────────────
+# OpenWrt 用 POSIX TZ 串，不是 Olson 名字。中国标准时间 = CST-8（UTC+8，无夏令时）。
+# 注意串里是 "CST-8" 而不是 "CST+8"：POSIX 的符号与常识相反，负号表示东经。
+uci set system.@system[0].timezone='CST-8'
+uci set system.@system[0].zonename='Asia/Shanghai'
+
+# ── NTP ─────────────────────────────────────────────────────────────────
+# 用国内可达的源。openwrt.pool.ntp.org 在国内经常解析不到或被墙，
+# 结果是时间永远停在 1970 / 编译时间。
+uci set system.ntp.enabled='1'
+uci set system.ntp.enable_server='0'
+uci -q delete system.ntp.server
+uci add_list system.ntp.server='ntp.aliyun.com'
+uci add_list system.ntp.server='cn.pool.ntp.org'
+uci add_list system.ntp.server='time.cloudflare.com'
+# timezone 也要写一份到 ntp 段，sysntpd 从自己的段里读
+uci set system.ntp.timezone='CST-8'
+
+# ── 主机名 ──────────────────────────────────────────────────────────────
+# 默认 "OpenWrt"。改成型号，方便在路由器列表 / DHCP 租约里认出来。
+uci set system.@system[0].hostname='WTA301'
+uci set system.@system[0].description='TP-Link WTA301 (OpenWrt 25.12.6)'
+
+uci commit system
+
+# htpasswd 之外还要确保 DHCP 对外广播的 hostname 也一致
+uci set dhcp.lan.domain='lan'
+uci -q delete dhcp.@dnsmasq[0].domain
+uci add_list dhcp.@dnsmasq[0].domain='lan'
+uci commit dhcp
+
+exit 0

@@ -576,6 +576,19 @@ else
 	else
 		bad "缺 files-base-files/etc/config/wireless"
 	fi
+	# 开箱即用：时区 / NTP / 主机名。默认固件是 GMT0 + 国外 NTP，
+	# 国内装完时间就是错的（日志时间戳错位、证书校验失败、计划任务错点）。
+	SYS="$SRC/files-base-files/etc/uci-defaults/99-wta301-system"
+	if [ -f "$SYS" ]; then
+		grep -q "timezone='CST-8'" "$SYS" && grep -q "zonename='Asia/Shanghai'" "$SYS" 			&& ok "开箱时区 CST-8 / Asia/Shanghai" 			|| bad "时区没设成 CST-8（会显示 UTC 时间）"
+		grep -q "ntp.aliyun.com" "$SYS" && ok "NTP 用国内可达源" 			|| warn "NTP 未指向国内源（openwrt.pool.ntp.org 在国内常不可达）"
+		grep -q "hostname='WTA301'" "$SYS" && ok "主机名 WTA301" 			|| warn "主机名仍是默认 OpenWrt"
+		bash -n "$SYS" 2>/dev/null && ok "99-wta301-system 语法 OK" 			|| bad "99-wta301-system 语法错误"
+	else
+		bad "缺 files-base-files/etc/uci-defaults/99-wta301-system"
+	fi
+	# uci-defaults 必须被 apply 脚本设成 0755，否则开机不执行
+	grep -q "99-wta301-system" "$SRC/deliver/apply-to-2512.sh" 		&& ok "apply 脚本已复制 system 档" 		|| bad "apply-to-2512.sh 未复制 99-wta301-system（改完等于没生效）"
 	# 移动端修复：Argon 主题的 .table 是真表格 + .th 是 nowrap，手机上必撑爆；
 	# 而且 hide-xs / hide-sm 在 Argon 里根本没定义（只有 bootstrap/mobile.css 有）。
 	# 修法是单独的 CSS + 在 head.ut 里多一行 <link>，必须在 cascade.css 之后。

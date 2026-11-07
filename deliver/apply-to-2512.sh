@@ -428,8 +428,11 @@ fi
  cp -f $SRC/files-base-files/etc/config/wireless              $BB/etc/config/wireless
  cp -f $SRC/files-base-files/etc/uci-defaults/99-wta301-wireless $BB/etc/uci-defaults/99-wta301-wireless
  cp -f $SRC/files-base-files/etc/uci-defaults/99-wta301-net      $BB/etc/uci-defaults/99-wta301-net
+ cp -f $SRC/files-base-files/etc/uci-defaults/99-wta301-system   $BB/etc/uci-defaults/99-wta301-system
  chmod 0644 $BB/etc/config/wireless
- chmod 0755 $BB/etc/uci-defaults/99-wta301-wireless $BB/etc/uci-defaults/99-wta301-net
+ # uci-defaults 必须 0755，否则开机不执行（0644 只被 ls 进去，不跑）
+ chmod 0755 $BB/etc/uci-defaults/99-wta301-wireless $BB/etc/uci-defaults/99-wta301-net \
+           $BB/etc/uci-defaults/99-wta301-system
  echo "  wireless:"
  grep -E "^\s*option (band|channel|htmode|country|cell_density|noscan)" $BB/etc/config/wireless | sed 's/^/    /'
  echo "  packet steering:"
