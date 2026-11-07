@@ -23,7 +23,8 @@ work/wta301-kit.zip         zip，54 MB
 | 约束 | 后果 |
 |---|---|
 | 目标机器是**别人的** Windows | 不能要求装 Python。`启动.bat` 里查 python 这一步本身就是门槛 |
-| 要求**所有操作单台电脑完成** | getroot（网线）和刷 u-boot（TTL 串口）不能分两台机器、两套脚本 |
+| 要求**所有操作单台电脑完成** | getroot（网线）和救砖（TTL 串口）不能分两台机器、两套脚本 |
+| 刷 u-boot 本身**不需要 TTL** | 有 shell 就能 `dd` 写 mtd4/mtd9。TTL 只在拿不到 shell 时用 |
 | u-boot 要**单独一个目录** | 固件包和 u-boot 混在一起，最容易发生「想把固件刷回去，结果顺手把 u-boot 也换了」 |
 
 Windows 10 / 11 自带 PowerShell 5.1，密码学（DH / AES）、TCP、UDP、串口全都能做，
@@ -262,6 +263,53 @@ Stop-BackgroundService -State $root.Http -Name 'HTTP 服务'
 
 ---
 
+## 6.5 刷 u-boot 不需要 TTL（用户指出的文档错误）
+
+用户原话：
+
+> 「明明都有了 root，刷入 uboot 为什么还需要 ttl」
+
+**是对的。原来的文档和代码注释写了「首次刷机必须 TTL」，这是错的。**
+
+拿到 root shell 之后，u-boot 槽跟普通分区没有区别，`dd` 写就行：
+
+```
+上传 wta301-uboot-p21c.bin 到设备 /tmp
+dd if=/tmp/ub.bin of=/dev/mtdblock9 bs=65536 seek=0   ← A 槽 0x4700000
+dd if=/tmp/ub.bin of=/dev/mtdblock4 bs=65536 seek=0   ← B 槽 0x700000
+dd if=/dev/mtdblock9 | md5sum                          ← 回读比对
+```
+
+真机实测（`wta301-uboot-p21c.bin` 262144 字节，两槽内容原本已是同一个 md5，属幂等重写）：
+
+```
+u-boot kit wta301-uboot-p21c.bin  262144 字节
+-> mtd9 0x4700000   mtd4 0x700000
+   mtd9: 4+0 records out
+mtd9 回读校验通过 d0ada9f76e4f1aba9b96a559a5220cee
+   mtd4: 4+0 records out
+mtd4 回读校验通过 d0ada9f76e4f1aba9b96a559a5220cee
+会话结束（共 1 次操作）
+```
+
+写后再审计：两槽 md5 都是 `d0ada9f7…`，kernel/rootfs 四个分区 md5 全未变，getroot 仍 t=1s。
+
+### TTL 到底什么时候用
+
+| 场合 | 需要 TTL？ |
+|---|---|
+| 刷 u-boot（`[3]`） | ❌ 网络 dd |
+| 刷 OpenWrt（`[2]`） | ❌ 网络 dd |
+| 刷回原厂（`[4]`） | ❌ 网络 dd |
+| 整片备份（`[6]`） | ❌ 网络 nc |
+| **getroot 失败**（固件版本不同 / 漏洞失效 / 不在路由模式） | ✅ |
+| **两槽都验不过**，一级 u-boot 进恢复模式 | ✅ |
+| **分区表 / boot_flag 错乱**，系统起不来 | ✅ |
+
+判据只有一条：**能不能拿到 shell**。能拿到就走网络，拿不到才插线。
+
+---
+
 ## 7. 验收记录（全部在真机上跑过）
 
 | 项 | 结果 |
@@ -275,9 +323,11 @@ Stop-BackgroundService -State $root.Http -Name 'HTTP 服务'
 | 刷 OpenWrt dry-run | ✅ 内核 → mtd13 +seek 8 块（避开 4 MiB 截断） |
 | 刷原厂 dry-run | ✅ 选定 A 槽 2.0.2，内核 → mtd10，rootfs → mtd11 |
 | 刷 u-boot dry-run | ✅ `-> mtd9 0x4700000   mtd4 0x700000` |
-| TTL 串口刷写 | ⬜ 代码就位，本次未插 TTL 线，**未上机** |
+| **刷 u-boot 真写** | ✅ **网络路径，无需 TTL**：两槽各 `4+0 records out`，回读 md5 均 `d0ada9f76e4f1aba9b96a559a5220cee`，写后系统正常、其他分区未动 |
+| TTL 串口刷写 | ⬜ 代码就位，本次未插 TTL 线，**未上机**（只在拿不到 shell 时才会用到） |
 
-**未实测：真正写入 flash。** 所有写入路径只跑了 dry-run。
+**已实测真正写入 flash：u-boot 两槽（网络 dd）。**
+仍只有 dry-run 证据的：刷 OpenWrt、刷回原厂。
 
 ---
 
