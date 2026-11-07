@@ -309,3 +309,66 @@ sysupgrade（原生 tar）        ← LuCI「备份/刷写固件」       13,394
 - ❌ 不能说「别人编出来的和发布版 md5 一样」（squashfs 时间戳）。
 - ❌ 在 §4 跑完之前，不能说「已从零验证可编译」（输入完整 ≠ 端到端跑通）。
 
+---
+
+## 8. 外部用户模拟：三处「别人 clone 下来必然失败」
+
+「输入完整」和「能跑通」是两件事。为了验证后者，把仓库 clone 到一个
+**没有 `work/` 上级目录**的地方（`/root/extern-sim`），然后照 README 跑完整链路。
+三轮都炸在「不报输入缺失、直接抛异常」的地方。
+
+### 8.1 三处硬依赖（都已修）
+
+| # | 症状 | 根因 | 修法 |
+|---|---|---|---|
+| ① | `make world` **返回 0**、零报错，但固件少 27 个 LuCI 包、没 Web 界面 | 漏 `./scripts/feeds install -a`；且没铺 `pin/ow2512-dot-config.txt` | README 列为显式步骤；`apply-to-2512.sh` 遇到两种情形都 `exit 1` |
+| ② | `make-release.sh` 第 4 步 `FileNotFoundError` | `--uboot $WORK/backup/mtd4_normal_boot.bin \|\| die`，`$WORK` 是仓库**上级**目录 | `UBOOT_SLOT` → `$WORK/backup` → `patches/uboot/` 三级回落；全缺则降级并打印三种处理方式 |
+| ③ | `*** 找不到 .../flash_full_128M.bin ***` → `FAIL: mk_op_pack 失败` | 为了从 128 MB 全盘镜像里取 A 槽 TP 头，而真正有用的只有 **122 字节** | 新增 `patches/tphdr/tphdr-head.hex`（前 0x120 字节）+ `_load_tphdr()` 回落 |
+
+### 8.2 关于 ③ 的量化（为什么 128 MB 可以不要）
+
+```
+TP 头占 NAND 0x4800000 起 0x20000 = 131,072 B
+其中非零字节：122 个
+最后一个非零字节偏移：+0xdf
++0xe0 之后：全是 0x00（不是 0xFF —— NAND 上实际如此）
+```
+
+`mk_op_pack.py` 只覆盖 4 个字段（`+0x5c` 内核长度 / `+0x64` rootfs 长度 /
+`+0x90` u-boot 槽 md5 / `+0xa0` kernel‖rootfs md5），其余逐字节保持。
+
+**受控对照**（同一对 kernel/rootfs、同一 u-boot 槽，只换 TP 头来源）：
+
+| 输入 | `op_tphdr_0x20000.bin` md5 |
+|---|---|
+| A 用 128 MB 全盘镜像 | `fd107705871c368299046f9d35b326ec` |
+| B 只用仓库内 122 字节模板 | `fd107705871c368299046f9d35b326ec` |
+
+✅ 逐字节相同；kernel/rootfs 两份产物也完全相同。
+⇒ 不是「退而求其次」，是**等价**。
+
+### 8.3 修完之后的端到端结果
+
+在 `/root/extern-sim`（裸仓库，无 `work/`、无全盘镜像、无 `u-boot.bin`）：
+
+```
+make-release.sh       RC=0
+  网页包      17,170,432 B   （与发布版尺寸精确相同）
+  TTL 包      20,447,232 B   （同上）
+  sysupgrade  依 squashfs 压缩率浮动
+make-deliverable.sh   RC=0
+  唯一降级：u-boot 槽镜像不放进交付（脚本明确打印，标注不影响刷写）
+```
+
+### 8.4 这类 bug 的共性，以及为什么判据要这么写
+
+三处都是同一个模式：**「可选输入缺失」被写成了「致命错误」，
+而且错误信息指向文件路径、不指向设计意图。**
+外部用户看到 `FileNotFoundError: .../flash_full_128M.bin` 只会以为仓库缺文件，
+不会是「我需要用自己板子的 ART 生成」或「这个字段是可选的」。
+
+所以 `deliver/verify-repro.sh` 第 14 节把这些变成可回归的静态判据：
+`--uboot` 必须是可选形式、不许出现 `--uboot $WORK/... || die`、
+`mk_op_pack.py` 必须有 `_load_tphdr`、模板的 magic 与关键字段必须对得上、
+`apply-to-2512.sh` 必须拦 feeds 与 `.config`。
+
