@@ -60,6 +60,16 @@ ifaces_for() {
 	done
 }
 
+# 速率集：覆盖优先档（理由与实测见 /etc/config/wireless 顶部注释）
+#   basic_rate 决定 beacon/管理帧速率，也决定客户端关联时必须支持的最低速率。
+#   2.4G beacon 12 -> 1 Mbps  = +10.8 dB（发现距离 ×3.4）
+#   5G   beacon 24 -> 6 Mbps  = +6 dB   （距离 ×2.0）
+#   2.4G 加回 802.11b CCK：1 Mbps DSSS 比 12 Mbps OFDM 灵敏度好约 8 dB。
+RATES_24='1000 2000 5500 11000 6000 9000 12000 18000 24000 36000 48000 54000'
+BASIC_24='1000 2000'
+RATES_5G='6000 9000 12000 18000 24000 36000 48000 54000'
+BASIC_5G='6000 12000 24000'
+
 apply_radio() {
 	local sec="$1" band="$2" chan htmode ssid noscan i
 
@@ -73,13 +83,27 @@ apply_radio() {
 	uci set "wireless.$sec.country=CN"
 	uci set "wireless.$sec.channel=$chan"
 	uci set "wireless.$sec.htmode=$htmode"
-	uci set "wireless.$sec.cell_density=2"
 	# 不写 txpower：驱动默认即 BDF 上限 24 dBm（设 24~33 都回落 24，设 20 才降到 20）
 	if [ "$noscan" = "1" ]; then
 		uci set "wireless.$sec.noscan=1"
 	else
 		uci -q delete "wireless.$sec.noscan"
 	fi
+
+	case "$band" in
+	2g)
+		uci set "wireless.$sec.cell_density=0"
+		uci set "wireless.$sec.legacy_rates=1"
+		uci set "wireless.$sec.basic_rate=$BASIC_24"
+		uci set "wireless.$sec.supported_rates=$RATES_24"
+		;;
+	5g)
+		uci set "wireless.$sec.cell_density=1"
+		uci -q delete "wireless.$sec.legacy_rates"
+		uci set "wireless.$sec.basic_rate=$BASIC_5G"
+		uci set "wireless.$sec.supported_rates=$RATES_5G"
+		;;
+	esac
 
 	for i in $(ifaces_for "$sec"); do
 		uci set "wireless.$i.disabled=0"
@@ -88,6 +112,8 @@ apply_radio() {
 		uci set "wireless.$i.ssid=$ssid"
 		uci set "wireless.$i.encryption=psk2"
 		uci set "wireless.$i.key=$KEY"
+		# ath11k 会误报 PEER_STA_KICKOUT 把好设备踢下线，关掉
+		uci set "wireless.$i.disassoc_low_ack=0"
 	done
 }
 

@@ -529,6 +529,39 @@ else
 	else
 		bad "apply-to-2512.sh 缺权限归一化"
 	fi
+	# 无线覆盖档（见 docs/WIFI-SIGNAL-ENHANCE-EXTERNAL-EVIDENCE.md）
+	# 发射功率 24 dBm 是硬顶：iw set txpower / 换国码 / 改 BDF 两处表 都实测无效。
+	# 唯一有效杠杆是 basic_rate —— 它决定 beacon 与管理帧速率。
+	#   2.4G basic 12 -> 1 Mbps = +10.8 dB（距离 x3.4）
+	#   2.4G 加回 CCK     = 灵敏度 +8 dB
+	#   5G   basic 24 -> 6 Mbps = +6 dB（x2.0）
+	WCFG="$SRC/files-base-files/etc/config/wireless"
+	if [ -f "$WCFG" ]; then
+		if grep -q "option legacy_rates '1'" "$WCFG" && 		   grep -q "option basic_rate '1000 2000'" "$WCFG"; then
+			ok "2.4G 覆盖档已固化：CCK 打开 + beacon 1 Mbps"
+		else
+			bad "2.4G 覆盖档缺失（beacon 会退回 12 Mbps，损失 10.8 dB 链路预算）"
+		fi
+		if grep -q "option basic_rate '6000 12000 24000'" "$WCFG"; then
+			ok "5G 覆盖档已固化：beacon 6 Mbps（原 24 Mbps，+6 dB）"
+		else
+			bad "5G basic_rate 缺失（beacon 会退回 24 Mbps）"
+		fi
+		n=$(grep -c "option disassoc_low_ack '0'" "$WCFG")
+		if [ "$n" -ge 2 ]; then
+			ok "两频段均 disassoc_low_ack=0（ath11k 不会因弱信号误踢客户端）"
+		else
+			bad "disassoc_low_ack 未关（$n 处），弱信号客户端会被反复踢下线"
+		fi
+		# 不许写死 txpower：驱动默认即 BDF 上限，写了也不会更高，只会误导
+		if grep -q "option txpower" "$WCFG"; then
+			warn "wireless 里写了 txpower —— BDF 硬限 24 dBm，写了无用（建议删）"
+		else
+			ok "未写 txpower（驱动默认 = BDF 上限 24 dBm，正确）"
+		fi
+	else
+		bad "缺 files-base-files/etc/config/wireless"
+	fi
 	# 移动端修复：Argon 主题的 .table 是真表格 + .th 是 nowrap，手机上必撑爆；
 	# 而且 hide-xs / hide-sm 在 Argon 里根本没定义（只有 bootstrap/mobile.css 有）。
 	# 修法是单独的 CSS + 在 head.ut 里多一行 <link>，必须在 cascade.css 之后。

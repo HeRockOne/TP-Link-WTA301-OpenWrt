@@ -56,8 +56,8 @@ apply_radio() {
 	local sec="$1" band="$2" chan htmode ssid i
 
 	case "$band" in
-	2g) chan=6;  htmode='HT40'; ssid='OpenWrt-WTA301' ;;
-	5g) chan=36; htmode='HE80'; ssid='OpenWrt-WTA301-5G' ;;
+	2g) chan=11;  htmode='HT20'; ssid='OpenWrt-WTA301' ;;
+	5g) chan=161; htmode='HE80'; ssid='OpenWrt-WTA301-5G' ;;
 	*)  return 0 ;;
 	esac
 
@@ -66,6 +66,21 @@ apply_radio() {
 	uci set "wireless.$sec.channel=$chan"
 	uci set "wireless.$sec.htmode=$htmode"
 
+	# 覆盖优先档（与本目录上两级 files-base-files/etc/config/wireless 一致）
+	case "$band" in
+	2g)
+		uci set "wireless.$sec.cell_density=0"
+		uci set "wireless.$sec.legacy_rates=1"
+		uci set "wireless.$sec.basic_rate='1000 2000'"
+		uci set "wireless.$sec.supported_rates='1000 2000 5500 11000 6000 9000 12000 18000 24000 36000 48000 54000'"
+		;;
+	5g)
+		uci set "wireless.$sec.cell_density=1"
+		uci set "wireless.$sec.basic_rate='6000 12000 24000'"
+		uci set "wireless.$sec.supported_rates='6000 9000 12000 18000 24000 36000 48000 54000'"
+		;;
+	esac
+
 	for i in $(ifaces_for "$sec"); do
 		uci set "wireless.$i.disabled=0"
 		uci set "wireless.$i.network=lan"
@@ -73,6 +88,7 @@ apply_radio() {
 		uci set "wireless.$i.ssid=$ssid"
 		uci set "wireless.$i.encryption=psk2"
 		uci set "wireless.$i.key=$KEY"
+		uci set "wireless.$i.disassoc_low_ack=0"
 	done
 }
 

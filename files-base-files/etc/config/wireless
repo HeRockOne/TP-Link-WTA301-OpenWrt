@@ -1,38 +1,90 @@
 # WTA301 出厂无线配置（固化进 rootfs —— 开箱即用，不需要用户 shell 调试）
 #
-# ★ 每一项都有实测依据，见 wta301-2512/docs/P24-WIFI-5G-PERF.md
-#   P24 之前这里是出厂/上游默认：radio1 ch36 HE80 cell_density 0，
-#   radio0 无 noscan ⇒ 5G 比现在少约 250 Mbps，2.4G 被压到 20MHz + CTS。
+# ★ 本文件有两条互相冲突的目标，必须二选一，不能"都要"：
+#     A) 吞吐优先（近距离快）      B) 覆盖优先（远距离连得上）
+#   当前选择：**B 覆盖优先**。原因见下"速率集"一节。
 #
-# radio1 (5G)
-#   channel 161  CN 非 DFS 段（149/153/157/161/165 都是 33 dBm 上限）。
-#                避开 DFS 52-64 / 100-144：需要 CAC，起不来会让 AP 彻底不可用
-#                （实测把 channel 设成 64 后 hostapd 循环 DFS-CAC-START →
-#                 DFS->DISABLED，AP 完全起不来）。
-#   htmode  HE80 不用 HE160：本机客户端只支持 80MHz，实测开 160MHz 后信道
-#                busy 0.4%→63%、expected throughput 887→551（-19%）。
-#   cell_density 2  更激进的 CCA 阈值（-72 dBm vs -82 dBm），实测吞吐更高。
+# ============================================================================
+# 一、发射功率 —— 已到硬件顶，软件无法再提（实测实证，不要再试）
+# ============================================================================
+# BDF 硬限 24 dBm（IPQ5018 2.4G / QCN6122 5G 都是）。三个独立实测：
+#   1) iw dev phy0-ap0 set txpower fixed 3000  -> 回读仍 24.00 dBm
+#      iw dev phy1-ap0 set txpower fixed 3000  -> 回读仍 24.00 dBm
+#   2) uci 换 country CN/US/BO/AU/JP 各测一遍 -> 全部 24.00 dBm
+#      而 iw phy phy0 info 在这些国码下都报 (30.0 dBm)
+#      ⇒ regdb 不是约束项，ath11k 自管法规，唯一门槛是 BDF 功率表
+#   3) 不设 txpower 时驱动默认就是 BDF 上限 = 24 dBm，等于最优
+# 24 dBm 已等于芯片额定点（QCN6102 HE80 MCS9 额定 24 dBm）。再往上只有改
+# board-2.bin 的功率表一条路，代价是 EVM 崩坏（功率上去了吞吐反而掉）+ 温升
+# （本板 24 dBm 满载 5G 已到 90 ℃，见 P30-THERMAL.md）。**不值得，也不做。**
 #
-# radio0 (2.4G) —— 已改为稳妥档（用户拍定：回退 HT20）
-#   channel 11  实测数据：
-#                 ch11 HT20 = 66 / 49 / 26 Mbps（expected 126.6）
-#                 ch6  HT20 = 约 20 Mbps（被 CTS protection 压着，邻频一堆）
-#               ⇒ 同为 HT20，ch11 明显好于 ch6，所以默认给 11。
-#                 （早期“ch11 比 ch6 干净 97 倍”的结论是错的，当时拿「在用信道
-#                  累计 busy」比「非在用信道 150ms 采样」；正确做法是同信道两次
-#                  survey 差分。修正后 ch6 实际 busy 95%，其中他人占 46%。）
-#   htmode  HT20  不加 noscan 时 hostapd 报
-#                "20/40 MHz operation not permitted ... based on overlapping BSSes"
-#                最后还是回落到 20MHz + CTS，等于白折腾；加 noscan 强开 40MHz 又
-#                会挤邻居（扫到 ch1=4 / ch11=4 个 AP）。家用长期稳定优先 ⇒ HT20。
-#                想自行换回 40MHz 的话：uci set wireless.radio0.htmode='HT40';
-#                  uci set wireless.radio0.noscan='1'; uci commit; wifi reload
+# ============================================================================
+# 二、速率集 —— 覆盖的真正杠杆（本轮改动的核心）
+# ============================================================================
+# cell_density 的真实作用（不是 CCA 阈值！早期注释写错了，已修正）
+#   /lib/netifd/hostapd.sh 里 cell_density 只做一件事：决定 rate_list /
+#   basic_rate_list 的默认值。而 **basic_rate 决定 beacon 和管理帧的发送速率**，
+#   也决定客户端关联时必须支持的最低速率。
+#     2.4G  legacy_rates=0: cell_density 0/1 -> basic 6/12/24
+#                                         2   -> basic 12/24
+#                                         3   -> basic 24
+#     5G                    cell_density 1   -> basic 6/12/24
+#                                         2   -> basic 12/24
+#                                         3   -> basic 24
+#   beacon 用 12 Mbps 发 → 用 1 Mbps 发，链路预算差 10*log10(12/1) = 10.8 dB。
+#   按本仓库 TXPOWER-LIMITS 文档的换算尺（每 3 dB ≈ ×1.41 距离）：
+#       2.4G: 10.8 dB -> 发现/接入距离 ×3.4
+#       5G  : 24 -> 6 Mbps = 6 dB -> ×2.0
+#   这就是"信号弱/远处连不上"的直接原因，比提功率有效得多。
 #
-# 未设置 txpower 的原因
-# --------------------
-# 本板 BDF 硬限 24 dBm（IPQ5018/QCN6122），设 24~33 都回落 24.00，设 20 才生效。
-# 不写即用驱动默认 = BDF 上限，等于最优。改国家码不能提功率（CN=33/US=30/AU=30
-# 实测都只有 24），国家码只决定信道可用性（JP/DE 禁用 161）。
+# 所以这里不用 cell_density 的默认值，而是**显式写 basic_rate / supported_rates**
+# （set_default 只在用户没设时才生效，显式写就完全接管）。
+#
+# radio0 (2.4G)  supported: 1 / 2 / 5.5 / 11 (CCK) + 6..54 (OFDM)
+#                basic    : 1 / 2 Mbps  ← beacon 用 1 Mbps，最大覆盖
+#   为什么把 802.11b 的 CCK 速率加回来（legacy_rates=1）：
+#     原配置最低只到 12 Mbps OFDM。1 Mbps DSSS 的接收灵敏度约 -96 dBm，
+#     12 Mbps OFDM 约 -88 dBm ⇒ 差 8 dB。手机在边缘原本"根本连不上"，
+#     现在能降到 1 Mbps 勉强可用 —— 从"无"到"有"，这才是覆盖。
+#   代价（必须知道）：远处客户端用低速会占用更多空口时间；近距离客户端由
+#     minstrel 速率自适应选高速率，不受影响。beacon 从 12→1 Mbps 使每个
+#     beacon 空口时间约 0.27 ms→2.3 ms，占 100 ms 周期约 2.3%，可接受。
+#
+# radio1 (5G)    supported: 6..54（5G 没有 CCK，6 Mbps 已是最低）
+#                basic    : 6 / 12 / 24  ← beacon 用 6 Mbps（原 24）
+#
+# ★ 想要近距离吞吐最高时，改回吞吐优先档（一条命令，立即生效）：
+#     uci set wireless.radio0.cell_density='2'
+#     uci delete wireless.radio0.basic_rate
+#     uci delete wireless.radio0.supported_rates
+#     uci delete wireless.radio0.legacy_rates
+#     uci set wireless.radio1.cell_density='3'
+#     uci delete wireless.radio1.basic_rate
+#     uci delete wireless.radio1.supported_rates
+#     uci commit wireless && wifi reload
+#
+# ============================================================================
+# 三、不再因弱信号误踢客户端
+# ============================================================================
+# disassoc_low_ack 默认 1（hostapd.sh:574），而 ath11k 有已知的误报
+# PEER_STA_KICKOUT：连得很好的设备也会被踢（ath11k 邮件列表 2021-January/000975，
+# 「all kind of devices can successfully connect ... but after 65 minutes the
+# firmware suddenly sends WMI_PEER_STA_KICKOUT_EVENT」）。
+# 弱信号场景下这个误踢会把"勉强能用"变成"反复掉线"，所以关掉。
+# 副作用：真·离线客户端不会被及时清理，靠 ap_max_inactivity（默认 300 s）兜。
+#
+# ============================================================================
+# 四、信道与带宽（沿用 P24 实测结论，未改）
+# ============================================================================
+# radio1  161  CN 非 DFS 段。避开 DFS 52-64 / 100-144（需 CAC，起不来会让 AP
+#              彻底不可用；实测设 64 后 hostapd 循环 DFS-CAC-START → DISABLED）。
+#         HE80 不用 HE160：客户端只 80MHz，开 160 实测 busy 0.4%→63%、
+#              expected throughput 887→551。
+#               ★ 若要 5G 覆盖再 +3 dB，改 HE40（10*log10(80/40)=3 dB），
+#                 代价是峰值吞吐减半。一条命令：
+#                 uci set wireless.radio1.htmode='HE40'; uci commit; wifi reload
+# radio0  11   ch11 HT20 = 66/49/26 Mbps；ch6 HT20 约 20 Mbps（被 CTS 压着）。
+#         HT20 强开 HT40 要加 noscan，会挤邻居 ⇒ 家用长期稳定优先。
 
 config wifi-device 'radio0'
 	option type 'mac80211'
@@ -42,7 +94,10 @@ config wifi-device 'radio0'
 	option channel '11'
 	option htmode 'HT20'
 	option country 'CN'
-	option cell_density '2'
+	option cell_density '0'
+	option legacy_rates '1'
+	option basic_rate '1000 2000'
+	option supported_rates '1000 2000 5500 11000 6000 9000 12000 18000 24000 36000 48000 54000'
 	option disabled '0'
 
 config wifi-iface 'default_radio0'
@@ -52,6 +107,7 @@ config wifi-iface 'default_radio0'
 	option ssid 'OpenWrt-WTA301'
 	option encryption 'psk2'
 	option key '123456789'
+	option disassoc_low_ack '0'
 
 config wifi-device 'radio1'
 	option type 'mac80211'
@@ -61,7 +117,9 @@ config wifi-device 'radio1'
 	option channel '161'
 	option htmode 'HE80'
 	option country 'CN'
-	option cell_density '2'
+	option cell_density '1'
+	option basic_rate '6000 12000 24000'
+	option supported_rates '6000 9000 12000 18000 24000 36000 48000 54000'
 	option disabled '0'
 
 config wifi-iface 'default_radio1'
@@ -71,3 +129,4 @@ config wifi-iface 'default_radio1'
 	option ssid 'OpenWrt-WTA301-5G'
 	option encryption 'psk2'
 	option key '123456789'
+	option disassoc_low_ack '0'
