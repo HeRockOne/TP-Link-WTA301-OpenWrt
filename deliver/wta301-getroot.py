@@ -333,15 +333,74 @@ FLASH_TARGETS = {
 }
 
 # 绝不触碰（原厂主槽 + 引导链）+ overlay 保护区。脚本在写之前会核对每个落点。
-NEVER_WRITE = [
-    (0x0000000, 0x03C0000, "factory_boot（一级 u-boot / TTL 命脉）"),
-    (0x0400000, 0x0020000, "factory_info"),
-    (0x0480000, 0x0020000, "art"),
-    (0x0700000, 0x0040000, "u-boot B 槽"),
-    (0x0880000, 0x0400000, "原厂主槽 kernel"),
-    (0x0FC0000, 0x0C00000, "原厂主槽 rootfs"),
-    (0x4000000, 0x0020000, "boot_flag"),
-]
+# ★★★ 硬禁止：写这些 = 直接变砖，没有例外，--yes 也绕不过 ★★★
+#
+# 判断依据（来自 mtd0 里的字符串，不是推测）：
+#   mtd0  未压缩，含 tftp / nand read / nand write / nand erase / bootm / crc32 /
+#         failsafe / bootipq，还有一整套 Web 恢复界面（/index.html、/flashing.html、
+#         "start www server for firmware recovery"、"HTTP ugrade is done! Rebooting..."），
+#         以及 "Firmware check failed! Enter recovery mode."（两槽都验不过时进恢复模式）
+#         ⇒ mtd0 是唯一的终极救砖出口。写坏它 = 只能拆机上编程器。
+#   mtd1  机型 / MAC，写错无法恢复。
+#   mtd2  射频校准（ART），写错射频废掉。
+#   mtd14 boot_flag。虽然 mtd0 里有
+#         "Read BootFlag failed, so set it to default and write to flash."
+#         会自动重写默认值，但仍不主动碰它。
+HARD_DENY = {
+    0:  ("factory_boot", "一级 u-boot + SBL/QSEE/CDT，唯一的终极救砖出口"),
+    1:  ("factory_info", "机型 / MAC，写错无法恢复"),
+    2:  ("art",          "射频校准数据，写错射频废掉"),
+    14: ("boot_flag",    "一级 u-boot 的槽选择标志"),
+}
+
+# 需要明确授权的落点：写它们不变砖，但会毁掉某种回退能力。
+# 每一项单独列出「允许哪个操作写我」—— 不用全局白名单，因为那样
+# mtd4（u-boot B 槽）会被 "flash-op" 顺带放行，而 flash-op 从不该写 mtd4。
+GUARDED = {
+    4:  ("normal_boot  B 槽二级 u-boot",
+         {"flash-uboot"},
+         "写完只剩 A 槽 u-boot 还能被一级加载"),
+    9:  ("normal_boot_bak  A 槽二级 u-boot",
+         {"flash-uboot"},
+         "写完只剩 B 槽 u-boot"),
+    5:  ("kernel  B 槽内核",
+         {"restore-bslot"},
+         "原厂回退用的内核"),
+    6:  ("rootfs  B 槽 rootfs",
+         {"restore-bslot", "flash-op"},
+         "原厂回退用的根文件系统；跑原厂时它就是活动分区"),
+}
+
+# A 槽（mtd10/mtd11）不在 GUARDED 里 —— 它是我们自己的槽，随便刷。
+# 数据区（mtd7/mtd12）也不在 —— 擦它只丢设置。
+
+
+class RefusedWrite(Exception):
+    """写入被安全门禁拒绝。"""
+
+
+def guard_write(mtd_idx, purpose):
+    """每一次真正的 dd 写入之前都必须过这里。
+
+    故意抛异常而不是返回布尔 —— 返回布尔会被调用方漏判，
+    抛异常漏不掉：没接住就是崩溃，而崩溃也不会写入。
+    """
+    if mtd_idx in HARD_DENY:
+        name, why = HARD_DENY[mtd_idx]
+        raise RefusedWrite(
+            "拒绝写入 mtd%d（%s）。\n"
+            "     原因：%s\n"
+            "     这是硬性禁止，--yes 无法绕过。" % (mtd_idx, name, why))
+    if mtd_idx in GUARDED:
+        name, allowed, why = GUARDED[mtd_idx]
+        if purpose not in allowed:
+            raise RefusedWrite(
+                "拒绝写入 mtd%d（%s）。\n"
+                "     操作 %r 没有写这个分区的权限（允许：%s）。\n"
+                "     关于这一区：%s"
+                % (mtd_idx, name, purpose,
+                   " / ".join(sorted(allowed)), why))
+
 
 # 两种固件各自的 overlay（可写数据区）。物理分离，互不干扰。
 OVERLAYS = {
@@ -806,6 +865,7 @@ def do_flash(tn, plan, pc_ip, pkg_name):
         info("")
         info("[7] 写 %s → /dev/mtdblock%d (%s)%s"
              % (part, p["mtd"], p["name"], "   ← 正在使用的分区" if live else ""))
+        guard_write(p["mtd"], "flash-op")
         cmd = ("dd if=/tmp/pkg.bin of=/dev/mtdblock%d bs=%d skip=%d seek=%d count=%d 2>&1"
                % (p["mtd"], DD_BS, p["src_skip"], p["dst_seek"], p["count"]))
         if live:
@@ -1174,6 +1234,7 @@ def restore_bslot(tn, args, mtd_table, pc_ip, kset, kpath, rpath):
             return 5
         info("   设备侧 md5 = %s" % got)
 
+        guard_write(mtd_idx, "restore-bslot")
         if live_abs is not None and MTD_OFFSET.get(mtd_idx) == live_abs:
             # B 槽 rootfs 正是当前活动的（跑原厂时就是）。写完必须立刻重启，
             # 中间不能再读任何东西，否则内核缺页会读到半写状态。
@@ -1384,6 +1445,7 @@ def do_flash_stock(tn, plan, pc_ip, mode):
                 info("      实得 %s" % (got or "?"))
                 return False, False
 
+        guard_write(p["dst_mtd"], "flash-stock")
         cmd = ("dd if=%s of=/dev/mtdblock%d bs=%d skip=%d seek=%d count=%d"
                % (src, p["dst_mtd"], DD_BS, p["src_skip"], p["dst_seek"], p["count"]))
         if live:
@@ -1979,6 +2041,7 @@ def flash_uboot(tn, args, fw, mtd_table, pc_ip, pkg_name):
     for idx, nm in UBOOT_SLOTS:
         if idx not in mtd_table:
             continue
+        guard_write(idx, "flash-uboot")
         out = tn.sh("dd if=/tmp/ub.bin of=/dev/mtdblock%d bs=%d count=1 2>&1"
                     % (idx, UBOOT_SLOT_LEN), 20.0)
         info("   mtd%-2d %-18s %s" % (idx, nm, out.strip().splitlines()[-1][:90] if out.strip() else ""))
@@ -2014,6 +2077,7 @@ def _do_reset_overlay(tn, args, fw, mtd_table):
     if args.dry_run:
         info("     --dry-run：未擦")
         return
+    guard_write(o["mtd"], "reset-overlay")
     out = tn.sh("dd if=/dev/zero of=/dev/mtdblock%d bs=%d count=%d 2>&1 | tail -1"
                 % (o["mtd"], DD_BS, o["len"] // DD_BS), 30.0)
     info("     " + out.strip()[:200])
@@ -2076,4 +2140,13 @@ def detect_pc_ip(target):
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except RefusedWrite as e:
+        print()
+        print("=" * 68)
+        print(" 写入已被安全门禁拒绝 —— 没有写入任何分区")
+        print("=" * 68)
+        print("   " + str(e))
+        print()
+        sys.exit(6)
