@@ -632,6 +632,90 @@ else
 fi
 
 # ══════════════════════════════════════════════════════════════════
+sec "12. getroot 脚本（免拆机拿原厂 root）"
+# ══════════════════════════════════════════════════════════════════
+# 这套脚本是「普通用户不进 TTL 就能拿 root」的唯一现成路径，但它们
+#   a) 含中文，必须是 UTF-8
+#   b) 由 Windows CRLF 环境搬来，必须 LF（否则板上/python3 都别扭）
+#   c) 会临时改本机网络，README 里写明了还原方式
+#   d) negative/ 是故意保留的失败记录，删了就有人再撞一次
+GR="$SRC/tools/getroot"
+if [ -d "$GR" ]; then
+	ok "存在 tools/getroot/"
+
+	# 唯一推荐的主脚本：自包含（只依赖 scapy），且在 README 里被点名
+	if [ -f "$GR/rawtcp_gw.py" ]; then
+		ok "rawtcp_gw.py 在位（推荐路径）"
+		if grep -q 'rawtcp_gw.py' "$GR/README.md"; then
+			ok "README 点名了 rawtcp_gw.py"
+		else
+			bad "README 没提 rawtcp_gw.py，别人不知道该用哪个"
+		fi
+		# 关键设计不能被人「优化」掉：不加别名 / 每条连接重建 Elink
+		if grep -q 'skipassource' "$GR/rawtcp_gw.py" && 		   grep -qiE '一律不碰|不给本机加|不断本机网' "$GR/rawtcp_gw.py"; then
+			ok "rawtcp_gw.py 保留了「不加 IP 别名」的设计说明"
+		else
+			warn "rawtcp_gw.py 里找不到「不加别名」的说明，改代码时容易退回断网版本"
+		fi
+	else
+		bad "缺 tools/getroot/rawtcp_gw.py"
+	fi
+
+	# 反面证据必须保留：SSDP 与「只毒化不加别名」两条路已被实测否定
+	for f in negative/getroot2.py negative/ssdpbrute.py; do
+		if [ -f "$GR/$f" ]; then
+			ok "反面证据在位：$f"
+		else
+			bad "缺 $GR/$f（删了它，后来的人会再撞一次同样的墙）"
+		fi
+	done
+
+	# legacy 四件套被 docs/GETROOT-AND-NORMAL-USER-FLASH.md §1.1 按名引用
+	for f in legacy/getroot.py legacy/poison.py legacy/elink_gw4.py legacy/srv.py; do
+		if [ -f "$GR/$f" ]; then
+			ok "legacy 在位：$f"
+		else
+			warn "缺 $GR/$f（docs/GETROOT-AND-NORMAL-USER-FLASH.md §1.1 会变成断链）"
+		fi
+	done
+
+	# 编码 / 换行 / 末尾换行 / 语法：全部 .py 逐个查
+	npy=0
+	for f in "$GR"/*.py "$GR"/negative/*.py "$GR"/legacy/*.py; do
+		[ -f "$f" ] || continue
+		npy=$((npy + 1))
+		rel=${f#$SRC/}
+		if grep -q $'\r' "$f" 2>/dev/null; then
+			bad "$rel 含 CRLF（应统一 LF）"
+		fi
+		if [ -n "$(tail -c1 "$f")" ]; then
+			bad "$rel 缺末尾换行"
+		fi
+		if command -v python3 >/dev/null 2>&1; then
+			if ! python3 -c "import ast,sys
+ast.parse(open(sys.argv[1],encoding='utf-8').read())" "$f" 2>/dev/null; then
+				bad "$rel 语法不通过（python3 ast.parse 失败）"
+			fi
+		fi
+	done
+	ok "getroot 下 $npy 个 .py 编码/换行/语法全过"
+
+	# 危险动作必须在文档里被写明，不能只活在代码注释里
+	if grep -qE 'ARP|毒化|断网|alias|别名' "$GR/README.md"; then
+		ok "README 写明了 ARP 毒化 / 别名 / 断网风险"
+	else
+		bad "README 没写风险（ARP 毒化与别名都会改本机网络）"
+	fi
+	if grep -qE '自己(拥有|的)设备|仅限|只在你自己' "$GR/README.md"; then
+		ok "README 有限用声明（只在自己的设备上用）"
+	else
+		warn "README 缺限用声明"
+	fi
+else
+	bad "缺 tools/getroot/（免拆机拿 root 的脚本没进仓库）"
+fi
+
+# ══════════════════════════════════════════════════════════════════
 sec "总结"
 # ══════════════════════════════════════════════════════════════════
 echo ""

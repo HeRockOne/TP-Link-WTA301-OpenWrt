@@ -102,6 +102,7 @@
 | `files-ipq50xx-upgrade/` | `platform.sh`（系统内升级的板级实现） |
 | `deliver/` | 应用脚本、出包脚本、验收脚本 |
 | `tools/` | 校验 / 刷写 / 串口 / 三方差异表工具 |
+| `tools/getroot/` | **免拆机拿原厂 root** 的脚本（`rawtcp_gw.py`）+ 反面证据 + 失败模式。见 `tools/getroot/README.md` |
 | `pin/` | 事实快照（上游 `.config`、S7 基线、板级实测数据） |
 | `docs/` | 分析、风险登记、阶段记录、外部证据、复现指南 |
 | `evidence/` | 实测日志 |
