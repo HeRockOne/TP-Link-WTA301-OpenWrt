@@ -1268,6 +1268,114 @@ def restore_bslot(tn, args, mtd_table, pc_ip, kset, kpath, rpath):
 # 安全审计（只读，什么都不写）
 # ---------------------------------------------------------------------------
 
+def do_check_kit():
+    """核对本目录下的文件是否齐全、md5 是否正确。完全离线，不碰设备。
+
+    为什么需要这个命令：Windows 的 Get-Content 默认按 GBK 读文本，
+    直接 `Get-Content MD5SUMS.txt` 会把中文文件名读成乱码，导致核对失败。
+    用 Python 读就没有这个问题。
+    """
+    import hashlib
+
+    base = HERE
+    info("")
+    info("[K] 工具包自检（完全离线，不碰设备）")
+    info("    目录: %s" % base)
+
+    # 必需文件
+    required = [
+        ("wta301-getroot.py", "主程序"),
+        ("srv.py", "HTTP 服务（主程序依赖）"),
+        ("elink_gw4.py", "e-Link 模拟器（主程序依赖）"),
+    ]
+    optional = [
+        ("stock/mtd5_kernel.bin", "原厂 A 槽 2.0.2 内核", 0x400000,
+         "170b2188884cc040d64ac5bed7ddc365"),
+        ("stock/mtd6_rootfs.bin", "原厂 A 槽 2.0.2 rootfs", 0xC00000,
+         "30f487419d90b2239b65035390f3b73f"),
+        ("stock/mtd10_kernel_bak.bin", "原厂 B 槽 4.4.60 内核", 0x400000,
+         "2868d8e975da7c641e54c72b6beb8f26"),
+        ("stock/mtd11_rootfs_bak.bin", "原厂 B 槽 4.4.60 rootfs", 0xC00000,
+         "bf2f92ceaf509093c8854825f2dc8d5e"),
+        ("images/wta301-op-25.12.6-p29.bin", "OpenWrt p29 完整包", PKG_TOTAL,
+         "c5ac0911accd2ec48033329c383d5c4c"),
+        ("images/wta301-op-25.12.6-p29-sysupgrade.bin", "OpenWrt p29 sysupgrade", 0,
+         "76df463df4d8b5acba5d52852870c127"),
+        ("images/wta301-uboot-p21c.bin", "u-boot kit", 0x40000,
+         "d0ada9f76e4f1aba9b96a559a5220cee"),
+    ]
+
+    bad = 0
+    info("")
+    info("   必需文件:")
+    for rel, desc in required:
+        p = os.path.join(base, rel)
+        if not os.path.exists(p):
+            info("     !! 缺 %-22s %s" % (rel, desc))
+            bad += 1
+            continue
+        info("     OK %-22s %6d B  %s" % (rel, os.path.getsize(p), desc))
+
+    info("")
+    info("   镜像文件（只认 md5，不认文件名）:")
+    for rel, desc, size, md5 in optional:
+        p = os.path.join(base, rel)
+        if not os.path.exists(p):
+            # 缺镜像也算问题：这个包的定位就是「一个目录装齐全部文件」，
+            # 少一个就说明拷贝/解压不完整。
+            info("     !! 缺 %-40s %s" % (rel, desc))
+            bad += 1
+            continue
+        sz = os.path.getsize(p)
+        got = _md5_file(p)
+        flag = "OK"
+        if md5 and got != md5:
+            flag = "!!"
+            bad += 1
+        if size and sz != size:
+            flag = "!!"
+            bad += 1
+        info("     %s %-40s %8d B  %s" % (flag, rel, sz, got))
+        if flag == "!!":
+            if md5 and got != md5:
+                info("        期望 md5 %s" % md5)
+            if size and sz != size:
+                info("        期望大小 %d" % size)
+
+    # 各项能力各自需要哪些文件 —— 缺一个就不 可以
+    def have(rel):
+        return os.path.exists(os.path.join(base, rel))
+
+    # 取 root 必须同时有主程序与两个依赖（Servers.start() 会 find_script 找它们）
+    missing_root = [r for r in ("wta301-getroot.py", "srv.py", "elink_gw4.py")
+                    if not have(r)]
+    missing_a = [r for r in ("stock/mtd5_kernel.bin", "stock/mtd6_rootfs.bin")
+                 if not have(r)]
+    missing_b = [r for r in ("stock/mtd10_kernel_bak.bin",
+                             "stock/mtd11_rootfs_bak.bin") if not have(r)]
+    missing_op = [r for r in ("images/wta301-op-25.12.6-p29.bin",)
+                  if not have(r)]
+    missing_ub = [r for r in ("images/wta301-uboot-p21c.bin",) if not have(r)]
+
+    def verdict(missing, why):
+        return "可以" if not missing else "缺 " + " / ".join(missing)
+
+    info("")
+    info("   可用能力:")
+    info("     取 root            %s" % verdict(missing_root, ""))
+    info("     刷 OpenWrt         %s" % verdict(missing_op, ""))
+    info("     刷 u-boot kit      %s" % verdict(missing_ub, ""))
+    info("     刷回原厂（A 槽）   %s" % verdict(missing_a, ""))
+    info("     修 B 槽            %s" % verdict(missing_b, ""))
+
+    info("")
+    if bad == 0:
+        info("   == 结论：自检通过，没有发现问题 ==")
+        return 0
+    info("   !! 有 %d 处问题，看上面标 !! 的行" % bad)
+    return 5
+
+
 def do_verify(tn, mtd_table):
     """把全部逃生出口列出来：现在到底有几条命。"""
     info("")
@@ -1488,6 +1596,10 @@ def _first_md5(text):
 def main():
     _utf8_stdout()
 
+    # --check-kit 完全离线，必须在连设备之前处理
+    if "--check-kit" in sys.argv[1:]:
+        return do_check_kit()
+
     argv = sys.argv[1:]
     interactive = not argv or argv[0] in ("-i", "--interactive", "menu")
     if not interactive:
@@ -1675,6 +1787,8 @@ def run_cli(argv):
                     metavar="{stock,openwrt}",
                     help="同时擦除指定固件的 overlay（默认不碰）")
     ap.add_argument("--explain", action="store_true", help="打印分区表与陷阱后退出")
+    ap.add_argument("--check-kit", action="store_true",
+                    help="离线核对工具包内文件是否齐全、md5 是否正确（不碰设备）")
     ap.add_argument("--yes", "-y", action="store_true", help="不等确认，直接执行")
     # 内部用：菜单跳过 argparse 的必填校验
     argv = [a for a in argv if a != "--interactive-ok"]

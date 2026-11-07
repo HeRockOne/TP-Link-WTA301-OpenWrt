@@ -44,26 +44,13 @@ if errorlevel 1 (
 )
 echo   cryptography OK
 
-rem ---- check files ----
-set MISS=0
-for %%f in (wta301-getroot.py srv.py elink_gw4.py) do (
-    if not exist "%%f" (
-        echo   [X] 缺文件: %%f
-        set MISS=1
-    )
-)
-for %%f in (stock\mtd5_kernel.bin stock\mtd6_rootfs.bin stock\mtd10_kernel_bak.bin stock\mtd11_rootfs_bak.bin) do (
-    if not exist "%%f" (
-        echo   [X] 缺文件: %%f
-        set MISS=1
-    )
-)
-if "!MISS!"=="1" (
+rem ---- check files (含 md5) ----
+python wta301-getroot.py --check-kit
+if errorlevel 1 (
     echo.
-    echo   整个解压出来的目录要一起拷走，不要只拷 .py 文件。
+    echo   工具包文件有问题，先把整个目录重新解压一遍再试。
     goto :end
 )
-echo   必需文件齐全
 echo.
 
 rem ---- device ip ----

@@ -52,7 +52,7 @@ wta301-kit/
     └─ README-刷机说明.txt                  原 TTL 刷机流程
 ```
 
-`启动.bat` 的菜单：
+`启动.bat` 打开后**先做离线自检**（`--check-kit`，0.4 秒），再问 IP，再进菜单：
 
 ```
 1  只取 root
@@ -67,6 +67,55 @@ wta301-kit/
 ```
 
 每个写入类操作都先跑 `--dry-run` 打印计划，用户敲 `y` 才真正写。
+
+---
+
+## 2b. `--check-kit` 离线自检
+
+```
+python wta301-getroot.py --check-kit
+```
+
+不联网、不碰设备，0.38 秒。逐项核对 13 个文件的 md5，并按「能力」汇总：
+
+```
+必需文件:
+  OK wta301-getroot.py       97251 B  主程序
+  OK srv.py                    884 B  HTTP 服务（主程序依赖）
+  OK elink_gw4.py             4816 B  e-Link 模拟器（主程序依赖）
+
+镜像文件（只认 md5，不认文件名）:
+  OK stock/mtd5_kernel.bin   ...  170b2188884cc040d64ac5bed7ddc365
+  ...
+
+可用能力:
+  取 root            可以
+  刷 OpenWrt         可以
+  刷 u-boot kit      可以
+  刷回原厂（A 槽）   可以
+  修 B 槽            可以
+
+== 结论：自检通过，没有发现问题 ==    退出码 0
+```
+
+**为什么需要它**：Windows 的 `Get-Content MD5SUMS.txt` 默认按 GBK 读文本，
+清单里的中文文件名会变乱码，导致 `Test-Path` 找不到文件而误报。用 Python 读
+就没有这个问题。`使用说明.txt` 里已写明不要用 Get-Content 核对。
+
+### 故障注入测试（四种都抓到了）
+
+| 制造的问题 | 输出 | 退出码 |
+|---|---|---|
+| 改 `stock/mtd5_kernel.bin` 第 1000 字节 | `!!` + 实得 md5 + 期望 md5 | 5 |
+| 删 `srv.py` | `!! 缺 srv.py` + `取 root  缺 srv.py` | 5 |
+| 删 `stock/mtd11_rootfs_bak.bin` | `!! 缺 ...` + `修 B 槽  缺 ...` | 5 |
+| 改 `stock/mtd6_rootfs.bin` 第 999 字节 | `!!` + md5 不符 | 5 |
+
+修掉的两个自己写的 bug：
+
+1. 能力判定原本写成 `("可以" if bad == 0 or True else "?")` —— 恒真，缺依赖也报「可以」。
+2. 可选镜像缺失时只 `continue` 不计入 `bad`，导致少一个文件也报「自检通过」。
+   现在缺任何镜像都算问题（这个包的定位就是「一个目录装齐全部」）。
 
 ---
 
