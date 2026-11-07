@@ -32,6 +32,8 @@ param(
     [string] $StockDir,
     [string] $BackupDir,
     [string] $TtlPort,
+    [string] $Password,
+    [string] $Kind,
     [switch] $SelfTest,
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]] $Rest
@@ -114,6 +116,16 @@ function Stop-BackgroundService {
 # ===========================================================================
 # 输出
 # ===========================================================================
+
+# 输出编码：只有 stdout 被重定向时（管道、`> file`、被别的程序调用）
+# PowerShell 5.1 会用 [Console]::OutputEncoding（中文系统上是 GBK）去编码，
+# 部分字符会变成 '?'，中文被截断。真实控制台窗口不走这条路（WriteConsoleW，
+# 直接 Unicode），所以只在重定向时改成 UTF-8，两者都对。
+try {
+    if ([Console]::IsOutputRedirected) {
+        [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false
+    }
+} catch { }
 function Write-Log {
     param([string]$Text, [string]$Level = 'INFO')
     $line = "[{0}] {1}" -f (Get-Date -Format 'HH:mm:ss'), $Text
@@ -570,6 +582,195 @@ function Start-ElinkServer {
 #       { <cmd> ; } 2>&1; echo <tag>$?
 #   哨兵必须「独占行首 + 紧跟数字」，否则回显里含 tag 会立刻误命中。
 # ===========================================================================
+# ===========================================================================
+# SSH 会话（OpenWrt 用这条路）
+#
+# OpenWrt 本来就有 root，不需要 getroot —— 用户输密码就能进。
+# 原厂固件反过来：没 SSH、也没有能用的密码，只能靠 getroot 打进去。
+#
+# 实现上不自建 SSH 客户端（PowerShell 里实现 DH+AES 的 SSH 握手太重），
+# 直接调 Windows 10/11 自带的 OpenSSH（System32\OpenSSH\ssh.exe）。
+# 密码通过 SSH_ASKPASS 喂进去（OpenSSH 8.4+ 的 SSH_ASKPASS_REQUIRE=force），
+# 因为 ssh.exe 是直接读控制台，管道喂 stdin 不可靠。
+# ===========================================================================
+
+function Get-SshExe {
+    $c = @(
+        "$env:SystemRoot\System32\OpenSSH\ssh.exe",
+        "$env:SystemRoot\Sysnative\OpenSSH\ssh.exe"
+    )
+    foreach ($p in $c) { if (Test-Path -LiteralPath $p) { return $p } }
+    throw "找不到 Windows 自带的 ssh.exe（$env:SystemRoot\System32\OpenSSH\ssh.exe）。"
+}
+
+function New-AskpassFile {
+    # 造一个只输出密码的小 .cmd，给 ssh 用。
+    # 放在用户临时目录，用完立刻删（Send-FileToDevice 那套别把密码留在盘上）。
+    param([string]$Password)
+    $dir = Join-Path $env:TEMP ("wta301ap_" + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    New-Item -ItemType Directory -Force -Path $dir | Out-Null
+    $f = Join-Path $dir 'ap.cmd'
+    # 密码里的特殊字符在 cmd 里要转义
+    $esc = $Password -replace '([\^&|<>%])', '^$1'
+    Set-Content -LiteralPath $f -Value ("@echo " + $esc) -Encoding ASCII
+    return $f
+}
+
+function Open-SshSession {
+    param([string]$Ip, [string]$User = 'root', [string]$Password,
+          [string]$SshExe)
+
+    if (-not $SshExe) { $SshExe = Get-SshExe }
+    if (-not $Password) { throw "没有密码。OpenWrt 的 root 密码必须由用户提供，工具不猜。" }
+
+    $ask = New-AskpassFile -Password $Password
+    $oldAsk = $env:SSH_ASKPASS
+    $oldReq = $env:SSH_ASKPASS_REQUIRE
+    $oldDis = $env:DISPLAY
+    $env:SSH_ASKPASS = $ask
+    $env:SSH_ASKPASS_REQUIRE = 'force'
+    $env:DISPLAY = 'localhost:0'
+    try {
+        $sess = @{
+            Kind = 'ssh'; Ip = $Ip; User = $User; SshExe = $SshExe
+            Ask = $ask; Alive = $true
+        }
+        $r = Invoke-SshRaw -Sess $sess -Script 'echo __SSH_OK__; uname -r' -TimeoutSec 40
+        if ($r -notmatch '__SSH_OK__') { throw "SSH 登录失败（密码不对？）：$r" }
+        return $sess
+    } catch {
+        Remove-Item -LiteralPath (Split-Path $ask -Parent) -Recurse -Force -ErrorAction SilentlyContinue
+        throw
+    } finally {
+        # 这几条环境变量在 ssh 子进程里已经被读走了，退出前还原
+        $env:SSH_ASKPASS = $oldAsk
+        $env:SSH_ASKPASS_REQUIRE = $oldReq
+        $env:DISPLAY = $oldDis
+    }
+}
+
+function Invoke-SshRaw {
+    <#
+        跑一条 SSH 命令，返回它的 stdout。
+
+        关键点（全部实测过，改了会坏）：
+        1) 脚本走 `< 文件`，不要 `type 文件 | ssh`。
+           管道会让 ssh 的 stdin 变成管道，它就回去读控制台等密码，卡到超时。
+           `< 文件` 是真正的 stdin 重定向，ssh 老实读脚本，SSH_ASKPASS 正常工作。
+        2) 脚本必须 LF，不能 CRLF。CRLF 会让远端把 \r 当参数一部分
+           （uname -r 报 unrecognized option）。
+        3) 命令不要拼成 `ssh host "命令"`。cmd.exe 不认 \" 转义，
+           双引号会被 cmd 吃掉一半，远端收到半条命令
+           （ash: syntax error: unexpected end of file）。
+    #>
+    param($Sess, [string]$Script, [int]$TimeoutSec = 60)
+
+    $id = [guid]::NewGuid().ToString('N').Substring(0, 8)
+    $shF = Join-Path $env:TEMP "wta301_$id.sh"
+    $baF = Join-Path $env:TEMP "wta301_$id.bat"
+    $ouF = Join-Path $env:TEMP "wta301_$id.out"
+    $erF = Join-Path $env:TEMP "wta301_$id.err"
+
+    $body = (($Script -replace "`r`n", "`n") -replace "`r", "`n") + "`n"
+    [IO.File]::WriteAllText($shF, $body, (New-Object Text.UTF8Encoding $false))
+
+    $remote = ("{0}@{1}" -f $Sess.User, $Sess.Ip)
+    $bat = @(
+        '@echo off'
+        ('set "SSH_ASKPASS=' + $Sess.Ask + '"')
+        'set "SSH_ASKPASS_REQUIRE=force"'
+        'set "DISPLAY=localhost:0"'
+        ('"' + $Sess.SshExe + '" -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL ' +
+         '-o LogLevel=ERROR -o PubkeyAuthentication=no ' +
+         '-o PreferredAuthentications=password,keyboard-interactive ' +
+         '-o NumberOfPasswordPrompts=1 -o ConnectTimeout=10 ' +
+         $remote + ' sh -s < "' + $shF + '" > "' + $ouF + '" 2> "' + $erF + '"')
+        'exit /b %ERRORLEVEL%'
+    )
+    [IO.File]::WriteAllLines($baF, $bat, (New-Object Text.UTF8Encoding $false))
+
+    try {
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName  = (Join-Path $env:SystemRoot 'System32\cmd.exe')
+        $psi.Arguments = ('/c "' + $baF + '"')
+        $psi.UseShellExecute = $false
+        $psi.CreateNoWindow = $true
+        $pr = [System.Diagnostics.Process]::Start($psi)
+        if (-not $pr.WaitForExit($TimeoutSec * 1000)) {
+            try { $pr.Kill() } catch { }
+            throw ("SSH 命令超时（{0}s）" -f $TimeoutSec)
+        }
+        $code = $pr.ExitCode
+        $so = ''
+        $se = ''
+        if (Test-Path -LiteralPath $ouF) { $so = [IO.File]::ReadAllText($ouF) }
+        if (Test-Path -LiteralPath $erF) { $se = [IO.File]::ReadAllText($erF) }
+        if ($code -ne 0) {
+            $m = (($se + "`n" + $so).Trim())
+            if ($m -match 'Permission denied|Authentication failed') { throw "SSH 密码不对" }
+            throw ("SSH 失败（exit {0}）：{1}" -f $code, $m)
+        }
+        return ($so -replace "`r", '')
+    } finally {
+        foreach ($f in @($shF, $baF, $ouF, $erF)) {
+            Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Enable-ShellChannel {
+    <#
+        OpenWrt 的入口是 SSH（有密码）。为了复用原厂那条已经调通的 telnet 通道，
+        先试着把 telnetd 拉起来。
+
+        但实测这块板的 OpenWrt（busybox 1.37）**没有 telnetd applet**
+        （`busybox telnetd` -> applet not found），nc 也只有客户端模式。
+        所以起不来是正常情况，不是错误 —— 起不来就直接用 SSH 通道。
+
+        SSH 通道可用的依据：命令走 `< 脚本文件` 而不是行内引号，
+        多行脚本、管道、$(...)、重定向全都正常（实测跑通了整段探测脚本）。
+        代价是每条命令重建一次连接（约 1 秒），刷机总共二三十条，可以接受。
+    #>
+    param([string]$DeviceIp, [string]$Password, [int]$Port = 2323)
+
+    $sess = Open-SshSession -Ip $DeviceIp -User 'root' -Password $Password
+    $ok = $false
+    try {
+        $chk = Invoke-SshRaw -Sess $sess -Script 'busybox 2>&1 | tr "," "\n" | grep -cx telnetd || true' -TimeoutSec 30
+        if ($chk -match '^\s*1\s*$') {
+            Write-Info "   设备有 telnetd，拉起来以复用 telnet 通道"
+            $sc = "( /bin/busybox telnetd -l /bin/sh -p __P__ >/dev/null 2>&1 & ) ; sleep 1 ; echo STARTED"
+            $sc = $sc -replace '__P__', $Port
+            [void](Invoke-SshRaw -Sess $sess -Script $sc -TimeoutSec 40)
+            $deadline = [Environment]::TickCount + 8000
+            while ([Environment]::TickCount -lt $deadline) {
+                if (Test-PortOpen -Ip $DeviceIp -TcpPort $Port -TimeoutMs 700) { $ok = $true; break }
+                Start-Sleep -Milliseconds 350
+            }
+        } else {
+            Write-Info "   设备没有 telnetd applet（busybox 精简过）"
+        }
+    } finally {
+        Close-SshSession -Sess $sess
+    }
+
+    if ($ok) {
+        Write-Ok ("   通道: telnet {0}:{1}" -f $DeviceIp, $Port)
+        return @{ Mode = 'telnet'; Port = $Port }
+    }
+    Write-Ok "   通道: SSH（每条命令一次连接；命令走 stdin，不受引号影响）"
+    return @{ Mode = 'ssh' }
+}
+
+function Close-SshSession {
+    param($Sess)
+    if (-not $Sess) { return }
+    if ($Sess.Ask) {
+        $d = Split-Path $Sess.Ask -Parent
+        Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Connect-Device {
     param([string]$Ip, [int]$TcpPort = 2323, [int]$TimeoutMs = 6000)
     $c = [System.Net.Sockets.TcpClient]::new()
@@ -587,6 +788,7 @@ function Connect-Device {
 function Close-Device {
     param($Sess)
     if (-not $Sess) { return }
+    if ($Sess.Kind -eq 'ssh') { Close-SshSession -Sess $Sess; return }
     try { $Sess.Stream.Close() } catch { }
     try { $Sess.Client.Close() } catch { }
 }
@@ -599,6 +801,46 @@ function Send-Raw {
 }
 
 # 读一会儿，返回已经收到的字节
+function Send-Background {
+    <#
+        在设备上起一个不等的后台任务（备份的 dd|nc、reboot 都走这里）。
+        telnet：直接写进 socket，后面不读它就行。
+        SSH：启动一个不等待的子进程（ssh 读完 stdin 脚本就退出，
+             但里面用 & 起的 nc/dd 是设备侧后台，不受影响）。
+        返回值对调用方无意义，失败才抛。
+    #>
+    param($Sess, [string]$Text)
+
+    if ($Sess.Kind -eq 'ssh') {
+        $id = [guid]::NewGuid().ToString('N').Substring(0, 8)
+        $shF = Join-Path $env:TEMP "wta301_$id.sh"
+        $baF = Join-Path $env:TEMP "wta301_$id.bat"
+        $body = (($Text -replace "`r`n", "`n") -replace "`r", "`n") + "`n"
+        [IO.File]::WriteAllText($shF, $body, (New-Object Text.UTF8Encoding $false))
+        $remote = ("{0}@{1}" -f $Sess.User, $Sess.Ip)
+        $bat = @(
+            '@echo off'
+            ('set "SSH_ASKPASS=' + $Sess.Ask + '"')
+            'set "SSH_ASKPASS_REQUIRE=force"'
+            'set "DISPLAY=localhost:0"'
+            ('"' + $Sess.SshExe + '" -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL ' +
+             '-o LogLevel=ERROR -o PubkeyAuthentication=no ' +
+             '-o PreferredAuthentications=password,keyboard-interactive ' +
+             '-o NumberOfPasswordPrompts=1 -o ConnectTimeout=10 ' +
+             $remote + ' sh -s < "' + $shF + '" > NUL 2> NUL')
+        )
+        [IO.File]::WriteAllLines($baF, $bat, (New-Object Text.UTF8Encoding $false))
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = (Join-Path $env:SystemRoot 'System32\cmd.exe')
+        $psi.Arguments = ('/c "' + $baF + '"')
+        $psi.UseShellExecute = $false
+        $psi.CreateNoWindow = $true
+        [void][System.Diagnostics.Process]::Start($psi)   # 不等
+        return
+    }
+    Send-Raw -Sess $Sess -Text $Text
+}
+
 function Read-For {
     param($Sess, [int]$Milliseconds)
     $buf = New-Object System.IO.MemoryStream
@@ -632,6 +874,12 @@ function Clear-Pending {
 #>
 function Invoke-Cmd {
     param($Sess, [string]$Command, [int]$TimeoutSec = 300)
+
+    # SSH 会话不该走到这里：OpenWrt 路径只做一次 SSH 拉 telnetd，
+    # 之后统一用 telnet（不需要密码、也就不用受 Windows ssh.exe 的气）。
+    if ($Sess.Kind -eq 'ssh') {
+        return Invoke-SshRaw -Sess $Sess -Script $Command -TimeoutSec $TimeoutSec
+    }
 
     $tag = "QZ{0:x8}ZQ" -f (Get-Random -Minimum 1 -Maximum 2147483647)
     Clear-Pending -Sess $Sess
@@ -697,7 +945,14 @@ function Get-LocalMd5 {
 # ===========================================================================
 function Get-MtdTable {
     param($Sess)
-    $cmd = 'for d in /sys/class/mtd/mtd*; do echo "${d##*/} $(cat $d/offset) $(cat $d/size) $(cat $d/name 2>/dev/null)"; done'
+    # 注意：不要用 glob /sys/class/mtd/mtd*。
+    # 那个目录里除了 mtd0..mtd13 还有 mtd0ro..mtd13ro（字符设备），
+    # glob 会把它们一起吃进来，读 mtdNro 会卡住（实测挂 30s 超时）。
+    # 用显式编号 + [ -d ] 判断，绕开所有 ro 设备。
+    $cmd = 'for i in 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19; do ' +
+           'p=/sys/class/mtd/mtd$i; ' +
+           '[ -d $p ] && echo "mtd$i $(cat $p/offset) $(cat $p/size) $(cat $p/name 2>/dev/null)"; ' +
+           'done; true'
     $raw = Invoke-Cmd -Sess $Sess -Command $cmd -TimeoutSec 60
     $tbl = @{}
     foreach ($line in ($raw -split "`n")) {
@@ -945,8 +1200,8 @@ function Invoke-Backup {
         }
         # 设备侧一次性全发起来（& 后台）。telnet 只下命令，不参与搬数据。
         for ($k = 0; $k -lt $batch.Count; $k++) {
-            Send-Raw -Sess $Sess -Text ("(dd if=/dev/mtdblock{0} bs=65536 2>/dev/null | nc {1} {2}) &" -f `
-                                        $batch[$k].Index, $PcIp, ($script:NC_PORT + $k))
+            Send-Background -Sess $Sess -Text ("(dd if=/dev/mtdblock{0} bs=65536 2>/dev/null | nc {1} {2}) &" -f `
+                                            $batch[$k].Index, $PcIp, ($script:NC_PORT + $k))
         }
         Start-Sleep -Milliseconds 300
 
@@ -1045,16 +1300,77 @@ function Resolve-WriteTarget {
 }
 
 # 设备侧下载一个本地文件，返回设备上的路径
+function Get-RangeMd5 {
+    # 取文件某一段的 md5（不整文件读入内存，17MB 包也没问题）
+    param([string]$Path, [int64]$Offset, [int64]$Length)
+    $fs = [IO.File]::OpenRead($Path)
+    try {
+        [void]$fs.Seek($Offset, 'Begin')
+        $md5 = [System.Security.Cryptography.MD5]::Create()
+        $buf = New-Object byte[] 1048576
+        $left = $Length
+        while ($left -gt 0) {
+            $want = [int][Math]::Min($buf.Length, $left)
+            $n = $fs.Read($buf, 0, $want)
+            if ($n -le 0) { break }
+            [void]$md5.TransformBlock($buf, 0, $n, $null, 0)
+            $left -= $n
+        }
+        [void]$md5.TransformFinalBlock((New-Object byte[] 0), 0, 0)
+        return (($md5.Hash | ForEach-Object { $_.ToString('x2') }) -join '')
+    } finally { $fs.Close() }
+}
+
+function Get-RelUrlPath {
+    # HTTP 服务的根是 kit 目录，文件在 images 或 uboot 等子目录里。
+    # 所以 URL 必须带上相对路径，只发文件名会 404。
+    param([string]$LocalPath)
+    $root = [IO.Path]::GetFullPath($script:Here)
+    $full = [IO.Path]::GetFullPath($LocalPath)
+    if (-not $root.EndsWith('\')) { $root += '\' }
+    if ($full.StartsWith($root, 'OrdinalIgnoreCase')) {
+        $rel = $full.Substring($root.Length)
+    } else {
+        # 文件不在 kit 目录里（用户自己指定了别处的包）：
+        # 拷一份到 kit 目录下，服务才取得到。
+        $name = Split-Path $full -Leaf
+        $copy = Join-Path $root $name
+        if (-not (Test-Path -LiteralPath $copy) -or
+            (Get-LocalMd5 $copy) -ne (Get-LocalMd5 $full)) {
+            Copy-Item -LiteralPath $full -Destination $copy -Force
+        }
+        $rel = $name
+    }
+    return (($rel -split '[\\/]') | ForEach-Object { [uri]::EscapeDataString($_) }) -join '/'
+}
+
 function Send-FileToDevice {
     param($Sess, [string]$LocalPath, [string]$PcIp, [string]$RemoteName)
-    $name = Split-Path $LocalPath -Leaf
-    $url  = "http://{0}:{1}/{2}" -f $PcIp, $script:SRV_PORT, [uri]::EscapeDataString($name)
+    if (-not (Test-Path -LiteralPath $LocalPath)) { throw "文件不存在：$LocalPath" }
+    $rel  = Get-RelUrlPath -LocalPath $LocalPath
+    $url  = "http://{0}:{1}/{2}" -f $PcIp, $script:SRV_PORT, $rel
     $dst  = "/tmp/$RemoteName"
-    $out  = Invoke-Cmd -Sess $Sess -TimeoutSec 600 -Command `
-            ("cd /tmp && wget -O {0} '{1}' 2>&1 | tail -3" -f $RemoteName, $url)
-    if (-not $out) { $out = "" }
     $want = Get-LocalMd5 -Path $LocalPath
-    $got  = Get-FirstMd5 (Invoke-Cmd -Sess $Sess -TimeoutSec 120 -Command "md5sum $dst")
+    $wsize = (Get-Item -LiteralPath $LocalPath).Length
+
+    # 先删旧文件：否则 wget 失败时会拿上一次的残留下判断，看起来像成功
+    [void](Invoke-Cmd -Sess $Sess -TimeoutSec 60 -Command ("rm -f {0}" -f $dst))
+
+    Write-Info ("上传 {0} -> {1}  ({2} 字节)" -f $rel, $dst, $wsize)
+    $out = Invoke-Cmd -Sess $Sess -TimeoutSec 900 -Command `
+           ("cd /tmp && wget -O {0} '{1}' 2>&1 | tail -4" -f $RemoteName, $url)
+    if ($out) { Write-Info ("   wget: " + ($out -replace "`r?`n", " | ")) }
+
+    $sysize = Invoke-Cmd -Sess $Sess -TimeoutSec 60 -Command `
+              ("wc -c < {0} 2>/dev/null || echo 0" -f $dst)
+    $sysize = ("$sysize" -replace '[^0-9]', '')
+    if (-not $sysize) { $sysize = '0' }
+
+    if ([int64]$sysize -ne [int64]$wsize) {
+        $why = if ($out -match 'not found|404|failed|error') { "（wget 报错，看上面 wget 行）" } else { "" }
+        throw ("上传不完整：设备 {0} 字节 / 本地 {1} 字节{2}。URL={3}" -f $sysize, $wsize, $why, $url)
+    }
+    $got = Get-FirstMd5 (Invoke-Cmd -Sess $Sess -TimeoutSec 300 -Command "md5sum $dst")
     if ($got -ne $want) {
         throw ("传输后 md5 不符：本地 {0}  设备 {1}（{2}）" -f $want, $got, $dst)
     }
@@ -1106,8 +1422,39 @@ function Invoke-FlashOpenWrt {
     Write-Info ("   " + (Invoke-Cmd -Sess $Sess -TimeoutSec 900 -Command $cmd).Replace("`n", "`n   "))
 
     Invoke-Cmd -Sess $Sess -Command "sync" -TimeoutSec 60 | Out-Null
-    Write-Ok "写入完成，准备重启"
-    if (-not $Keep) { Send-Raw -Sess $Sess -Text "reboot" ; Start-Sleep -Seconds 8 }
+
+    # ---- 写入后回读校验（AGENTS.md 5.5：不能只信 dd 的 "records out"）----
+    # 内核：包内 0x20000..0x4a0000 那 0x480000 字节
+    # rootfs：包内 0x4a0000..EOF
+    Write-Info "回读校验..."
+    $chk = @(
+        @{ What='内核';   Dev="/dev/mtdblock$($kt.Index)"; Seek=$kt.SeekBlocks; Blocks=72;        PkgSkip=2
+           PkgLen=0x480000 },
+        @{ What='rootfs'; Dev="/dev/mtdblock$($rt.Index)"; Seek=$rt.SeekBlocks; Blocks=$blocks;   PkgSkip=74
+           PkgLen=$rLen }
+    )
+    $bad = @()
+    foreach ($c in $chk) {
+        # 设备端：从闪存读回这一段，算 md5
+        $devMd5 = Invoke-Cmd -Sess $Sess -TimeoutSec 900 -Command `
+                  ("dd if={0} bs=65536 skip={1} count={2} 2>/dev/null | md5sum" -f $c.Dev, $c.Seek, $c.Blocks)
+        $devMd5 = Get-FirstMd5 $devMd5
+        # 本地：从包里切出对应片段，算 md5
+        $locMd5 = Get-RangeMd5 -Path $PkgPath -Offset ([int64]$c.PkgSkip * 65536) -Length ([int64]$c.PkgLen)
+        if ($devMd5 -ne $locMd5) {
+            Write-Warn2 ("   {0} 校验不符：闪存 {1}  包内 {2}" -f $c.What, $devMd5, $locMd5)
+            $bad += $c.What
+        } else {
+            Write-Ok ("   {0} 校验通过 {1}" -f $c.What, $devMd5)
+        }
+    }
+    if ($bad.Count -gt 0) {
+        # 不重启：留在原固件，用户还能再刷一次或用 [7] 修 B 槽
+        throw ("写入后校验失败：{0}。已中止，未重启 —— 原系统仍在运行，可重试。" -f ($bad -join '、'))
+    }
+
+    Write-Ok "写入完成且校验通过，准备重启"
+    if (-not $Keep) { Send-Background -Sess $Sess -Text "reboot" ; Start-Sleep -Seconds 8 }
     return $true
 }
 
@@ -1125,13 +1472,26 @@ function Invoke-FlashStock {
            Rootfs=@('mtd11_rootfs_bak.bin',   'bf2f92ceaf509093c8854825f2dc8d5e', 12582912) }
     )
 
-    $pick = $null
+    # 只挑「文件齐全且 md5 对得上」的组
+    $avail = @()
     foreach ($s in $sets) {
         $kp = Join-Path $StockDir $s.Kernel[0]
         $rp = Join-Path $StockDir $s.Rootfs[0]
-        if ((Get-LocalMd5 $kp) -eq $s.Kernel[1] -and (Get-LocalMd5 $rp) -eq $s.Rootfs[1]) { $pick = $s; break }
+        if ((Get-LocalMd5 $kp) -eq $s.Kernel[1] -and (Get-LocalMd5 $rp) -eq $s.Rootfs[1]) { $avail += $s }
     }
-    if (-not $pick) { throw "在 $StockDir 里找不到完整且 md5 正确的原厂镜像组（需要 kernel + rootfs 各 4 MiB / 12 MiB）" }
+    if ($avail.Count -eq 0) { throw "在 $StockDir 里找不到完整且 md5 正确的原厂镜像组（需要 kernel + rootfs 各 4 MiB / 12 MiB）" }
+
+    # 优先选跟当前 B 槽一模一样的版本：B 槽是回退用的，两槽同版本最不容易出意外，
+    # 而且这套镜像在这块板上验证过能启动。
+    $pick = $avail[0]
+    $bK = Find-MtdByOffset -Table $Table -Offset $script:SlotB.Kernel
+    if ($bK) {
+        $bMd5 = Get-FirstMd5 (Invoke-Cmd -Sess $Sess -TimeoutSec 180 -Command `
+                ("dd if=/dev/mtdblock{0} bs=65536 count=64 2>/dev/null | md5sum" -f $bK.Index))
+        foreach ($s in $avail) {
+            if ($s.Kernel[1] -eq $bMd5) { $pick = $s; break }
+        }
+    }
     Write-Ok "选定: $($pick.Name)"
 
     # 原厂要写 A 槽（B 槽是当前活分区或回退槽，不碰）
@@ -1148,6 +1508,7 @@ function Invoke-FlashStock {
         if ($a -ne 'YES') { Write-Warn2 "已取消"; return $false }
     }
 
+    $bad = @()
     foreach ($pair in @(@{Mtd=$kt; Src=(Join-Path $StockDir $pick.Kernel[0]); Len=4194304; What='内核'},
                         @{Mtd=$rt; Src=(Join-Path $StockDir $pick.Rootfs[0]); Len=12582912; What='rootfs'})) {
         $remote = Send-FileToDevice -Sess $Sess -LocalPath $pair.Src -PcIp $PcIp -RemoteName 'stock.bin'
@@ -1157,9 +1518,24 @@ function Invoke-FlashStock {
                ("dd if={0} of=/dev/mtdblock{1} bs=65536 count={2} seek={3} 2>&1 | tail -1" -f `
                 $remote, $pair.Mtd.Index, $cnt, $pair.Mtd.SeekBlocks)
         Write-Info ("   " + $out.Replace("`n", "`n   "))
+
+        # 写入后回读校验（AGENTS.md 5.5）
+        $devMd5 = Get-FirstMd5 (Invoke-Cmd -Sess $Sess -TimeoutSec 900 -Command `
+                  ("dd if=/dev/mtdblock{0} bs=65536 skip={1} count={2} 2>/dev/null | md5sum" -f `
+                   $pair.Mtd.Index, $pair.Mtd.SeekBlocks, $cnt))
+        $locMd5 = Get-LocalMd5 -Path $pair.Src
+        if ($devMd5 -ne $locMd5) {
+            Write-Warn2 ("   {0} 校验不符：闪存 {1}  镜像 {2}" -f $pair.What, $devMd5, $locMd5)
+            $bad += $pair.What
+        } else {
+            Write-Ok ("   {0} 校验通过 {1}" -f $pair.What, $devMd5)
+        }
     }
     Invoke-Cmd -Sess $Sess -Command "sync" -TimeoutSec 60 | Out-Null
-    Write-Ok "写入完成"
+    if ($bad.Count -gt 0) {
+        throw ("写入后校验失败：{0}。A 槽内容不可信，请重刷一次。" -f ($bad -join '、'))
+    }
+    Write-Ok "写入完成且校验通过"
     return $true
 }
 
@@ -1478,26 +1854,138 @@ function Read-Choice {
     return (Read-Host).Trim()
 }
 
+function Test-IpAlive {
+    param([string]$Ip, [int]$TimeoutMs = 700)
+    try { return (New-Object System.Net.NetworkInformation.Ping).Send($Ip, $TimeoutMs).Status -eq 'Success' }
+    catch { return $false }
+}
+
+function Find-DeviceIp {
+    # 先看 ARP 表里有没有 TP-Link 的 MAC（98:97:CC 是这块板子的，另有几个常见 OUI）
+    $ouis = @('98-97-CC', 'B4-B0-24', '3C-84-6A', '50-C7-BF', 'F4-F2-6D', 'C4-6E-1F')
+    $cands = @()
+    try {
+        $cands = Get-NetNeighbor -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+                 Where-Object { $_.LinkLayerAddress -and $_.IPAddress -notlike '224.*' -and
+                                $_.IPAddress -ne '255.255.255.255' } |
+                 Where-Object { $mac = $_.LinkLayerAddress.ToUpper()
+                                ($ouis | Where-Object { $mac.StartsWith($_) }) } |
+                 Select-Object -ExpandProperty IPAddress -Unique
+    } catch { }
+    foreach ($c in $cands) {
+        if (Test-IpAlive $c) { return @{ Ip = $c; How = '按 TP-Link MAC 在 ARP 表里找到' } }
+    }
+    # 再试两个常见地址（原厂默认 / 我们之前实测遇到的）
+    foreach ($c in @('192.168.1.1', '192.168.1.175', '192.168.0.1')) {
+        if (Test-IpAlive $c) { return @{ Ip = $c; How = 'ping 通' } }
+    }
+    return $null
+}
+
 function Resolve-DeviceIp {
     param([string]$Hint)
     if ($Hint) { return $Hint }
-    Write-Info "本机 IPv4:"
-    $i = 0
+
+    Write-Info "正在自动找设备（ARP 表 + ping 探测）..."
+    $found = Find-DeviceIp
+    if ($found) {
+        Write-Ok ("找到设备 {0}（{1}）" -f $found.Ip, $found.How)
+        return $found.Ip
+    }
+
+    Write-Warn2 "没自动找到设备。下面列出的是【本机】网卡地址，仅供参考，不是让你选："
     foreach ($a in (Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
                     Where-Object { $_.IPAddress -ne '127.0.0.1' })) {
-        $i++
-        Write-Info ("  [{0}] {1}" -f $i, $a.IPAddress)
+        $tag = if ($a.IPAddress -like '192.168.1.*') { '  <- 接设备用这张' } else { '' }
+        Write-Info ("    {0}{1}" -f $a.IPAddress, $tag)
     }
-    $p = Read-Choice -Prompt "设备 IP（直接回车 = 192.168.1.1）"
-    if (-not $p) { return "192.168.1.1" }
+    $p = Read-Choice -Prompt "请输入【设备】的 IP（例 192.168.1.1）"
+    if (-not $p) {
+        Write-Warn2 "没输入。默认按 192.168.1.1 试。"
+        return "192.168.1.1"
+    }
     return $p
+}
+
+function Read-PasswordOneShot {
+    param([string]$Prompt)
+    $sec = Read-Host $Prompt -AsSecureString
+    if (-not $sec -or $sec.Length -eq 0) { return $null }
+    $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($sec)
+    try { return [Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr) }
+    finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }
+}
+
+function Resolve-StockRootPassword {
+    <#
+        OpenWrt 本来就有 root，不需要 getroot —— 但密码得用户自己给。
+        不预设、不猜、不写死：密码是用户的，工具不知道。
+        试错允许重来（最多 3 次），不因为敲错一次就把整个流程踢回菜单。
+    #>
+    param([string]$Given, [int]$Tries = 3)
+    if (-not $Given -and $Password) { $Given = $Password }
+    if ($Given) { return $Given }
+
+    Write-Info ""
+    Write-Info "OpenWrt 本来就有 root，不需要 getroot。"
+    Write-Info "请输入这台设备的 root 密码（如果不是你设的，就问设置的人）。"
+    for ($i = 1; $i -le $Tries; $i++) {
+        $pw = Read-PasswordOneShot ("   root 密码（第 {0}/{1} 次，输入不回显）: " -f $i, $Tries)
+        if ($pw) { return $pw }
+        Write-Warn2 "   密码不能为空。"
+        if ($i -lt $Tries) { Write-Info "   （OpenWrt 出厂可能是空密码，那需要先在设备上 passwd 设一个）" }
+    }
+    throw "没有输入密码，无法登录。请先确认设备的 root 密码。"
+}
+
+function Invoke-FullStockToOpenWrt {
+    <#
+        原厂 -> OpenWrt 完整流程，顺序不能变：
+          1) 备份原厂全部分区     <- 动任何东西之前先存底
+          2) 刷 u-boot kit 两槽   <- 保证从 A 槽启动的是我们的 kit
+          3) 刷 OpenWrt 到 A 槽   <- 最后才覆盖系统
+        B 槽（0x0880000 / 0x0fc0000）全程不动，一直留作原厂回退。
+        mtd0（一级 u-boot）永不碰。
+    #>
+    param($Sess, $Table, [string]$PcIp, [string]$PkgPath, [string]$BackupDir)
+
+    Write-Step "[1/3] 备份原厂（动任何东西之前先存底）"
+    $bk = Invoke-Backup -Sess $Sess -Table $Table -PcIp $PcIp -DestDir $BackupDir
+    if (-not $bk) { throw "备份失败，中止（什么都没改）" }
+
+    Write-Step "[2/3] 刷 u-boot kit（A 槽 0x4700000 + B 槽 0x700000，一级 u-boot 不动）"
+    $ub = Join-Path $script:Here 'uboot\wta301-uboot-p21c.bin'
+    [void](Invoke-FlashUbootKit -Sess $Sess -Table $Table -PcIp $PcIp -BinPath $ub)
+
+    Write-Step "[3/3] 刷 OpenWrt 到 A 槽（内核 0x4880000 / rootfs 0x4fc0000）"
+    [void](Invoke-FlashOpenWrt -Sess $Sess -Table $Table -PcIp $PcIp -PkgPath $PkgPath)
+    Write-Ok "原厂 -> OpenWrt 完成。B 槽原厂回退保留在 0x0880000 / 0x0fc0000"
+    return $true
+}
+
+function Invoke-FullOpenWrtToStock {
+    <#
+        OpenWrt -> 原厂完整流程。这条路**不动 u-boot**：
+        两个槽的 kit 已经装好，留着没坏处（一级 u-boot 校验过去之后就交给 kit，
+        kit 再按槽头决定 bootm 哪个内核）。
+        只覆盖 A 槽的 kernel/rootfs 两个区，B 槽原厂仍然完好。
+    #>
+    param($Sess, $Table, [string]$PcIp, [string]$StockDir, [string]$BackupDir)
+
+    Write-Step "[1/2] 备份当前 OpenWrt（先存底）"
+    $bk = Invoke-Backup -Sess $Sess -Table $Table -PcIp $PcIp -DestDir $BackupDir
+    if (-not $bk) { throw "备份失败，中止（什么都没改）" }
+
+    Write-Step "[2/2] 刷原厂到 A 槽（内核 0x4880000 / rootfs 0x4fc0000）"
+    [void](Invoke-FlashStock -Sess $Sess -Table $Table -PcIp $PcIp -StockDir $StockDir)
+    return $true
 }
 
 function Main {
     Write-Host ""
     Write-Host " ====================================================================" -ForegroundColor Cyan
     Write-Host "   WTA301 一键工具（PowerShell，零依赖）" -ForegroundColor Cyan
-    Write-Host "   getroot / 刷机 / 备份 / 修回退槽 / TTL 救砖" -ForegroundColor Cyan
+    Write-Host "   OpenWrt <-> 原厂 互刷 / 备份 / u-boot" -ForegroundColor Cyan
     Write-Host " ====================================================================" -ForegroundColor Cyan
     Assert-Admin
 
@@ -1507,31 +1995,66 @@ function Main {
     if (-not $pcIp) { throw "本机没有和设备 $devIp 同网段的地址。请确认网线插在设备的 LAN1、本机也在同一网段。" }
     Write-Info "设备 $devIp   本机 $pcIp"
 
+    # ---- 走哪条路由用户自己定，不探测 ----
+    # 探测（看 22 端口）看着聪明，实际上是多余的：用户自己知道手上是什么固件。
+    # 而且探测一旦判错，后面整条流程都是错的 —— 不如让人选。
+    $kind = $Kind
+    while (-not $kind) {
+        Write-Host ""
+        Write-Host " 现在板子上跑的是什么固件？" -ForegroundColor Cyan
+        Write-Host "   [1] 原厂固件  —— 我要刷成 OpenWrt（会先 getroot，再备份原厂）"
+        Write-Host "   [2] OpenWrt  —— 我要刷回原厂（输 root 密码就能进，本来就有 root）"
+        Write-Host "   [0] 退出"
+        $k = Read-Choice -Prompt "选 1 或 2"
+        if ($k -eq '0') { return }
+        if ($k -eq '1') { $kind = 'stock' }
+        elseif ($k -eq '2') { $kind = 'openwrt' }
+        else { Write-Warn2 "请输入 1 或 2" }
+    }
+    if ($kind -eq 'openwrt') {
+        Write-Ok "路线：OpenWrt -> 原厂。SSH 登录（本来就有 root，不需要 getroot）"
+    } else {
+        Write-Ok "路线：原厂 -> OpenWrt。先 getroot 打进去，再备份原厂，最后刷"
+    }
+
     $sess  = $null     # 当前 root 连接（跨菜单项复用）
-    $root  = $null     # getroot 的资源句柄
     $nops  = 0
+    # 用状态表而不是 scriptblock 闭包：
+    # PowerShell 的 scriptblock 是动态作用域，函数里给 $pw 赋值传不出去
+    # （这个坑在 Stop-BackgroundService 那次已经踩过，见 docs 第 5 节）
+    $st = @{ Pw = $null; RootHandle = $null }
 
     while ($true) {
         Write-Host ""
         Write-Host " --------------------------------------------------------------------" -ForegroundColor DarkGray
-        if ($sess) { Write-Host ("   [已连上 {0}]" -f $devIp) -ForegroundColor Green }
-        else       { Write-Host "   [未连接]" -ForegroundColor Yellow }
-        Write-Host "     [1] 取 root（只取，不刷）"
-        Write-Host "     [2] 刷 OpenWrt（完整包）"
-        Write-Host "     [3] 只刷 u-boot kit"
-        Write-Host "     [4] 刷回原厂"
-        Write-Host "     [5] 安全审计（只读）"
-        Write-Host "     [6] 整片备份到本机"
-        Write-Host "     [7] 修 B 槽（原厂镜像写回回退槽）"
-        Write-Host "     [8] TTL 串口刷 u-boot（救砖）—— 能上网就不用它"
+        if ($sess) { Write-Host ("   [已连上 {0}   {1}]" -f $devIp, $(if ($kind -eq 'openwrt') { 'OpenWrt' } else { '原厂' })) -ForegroundColor Green }
+        else       { Write-Host ("   [未连接   {0}]" -f $(if ($kind -eq 'openwrt') { 'OpenWrt' } else { '原厂' })) -ForegroundColor Yellow }
+
+        if ($kind -eq 'openwrt') {
+            Write-Host "     [1] 连接（输 root 密码，只连不刷）"
+            Write-Host "     [2] ★ 一键：备份 OpenWrt -> 刷回原厂（A 槽 0x4880000 + 0x4fc0000）"
+            Write-Host "     [3] 只刷 u-boot kit"
+            Write-Host "     [4] 安全审计（只读）"
+            Write-Host "     [5] 整片备份到本机"
+        } else {
+            Write-Host "     [1] getroot 建立连接（只连不刷）"
+            Write-Host "     [2] ★ 一键：备份原厂 -> 刷 u-boot -> 刷 OpenWrt"
+            Write-Host "     [3] 只备份原厂"
+            Write-Host "     [4] 只刷 u-boot kit"
+            Write-Host "     [5] 只刷 OpenWrt"
+            Write-Host "     [6] 安全审计（只读）"
+            Write-Host "     [7] 整片备份到本机"
+        }
         Write-Host "     [9] 看分区表与风险说明"
+        Write-Host "     [T] TTL 串口刷 u-boot（救砖；能上网就不用它）"
         Write-Host "     [0] 退出"
         Write-Host " --------------------------------------------------------------------" -ForegroundColor DarkGray
 
         $ch = Read-Choice
         if ($ch -eq '0' -or $ch -eq '') { break }
         if ($ch -eq '9') { Show-Explain; continue }
-        if ($ch -eq '8') {
+
+        if ($ch -ieq 'T') {
             $port = Read-Choice -Prompt "COM 口（如 COM5）"
             $bin  = Join-Path $script:Here 'uboot\wta301-uboot-p21c.bin'
             if (-not (Test-Path -LiteralPath $bin)) { Write-Err2 "找不到 $bin"; continue }
@@ -1540,84 +2063,133 @@ function Main {
             continue
         }
 
-        # ---- 需要 root 的操作：先确保有连接，之后全部复用 ----
+        # ---- 需要 shell 的操作：先确保有连接，之后全部复用 ----
         try {
             if (-not $sess) {
-                $root = Invoke-GetRoot -DeviceIp $devIp -PcAddr $pcIp -Persist
-                $sess = $root.Sess
+                $sess = Open-DeviceSession -Kind $kind -DeviceIp $devIp -PcAddr $pcIp -State $st
             } else {
-                Write-Info "[0] 复用已有 root 连接（不会重新 getroot）"
-                $probe = Invoke-Cmd -Sess $sess -Command "echo __PONG__" -TimeoutSec 10
+                Write-Info "[0] 复用已有连接（不会重新登录）"
+                $probe = ''
+                try { $probe = Invoke-Cmd -Sess $sess -Command "echo __PONG__" -TimeoutSec 15 } catch { }
                 if ($probe -notmatch '__PONG__') {
-                    Write-Warn2 "连接断了，重新 getroot"
+                    Write-Warn2 "连接断了，重连"
                     Close-Device -Sess $sess; $sess = $null
-                    $root = Invoke-GetRoot -DeviceIp $devIp -PcAddr $pcIp -Persist
-                    $sess = $root.Sess
+                    $sess = Open-DeviceSession -Kind $kind -DeviceIp $devIp -PcAddr $pcIp -State $st
                 }
             }
             $nops++
             Write-Info ("设备: {0}   第 {1} 次操作" -f $devIp, $nops)
             $table = Get-MtdTable -Sess $sess
+            $facts = Get-DeviceFacts -Sess $sess -Table $table
+            Write-Info ("当前固件: {0}  内核 {1}" -f $facts.Kind, $facts.Kernel)
 
-            switch ($ch) {
-                '1' { Write-Ok "已拿到 root，什么也没改" }
-                '2' {
-                    $pkg = Read-Choice -Prompt "OpenWrt 完整包路径（回车 = images\wta301-op-25.12.6-p29.bin）"
-                    if (-not $pkg) { $pkg = Join-Path $script:Here 'images\wta301-op-25.12.6-p29.bin' }
-                    [void](Invoke-FlashOpenWrt -Sess $sess -Table $table -PcIp $pcIp -PkgPath $pkg)
+            if ($kind -eq 'openwrt') {
+                switch ($ch) {
+                    '1' { Write-Ok "已连上，什么也没改" }
+                    '2' {
+                        $sd = if ($StockDir) { $StockDir } else { Join-Path $script:Here 'stock' }
+                        $d  = if ($BackupDir) { $BackupDir } else { Join-Path $script:Here ("backup-" + (Get-Date -Format 'MMdd-HHmm')) }
+                        [void](Invoke-FullOpenWrtToStock -Sess $sess -Table $table -PcIp $pcIp `
+                                -StockDir $sd -BackupDir $d)
+                    }
+                    '3' {
+                        $bin = Join-Path $script:Here 'uboot\wta301-uboot-p21c.bin'
+                        [void](Invoke-FlashUbootKit -Sess $sess -Table $table -PcIp $pcIp -BinPath $bin)
+                    }
+                    '4' { [void](Invoke-Audit -Sess $sess -Table $table) }
+                    '5' {
+                        $d = if ($BackupDir) { $BackupDir } else { Join-Path $script:Here ("backup-" + (Get-Date -Format 'MMdd-HHmm')) }
+                        [void](Invoke-Backup -Sess $sess -Table $table -PcIp $pcIp -DestDir $d)
+                    }
+                    default { Write-Warn2 "OpenWrt 模式下没有这一项（输 9 看说明）" }
                 }
-                '3' {
-                    $bin = Join-Path $script:Here 'uboot\wta301-uboot-p21c.bin'
-                    [void](Invoke-FlashUbootKit -Sess $sess -Table $table -PcIp $pcIp -BinPath $bin)
+            } else {
+                switch ($ch) {
+                    '1' { Write-Ok "已拿到 root，什么也没改" }
+                    '2' {
+                        $pkg = Read-Choice -Prompt "OpenWrt 完整包路径（回车 = images\wta301-op-25.12.6-p29.bin）"
+                        if (-not $pkg) { $pkg = Join-Path $script:Here 'images\wta301-op-25.12.6-p29.bin' }
+                        $d = if ($BackupDir) { $BackupDir } else { Join-Path $script:Here ("backup-" + (Get-Date -Format 'MMdd-HHmm')) }
+                        [void](Invoke-FullStockToOpenWrt -Sess $sess -Table $table -PcIp $pcIp -PkgPath $pkg -BackupDir $d)
+                    }
+                    '3' {
+                        $d = if ($BackupDir) { $BackupDir } else { Join-Path $script:Here ("backup-" + (Get-Date -Format 'MMdd-HHmm')) }
+                        [void](Invoke-Backup -Sess $sess -Table $table -PcIp $pcIp -DestDir $d)
+                    }
+                    '4' {
+                        $bin = Join-Path $script:Here 'uboot\wta301-uboot-p21c.bin'
+                        [void](Invoke-FlashUbootKit -Sess $sess -Table $table -PcIp $pcIp -BinPath $bin)
+                    }
+                    '5' {
+                        $pkg = Read-Choice -Prompt "OpenWrt 完整包路径（回车 = images\wta301-op-25.12.6-p29.bin）"
+                        if (-not $pkg) { $pkg = Join-Path $script:Here 'images\wta301-op-25.12.6-p29.bin' }
+                        [void](Invoke-FlashOpenWrt -Sess $sess -Table $table -PcIp $pcIp -PkgPath $pkg)
+                    }
+                    '6' { [void](Invoke-Audit -Sess $sess -Table $table) }
+                    '7' {
+                        $d = if ($BackupDir) { $BackupDir } else { Join-Path $script:Here ("backup-" + (Get-Date -Format 'MMdd-HHmm')) }
+                        [void](Invoke-Backup -Sess $sess -Table $table -PcIp $pcIp -DestDir $d)
+                    }
+                    default { Write-Warn2 "原厂模式下没有这一项（输 9 看说明）" }
                 }
-                '4' {
-                    $sd = if ($StockDir) { $StockDir } else { Join-Path $script:Here 'stock' }
-                    [void](Invoke-FlashStock -Sess $sess -Table $table -PcIp $pcIp -StockDir $sd)
-                }
-                '5' { [void](Invoke-Audit -Sess $sess -Table $table) }
-                '6' {
-                    $bd = if ($BackupDir) { $BackupDir } else { Join-Path $script:Here ("backup-{0}" -f (Get-Date -Format 'MMdd-HHmm')) }
-                    [void](Invoke-Backup -Sess $sess -Table $table -PcIp $pcIp -OutDir $bd)
-                }
-                '7' {
-                    $sd = if ($StockDir) { $StockDir } else { Join-Path $script:Here 'stock' }
-                    [void](Invoke-FlashStock -Sess $sess -Table $table -PcIp $pcIp -StockDir $sd)
-                }
-                default { Write-Warn2 "没有这个选项" }
             }
-            Write-Ok "本次操作结束"
-            if (-not $Keep) { Write-Info "[保持] 连接保留 —— 下一次操作直接复用，不会重新 getroot" }
-        }
-        catch {
+        } catch {
             Write-Err2 $_.Exception.Message
-            Write-Log $_.Exception.ToString() 'ERROR'
+            if ($sess -and -not (Test-SessionAlive $sess)) { Close-Device -Sess $sess; $sess = $null }
         }
     }
 
-    # 收尾
     Write-Step "[收尾] 关闭连接、停服务、撤销本机改动"
-    if ($sess) { Close-Device -Sess $sess; Write-Info "- 已断开 root shell" }
-    if ($root) {
-        Stop-BackgroundService -State $root.Elink -Name 'e-Link 模拟器'
-        Stop-BackgroundService -State $root.Http  -Name 'HTTP 服务'
-        if ($root.Aliases -and $root.Aliases.Count -gt 0) {
-            Remove-GatewayAlias -IfIndex $root.IfIndex -Addrs $root.Aliases
-        }
-        Disable-FirewallPort
-    } else {
-        Disable-FirewallPort
-    }
-    Write-Host ""
-    Write-Host (" 会话结束（共 {0} 次操作）" -f $nops) -ForegroundColor Cyan
+    if ($sess) { Close-Device -Sess $sess }
+    if ($st.RootHandle) { Close-GetRootHandle -Handle $st.RootHandle }
+    Write-Info "会话结束（共 $nops 次操作）"
     Write-Info "日志: $script:LogPath"
 }
 
-# ===========================================================================
-# 入口
-# ===========================================================================
-switch -Regex (($Rest + @()) -join ' ') {
-    '--help|-h' { Get-Help $MyInvocation.MyCommand.Path -Detailed; return }
-    default { }
+function Open-DeviceSession {
+    # 两条路各走各的：OpenWrt 用 SSH 密码，原厂用 getroot。
+    param([string]$Kind, [string]$DeviceIp, [string]$PcAddr, [hashtable]$State)
+    if ($Kind -eq 'openwrt') {
+        for ($try = 1; $try -le 3; $try++) {
+            if (-not $State.Pw) { $State.Pw = Resolve-StockRootPassword }
+            Write-Step ("[连接] OpenWrt SSH 登录 {0}（root，第 {1}/3 次）" -f $DeviceIp, $try)
+            try {
+                $ch = Enable-ShellChannel -DeviceIp $DeviceIp -Password $State.Pw
+                if ($ch.Mode -eq 'telnet') {
+                    return (Connect-Device -Ip $DeviceIp -TcpPort $ch.Port -TimeoutMs 8000)
+                }
+                return (Open-SshSession -Ip $DeviceIp -User 'root' -Password $State.Pw)
+            } catch {
+                if ($_.Exception.Message -notmatch '密码不对|SSH 登录失败|Permission denied') { throw }
+                Write-Warn2 "   密码不对。"
+                $State.Pw = $null
+                if ($try -ge 3) { throw "连续 3 次密码不对。请确认设备的 root 密码后再试。" }
+            }
+        }
+    }
+    $r = Invoke-GetRoot -DeviceIp $DeviceIp -PcAddr $PcAddr -Persist
+    $State.RootHandle = $r
+    return $r.Sess
+}
+
+function Close-GetRootHandle {
+    # Invoke-GetRoot 返回的是数据（http/elink/别名/防火墙），
+    # 没有内置的 Cleanup 方法 —— 所以收尾要在这里显式逐个关。
+    param($Handle)
+    if (-not $Handle) { return }
+    if ($Handle.Http)  { Stop-BackgroundService -State $Handle.Http  -Name 'HTTP' }
+    if ($Handle.Elink) { Stop-BackgroundService -State $Handle.Elink -Name 'e-Link' }
+    try { Remove-GatewayAlias -IfIndex $Handle.IfIndex -Addrs $Handle.NewAliases } catch { }
+    try { Disable-FirewallPort } catch { }
+}
+
+function Test-SessionAlive {
+    param($Sess)
+    if (-not $Sess) { return $false }
+    if ($Sess.Kind -eq 'ssh') {
+        return [bool]($Sess.Ask -and (Test-Path -LiteralPath $Sess.Ask) -and (Test-PortOpen -Ip $Sess.Ip -TcpPort 22 -TimeoutMs 900))
+    }
+    try { return $Sess.Stream.CanRead } catch { return $false }
 }
 
 function Invoke-SelfTest {
