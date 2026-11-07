@@ -1023,6 +1023,34 @@ function Get-FirstMd5 {
     return ""
 }
 
+function Find-OpenWrtPkg {
+    # 自动发现在 images\ 下的 OpenWrt 完整包（排除 -sysupgrade / -ttl），多个取最新。
+    # ★ 不在这里写版本号：以前写死 p29，出下一版忘改就会拿旧包去刷。
+    $dir = Join-Path $script:Here 'images'
+    if (-not (Test-Path -LiteralPath $dir)) { return $null }
+    $c = @(Get-ChildItem -LiteralPath $dir -Filter 'wta301-op-*.bin' -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -notmatch '-(sysupgrade|ttl)\.bin$' } |
+        Sort-Object LastWriteTime -Descending)
+    if ($c.Count -eq 0) { return $null }
+    return $c[0].FullName
+}
+
+function Get-ExpectedMd5 {
+    # 从 kit 根的 MD5SUMS.txt 读期望 md5（<hash>  <name> 或 *<name>）。找不到返回 $null。
+    param([string]$Name)
+    $f = Join-Path $script:Here 'MD5SUMS.txt'
+    if (-not (Test-Path -LiteralPath $f)) { return $null }
+    foreach ($line in (Get-Content -LiteralPath $f -ErrorAction SilentlyContinue)) {
+        $t = "$line".Trim()
+        if ($t -match '^([0-9a-fA-F]{32})\s+\*?(.+)$') {
+            $h = $Matches[1].ToLower()
+            $n = ($Matches[2].Trim() -split '[\\/]')[-1]
+            if ($n -eq $Name) { return $h }
+        }
+    }
+    return $null
+}
+
 function Get-LocalMd5 {
     param([string]$Path)
     if (-not (Test-Path -LiteralPath $Path)) { return "" }
@@ -2130,8 +2158,10 @@ function Main {
             switch ($ch) {
                 '1' { Write-Ok "已拿到 root，什么也没改" }
                 '2' {
-                    $pkg = Read-Choice -Prompt "OpenWrt 完整包路径（回车 = images\wta301-op-25.12.6-p29.bin）"
-                    if (-not $pkg) { $pkg = Join-Path $script:Here 'images\wta301-op-25.12.6-p29.bin' }
+                    $def = Find-OpenWrtPkg
+                    if (-not $def) { Write-Err2 'images\ 下找不到 OpenWrt 完整包（wta301-op-*.bin）'; break }
+                    $pkg = Read-Choice -Prompt ("OpenWrt 完整包路径（回车 = {0}）" -f (Split-Path -Leaf $def))
+                    if (-not $pkg) { $pkg = $def }
                     $d = if ($BackupDir) { $BackupDir } else { Join-Path $script:Here ("backup-" + (Get-Date -Format 'MMdd-HHmm')) }
                     [void](Invoke-FullStockToOpenWrt -Sess $sess -Table $table -PcIp $pcIp -PkgPath $pkg -BackupDir $d)
                 }
@@ -2144,8 +2174,10 @@ function Main {
                     [void](Invoke-FlashUbootKit -Sess $sess -Table $table -PcIp $pcIp -BinPath $bin)
                 }
                 '5' {
-                    $pkg = Read-Choice -Prompt "OpenWrt 完整包路径（回车 = images\wta301-op-25.12.6-p29.bin）"
-                    if (-not $pkg) { $pkg = Join-Path $script:Here 'images\wta301-op-25.12.6-p29.bin' }
+                    $def = Find-OpenWrtPkg
+                    if (-not $def) { Write-Err2 'images\ 下找不到 OpenWrt 完整包（wta301-op-*.bin）'; break }
+                    $pkg = Read-Choice -Prompt ("OpenWrt 完整包路径（回车 = {0}）" -f (Split-Path -Leaf $def))
+                    if (-not $pkg) { $pkg = $def }
                     [void](Invoke-FlashOpenWrt -Sess $sess -Table $table -PcIp $pcIp -PkgPath $pkg)
                 }
                 '6' { [void](Invoke-Audit -Sess $sess -Table $table) }
@@ -2327,17 +2359,30 @@ function Invoke-SelfTest {
 
     Write-Info ""
     Write-Info "其他文件:"
-    $others = @(
-        @{ P='images\wta301-op-25.12.6-p29.bin';            Md5='c5ac0911accd2ec48033329c383d5c4c' }
-        @{ P='images\wta301-op-25.12.6-p29-sysupgrade.bin'; Md5='76df463df4d8b5acba5d52852870c127' }
-        @{ P='uboot\wta301-uboot-p21c.bin';                 Md5='d0ada9f76e4f1aba9b96a559a5220cee' }
-    )
-    foreach ($w in $others) {
-        $p = Join-Path $script:Here $w.P
+    # ★ 不硬编码版本号与 md5：镜像从 images\ 自动发现，md5 期望值取自 MD5SUMS.txt。
+    #   以前写死 p29：出下一版忘了改，就会拿旧哈希校验新文件，表面上「校验通过」。
+    $targets = New-Object System.Collections.ArrayList
+    $pkg = Find-OpenWrtPkg
+    if ($pkg) { [void]$targets.Add($pkg) }
+    else { Write-Err2 "images\ 下找不到 OpenWrt 完整包（wta301-op-*.bin）"; $bad++ }
+    $idir = Join-Path $script:Here 'images'
+    if (Test-Path -LiteralPath $idir) {
+        $sup = @(Get-ChildItem -LiteralPath $idir -Filter 'wta301-op-*-sysupgrade.bin' -File -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Descending)
+        if ($sup.Count -gt 0) { [void]$targets.Add($sup[0].FullName) }
+        else { Write-Warn2 'images\ 下没有 sysupgrade 包（不影响刷机）' }
+    }
+    $ub = Join-Path $script:Here 'uboot\wta301-uboot-p21c.bin'
+    if (Test-Path -LiteralPath $ub) { [void]$targets.Add($ub) }
+    else { Write-Err2 'uboot\wta301-uboot-p21c.bin 缺失'; $bad++ }
+    foreach ($p in $targets) {
+        $name = Split-Path -Leaf $p
         $got = Get-LocalMd5 -Path $p
-        if (-not $got) { Write-Warn2 "$($w.P) 缺失"; continue }
-        if ($got -eq $w.Md5) { Write-Ok ("{0}  {1}" -f $w.P, $got) }
-        else { Write-Err2 "$($w.P) md5 不符 期望 $($w.Md5) 实得 $got"; $bad++ }
+        if (-not $got) { Write-Warn2 "$name 缺失"; continue }
+        $exp = Get-ExpectedMd5 $name
+        if (-not $exp) { Write-Warn2 ("{0}  {1}（MD5SUMS.txt 无记录）" -f $name, $got) }
+        elseif ($got -eq $exp) { Write-Ok ("{0}  {1}" -f $name, $got) }
+        else { Write-Err2 "$name md5 不符 期望 $exp 实得 $got"; $bad++ }
     }
 
     Write-Host ""
