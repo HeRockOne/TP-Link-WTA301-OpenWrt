@@ -17,6 +17,71 @@ T=$OWTREE/target/linux/qualcommax
 CFG=$OWTREE/.config
 
 # ---------------------------------------------------------------
+# ★ feeds 必须已装 —— 这是真踩过的坑，不是预防性检查。
+#
+#   从零构建验证时（全新树 clone + checkout 64900e75 + 直接 apply），
+#   漏了 `./scripts/feeds install -a`。结果：
+#     · make world 返回 0，零报错，看上去完全正常
+#     · 但 rootfs 少 27 个 LuCI 包（manifest 163 行 vs 应有的 190 行）
+#     · sysupgrade 从 13,394,197 B 掉到 12,677,397 B（小 5.4%）
+#     · 刷进去没 Web 界面
+#   feeds 目录不存在时这里直接失败，而不是让人把固件编完才发现。
+# ---------------------------------------------------------------
+missing_feeds=""
+for f in luci packages; do
+	[ -d "$OWTREE/package/feeds/$f" ] || missing_feeds="$missing_feeds $f"
+done
+if [ -n "$missing_feeds" ]; then
+	cat >&2 <<FEEDS
+!! feeds 没装全（缺:$missing_feeds）
+
+   先跑：
+     cd $OWTREE
+     ./scripts/feeds update -i && ./scripts/feeds install -a
+
+   为什么要在这里拦：LuCI 全部来自 luci feed。漏装后 make world 会
+   成功返回 0，但固件少 27 个 LuCI 包、没有 Web 界面（已实测踩过）。
+FEEDS
+	exit 1
+fi
+
+# ---------------------------------------------------------------
+# ★ 权威 .config 必须先铺好 —— 同样实测踩过。
+#
+#   没铺 pin/ow2512-dot-config.txt 就直接 apply：
+#     · add_pkg_sym 会往一个不存在的 .config 里追加几行
+#     · make defconfig 从最小集重算 ⇒ 19 个 luci 包全丢、sysupgrade 12.7 MB
+#     · 同样 make world 返回 0，不要不报错
+# ---------------------------------------------------------------
+if [ ! -f "$CFG" ]; then
+	cat >&2 <<NOCFG
+!! 没有 $CFG —— 先把仓库里的权威配置铺上：
+
+     cp $SRC/pin/ow2512-dot-config.txt $OWTREE/.config
+
+   这份 .config 是母树实测过的，含 19 个 luci 包。
+   跳过它直接 apply ⇒ make defconfig 从最小集重算 ⇒ 固件没 Web 界面。
+NOCFG
+	exit 1
+fi
+# grep -c 在计数为 0 时返回 1（且会打印 "0"）—— 加 || : 否则会变成 "0\n0"
+nl=$(grep -c '^CONFIG_PACKAGE_luci' "$CFG" 2>/dev/null || :)
+nl=${nl:-0}
+if [ "$nl" -lt 10 ]; then
+	cat >&2 <<BADCFG
+!! $CFG 里只有 $nl 个 CONFIG_PACKAGE_luci（应 ≥ 10）
+
+   看上去不是 pin/ow2512-dot-config.txt 那份，或者被 make defconfig
+   从最小集重算过了。先把权威配置铺上：
+
+     cp $SRC/pin/ow2512-dot-config.txt $OWTREE/.config
+
+   否则固件会缺 LuCI（make world 照样返回 0，不报错）。
+BADCFG
+	exit 1
+fi
+
+# ---------------------------------------------------------------
 # P17 修正（重要，勿删）：
 #   `$T/ipq50xx/config-default` 是**内核**配置片段，只认内核符号。
 #   把 CONFIG_PACKAGE_* / CONFIG_FEED_* / CONFIG_LUCI_LANG_* 写进去是空转：

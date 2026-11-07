@@ -140,11 +140,29 @@ python3 tools/mk_board2_from_art.py --art art.bin --outdir patches/bdf
 ```bash
 git clone https://github.com/openwrt/openwrt.git
 cd openwrt && git checkout 64900e756efa667774214f9c6b17c113222e01f7   # v25.12.6
-# 铺本仓库的 overlay + 补丁（脚本会逐项校验 md5）
-bash wta301-2512/deliver/apply-to-2512.sh /path/to/openwrt
+
+# ① 装 feeds（LuCI 全部从 luci feed 来）
+./scripts/feeds update -i && ./scripts/feeds install -a
+
+# ② 铺权威 .config（母树实测的那份，不是随便 defconfig 出来的）
+cp /path/to/wta301-2512/pin/ow2512-dot-config.txt .config
+
+# ③ 铺本仓库的 overlay + 补丁（脚本会逐项校验 md5）
+bash /path/to/wta301-2512/deliver/apply-to-2512.sh /path/to/openwrt
+
 make -j$(nproc) world
 make -j$(nproc) target/install
 ```
+
+> ★ **①②③ 三步缺一不可，漏了都不会报错。** 两个已实测踩过的坑：
+>
+> | 漏了 | 后果 | 判据 |
+> |---|---|---|
+> | ① `feeds install -a` | `make world` **返回 0**，但少 27 个 LuCI 包（sysupgrade 13.4→12.7 MB），刷进去没 Web 界面 | ⑧ 尺寸 |
+> | ② `cp pin/ow2512-dot-config.txt .config` | 同上 —— `make defconfig` 从最小集重算，LuCI 全丢 | ⑧ 尺寸 |
+>
+> `apply-to-2512.sh` 在 feeds 未装时会直接报错退出（不会让你编到一半才发现）。
+> 编完跑 `bash deliver/verify-scratch-build.sh` 八条判据自查。
 
 `apply-to-2512.sh` 会碰 `target/linux/qualcommax/files/`，**触发内核全量重编（约 45 分钟）**。
 只改用户态时用 `deliver/apply-rootfs-only.sh`，不触发重编。
@@ -152,8 +170,9 @@ make -j$(nproc) target/install
 出包：
 
 ```bash
-bash deliver/make-release.sh --version P29-2512 --stage P29   # 四区 + sysupgrade
-bash deliver/make-deliverable.sh p29                          # 三种成品包 + 自检
+bash deliver/make-release.sh --version P30-2512 --stage P30   # 四区 + sysupgrade
+bash deliver/make-deliverable.sh p30                          # 三种成品包 + 自检
+bash deliver/make-open-release.sh P30                         # 对外发布包（含网页包）
 ```
 
 ### u-boot

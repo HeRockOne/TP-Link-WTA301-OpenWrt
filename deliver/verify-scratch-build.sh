@@ -143,10 +143,15 @@ else
 	bad "③ 没有 sysupgrade 包"
 fi
 
-# web 包（网页刷写用）
+# web 包（网页刷写用）—— 由 make-deliverable.sh 产出，不是 make-release.sh。
+# 所以这里分两级：make-release 阶段缺它只是 WARN（还没到那一步），
+# 但如果连 op_kernel/rootfs/tphdr 都在而 web 缺，就说明没跑 make-deliverable。
 WEB=$(ls -1 "$PACK"/*firmware_web.bin 2>/dev/null | head -1)
-[ -n "$WEB" ] && [ -f "$WEB" ] && ok "③ 网页包  [$(basename "$WEB")  $(stat -c%s "$WEB") B]" \
-	|| bad "③ 没有网页包（*firmware_web.bin）"
+if [ -n "$WEB" ] && [ -f "$WEB" ]; then
+	ok "③ 网页包  [$(basename "$WEB")  $(stat -c%s "$WEB") B]"
+else
+	warn "③ 还没有网页包 —— 它由 make-deliverable.sh 产出（下一步）：bash deliver/make-deliverable.sh <VER>"
+fi
 
 # ══════════════════════════════════════════════════════════════════
 sec "④ DTS 源里的 kernel 分区必须是 0x4880000 / 0x740000"
