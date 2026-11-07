@@ -589,6 +589,19 @@ else
 	fi
 	# uci-defaults 必须被 apply 脚本设成 0755，否则开机不执行
 	grep -q "99-wta301-system" "$SRC/deliver/apply-to-2512.sh" 		&& ok "apply 脚本已复制 system 档" 		|| bad "apply-to-2512.sh 未复制 99-wta301-system（改完等于没生效）"
+	# 打 kit 的脚本不许硬编码阶段号与镜像 md5。
+	# 以前写死 p29 的 md5：出 v30 时忘了改，就会拿 p29 的哈希去校验 v30 的文件，
+	# 表面上「校验通过」，实际装进包里的是别的东西（或者直接 die 掉）。
+	KITSH="$SRC/deliver/make-getroot-kit.sh"
+	if [ -f "$KITSH" ]; then
+		if grep -qE 'check_md5 [0-9a-f]{32} .*wta301-op-25' "$KITSH"; then
+			bad "make-getroot-kit.sh 里镜像 md5 是硬编码的（出下一版必忘改）"
+		else
+			ok "make-getroot-kit.sh 从 MD5SUMS.txt 取期望值，无硬编码镜像哈希"
+		fi
+		grep -q -- '--stage' "$KITSH" 			&& ok "make-getroot-kit.sh 支持 --stage（默认自动挑最新 deliver-final-*）" 			|| warn "make-getroot-kit.sh 不支持 --stage"
+		bash -n "$KITSH" 2>/dev/null && ok "make-getroot-kit.sh 语法 OK" 			|| bad "make-getroot-kit.sh 语法错误"
+	fi
 	# 移动端修复：Argon 主题的 .table 是真表格 + .th 是 nowrap，手机上必撑爆；
 	# 而且 hide-xs / hide-sm 在 Argon 里根本没定义（只有 bootstrap/mobile.css 有）。
 	# 修法是单独的 CSS + 在 head.ut 里多一行 <link>，必须在 cascade.css 之后。

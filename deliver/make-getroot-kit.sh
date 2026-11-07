@@ -31,14 +31,51 @@ OUT="${1:-$WORK/work/wta301-kit}"
 say() { printf '%s\n' "$*"; }
 die() { printf '[X] %s\n' "$*" >&2; exit 1; }
 
-P29=""
-for c in "$WORK/work/deliver-final-p29" "$WORK/deliver-final-p29"; do
-    [ -d "$c" ] && { P29="$c"; break; }
+# 阶段号：默认取仓库里最新一版 deliver-final-*，也可显式 `--stage p30`
+STAGE=""
+_args=()
+for a in "$@"; do
+    case "$a" in
+    --stage) _next=1 ;;
+    --stage=*) STAGE="${a#--stage=}" ;;
+    *)
+        if [ "${_next:-0}" = "1" ]; then STAGE="$a"; _next=0; else _args+=("$a"); fi
+        ;;
+    esac
 done
+[ ${#_args[@]} -gt 0 ] && OUT="${_args[0]}"
+
+STAGEDIR=""
+if [ -n "$STAGE" ]; then
+    for c in "$WORK/work/deliver-final-$STAGE" "$WORK/deliver-final-$STAGE"; do
+        [ -d "$c" ] && { STAGEDIR="$c"; break; }
+    done
+    [ -n "$STAGEDIR" ] || die "找不到 deliver-final-$STAGE/"
+else
+    # 自动挑最新（按 mtime），避免每次出固件都要改这个脚本里的版本号
+    for c in $(ls -dt "$WORK"/work/deliver-final-* "$WORK"/deliver-final-* 2>/dev/null); do
+        [ -d "$c" ] && { STAGEDIR="$c"; break; }
+    done
+    [ -n "$STAGEDIR" ] || die "找不到任何 deliver-final-*/（先跑 make-deliverable.sh）"
+    STAGE="${STAGEDIR##*/deliver-final-}"
+    STAGE="${STAGE##*deliver-final-}"
+fi
+P29="$STAGEDIR"
+say "固件阶段: $STAGE   （来自 $STAGEDIR）"
+
+# 期望 md5 一律从该阶段的 MD5SUMS.txt 读，不再在脚本里硬编码版本号与哈希：
+# 以前写死 p29 的 md5，出 v30 时忘了改就会拿 p29 的哈希去校验 v30 的文件。
+want_md5() {
+    local base="$1" m
+    m="$(awk -v b="$base" '$2==b || $2=="*"b {print $1}' "$STAGEDIR/MD5SUMS.txt" 2>/dev/null | head -1)"
+    [ -n "$m" ] || m="$(grep -F "$base" "$STAGEDIR/MD5SUMS.txt" 2>/dev/null | head -1 | cut -d' ' -f1)"
+    [ -n "$m" ] || die "MD5SUMS.txt 里找不到 $base"
+    printf '%s' "$m"
+}
 
 [ -f "$HERE/kit/wta301.ps1" ] || die "找不到 deliver/kit/wta301.ps1"
 [ -d "$HERE/stock" ] || die "找不到 deliver/stock/"
-[ -n "$P29" ] || die "找不到 deliver-final-p29/（OpenWrt 包和 u-boot kit）"
+[ -n "$P29" ] || die "找不到 deliver-final-*/（OpenWrt 包和 u-boot kit）"
 
 check_md5() {
     local want="$1" file="$2" name="$3"
@@ -101,10 +138,11 @@ say "   OK uboot/README.txt"
 
 # ---- OpenWrt 包 ----
 say "OpenWrt 包:"
-cp "$P29/wta301-op-25.12.6-p29.bin"            "$OUT/images/"
-cp "$P29/wta301-op-25.12.6-p29-sysupgrade.bin" "$OUT/images/"
-check_md5 c5ac0911accd2ec48033329c383d5c4c "$OUT/images/wta301-op-25.12.6-p29.bin"            "OpenWrt p29 完整包"
-check_md5 76df463df4d8b5acba5d52852870c127 "$OUT/images/wta301-op-25.12.6-p29-sysupgrade.bin" "OpenWrt p29 sysupgrade"
+IMG="$STAGE"
+cp "$P29/wta301-op-25.12.6-$IMG.bin"            "$OUT/images/"
+cp "$P29/wta301-op-25.12.6-$IMG-sysupgrade.bin" "$OUT/images/"
+check_md5 "$(want_md5 "wta301-op-25.12.6-$IMG.bin")"           "$OUT/images/wta301-op-25.12.6-$IMG.bin" "OpenWrt $IMG 完整包"
+check_md5 "$(want_md5 "wta301-op-25.12.6-$IMG-sysupgrade.bin")"           "$OUT/images/wta301-op-25.12.6-$IMG-sysupgrade.bin" "OpenWrt $IMG sysupgrade"
 
 # ---- 清单 ----
 {
