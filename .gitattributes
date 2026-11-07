@@ -5,3 +5,5 @@
 # 使用说明.txt   UTF-8 带 BOM + CRLF（记事本要求）
 deliver/kit/启动.bat      -text
 deliver/kit/使用说明.txt  -text
+# wta301.ps1  UTF-8 带 BOM + LF（PowerShell 5.1 没有 BOM 会按 GBK 读中文）
+deliver/kit/wta301.ps1    -text

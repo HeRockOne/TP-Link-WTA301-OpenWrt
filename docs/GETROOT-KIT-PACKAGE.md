@@ -1,12 +1,14 @@
-# 一键工具包（拿去就能用）
+# 一键工具包（纯 PowerShell，不需要装 Python）
 
-用户诉求原话：「把所有傻瓜式脚本需要的文件都放一起在一个目录，这样我就可以
-直接打包走」。
+用户诉求原话：
+
+> 「为什么你不把 uboot 放到一个目录？？应该是所有操作单台电脑完成！
+>  另外不要 py 脚本，别人电脑没有这种语言。用 bat 或者 ps1」
 
 对应产物：
 
 ```
-work/wta301-kit/            目录，62 MB，14 个文件
+work/wta301-kit/            目录，62 MB，12 个文件
 work/wta301-kit.zip         zip，54 MB
 ```
 
@@ -14,247 +16,293 @@ work/wta301-kit.zip         zip，54 MB
 
 ---
 
-## 1. 为什么要打包，散着放会缺什么
+## 0. 为什么把 Python 全部重写成 PowerShell
 
-`deliver/wta301-getroot.py` 看着是一个文件，实际运行时还依赖两样东西：
+三条约束，来自实际使用场景：
 
-| 依赖 | 缺了会怎样 |
+| 约束 | 后果 |
 |---|---|
-| `srv.py` | 启动 `Servers` 时 `find_script()` 返回 None → `die("找不到 srv.py / elink_gw4.py")` |
-| `elink_gw4.py` | 同上 |
-| `stock/*.bin` | `--flash-stock auto` / `--restore-bslot` 找不到镜像直接退出 |
-| `images/*.bin` | 菜单里「刷 OpenWrt」「刷 u-boot kit」没有文件可选 |
+| 目标机器是**别人的** Windows | 不能要求装 Python。`启动.bat` 里查 python 这一步本身就是门槛 |
+| 要求**所有操作单台电脑完成** | getroot（网线）和刷 u-boot（TTL 串口）不能分两台机器、两套脚本 |
+| u-boot 要**单独一个目录** | 固件包和 u-boot 混在一起，最容易发生「想把固件刷回去，结果顺手把 u-boot 也换了」 |
 
-只拷 `.py` 到别的机器，会在「已经拿到 root、正准备写 flash」那一步才失败。
-所以打包时**任一文件缺失就报错退出**，不允许出现半套。
+Windows 10 / 11 自带 PowerShell 5.1，密码学（DH / AES）、TCP、UDP、串口全都能做，
+所以整个工具变成**单文件、零依赖**：`wta301.ps1`。
+
+### 实测验证过的能力（不是推测）
+
+| 能力 | 实现 | 实测结果 |
+|---|---|---|
+| DH 2048-bit 密钥交换 | `[System.Numerics.BigInteger]::ModPow` | ✅ 自检通过 |
+| AES-128-CBC（零 IV、无填充） | `System.Security.Cryptography.Aes` | ✅ 自检通过 + 与设备真机握手成功 |
+| telnet 客户端 | `TcpClient` + `NetworkStream` | ✅ 取到 `uid=0(root)` |
+| HTTP 服务（设备 wget 取包） | `TcpListener` 手写 | ✅ 设备成功下载并按 md5 校验 |
+| 并行 TCP 收数据 | 多 `TcpListener` + runspace | ✅ 15 分区 29 秒 |
+| 串口 + TFTP（救砖） | `SerialPort` + `UdpClient` | 代码就位，未上机（本次没插 TTL） |
+
+> `Get-FileHash` 在某些机器上会「无法识别」，所以 md5 直接用 .NET 算，不用 cmdlet。
 
 ---
 
-## 2. 包结构
+## 1. 包结构
 
 ```
 wta301-kit/
-├─ 启动.bat                    双击入口：自提权 + 环境自检 + 中文菜单
-├─ 使用说明.txt                面向使用者的说明（UTF-8 BOM，记事本可直接看）
-├─ MD5SUMS.txt                 14 个文件的 md5
-├─ wta301-getroot.py           主程序
-├─ srv.py                      HTTP 服务（依赖）
-├─ elink_gw4.py                e-Link 模拟器（依赖）
-├─ stock/
-│   ├─ mtd5_kernel.bin         A 槽原厂 2.0.2 内核    4 MB  170b2188…
-│   ├─ mtd6_rootfs.bin         A 槽原厂 2.0.2 rootfs 12 MB  30f48741…
-│   ├─ mtd10_kernel_bak.bin    B 槽原厂 4.4.60 内核    4 MB  2868d8e9…
-│   └─ mtd11_rootfs_bak.bin    B 槽原厂 4.4.60 rootfs 12 MB  bf2f92ce…
-└─ images/
-    ├─ wta301-op-25.12.6-p29.bin            17 MB  c5ac0911…
-    ├─ wta301-op-25.12.6-p29-sysupgrade.bin 13 MB  76df463d…
-    ├─ wta301-uboot-p21c.bin               256 KB  d0ada9f7…
-    └─ README-刷机说明.txt                  原 TTL 刷机流程
+├─ 启动.bat                 入口：提权 → --SelfTest → 问 IP → 进菜单
+├─ wta301.ps1               全部逻辑（单文件，零依赖）
+├─ 使用说明.txt
+├─ MD5SUMS.txt
+├─ uboot/                   ★ u-boot 单独一个目录
+│  ├─ wta301-uboot-p21c.bin     262144 B  d0ada9f76e4f1aba9b96a559a5220cee
+│  └─ README.txt                为什么单独放、什么时候才需要刷
+├─ images/
+│  ├─ wta301-op-25.12.6-p29.bin            c5ac0911accd2ec48033329c383d5c4c
+│  └─ wta301-op-25.12.6-p29-sysupgrade.bin 76df463df4d8b5acba5d52852870c127
+└─ stock/                   原厂回退镜像
+   ├─ mtd5_kernel.bin        170b2188...  ← 内容在 0x4880000（A 槽）
+   ├─ mtd6_rootfs.bin        30f48741...  ← 内容在 0x4fc0000（A 槽）
+   ├─ mtd10_kernel_bak.bin   2868d8e9...  ← 内容在 0x0880000（B 槽）
+   └─ mtd11_rootfs_bak.bin   bf2f92ce...  ← 内容在 0x0fc0000（B 槽）
 ```
 
-`启动.bat` 打开后**先做离线自检**（`--check-kit`，0.4 秒），再问 IP，再进菜单：
-
-```
-1  只取 root
-2  安全审计（只读）
-3  整片备份（约 126 MB）
-4  刷 OpenWrt 到 A 槽      [先空跑再看]
-5  只刷 u-boot kit         [先空跑再看]
-6  刷回原厂到 A 槽         [先空跑再看]
-7  修 B 槽（写回原厂）
-8  看分区说明
-0  退出
-```
-
-每个写入类操作都先跑 `--dry-run` 打印计划，用户敲 `y` 才真正写。
+**注意 stock 里文件名和物理位置的对应是反的**，这是命名的历史原因（文件名来自
+各自固件视角下的 mtd 编号，而两个固件对同一块区域编号不同）。所以工具只认
+md5、不认文件名，`--SelfTest` 会把这张对应表打出来给你看。
 
 ---
 
-## 2b. `--check-kit` 离线自检
+## 2. `--SelfTest` 离线自检（不连设备、不写任何东西）
 
 ```
-python wta301-getroot.py --check-kit
+启动.bat 会自动先跑这个；也可以单独跑：
+  powershell -NoProfile -ExecutionPolicy Bypass -File wta301.ps1 -SelfTest
 ```
 
-不联网、不碰设备，0.38 秒。逐项核对 13 个文件的 md5，并按「能力」汇总：
+检查项：
+
+1. PowerShell 版本、串口列表、是否管理员
+2. DH 2048-bit 模幂
+3. AES-128-CBC 加解密回环
+4. 四份原厂镜像的 md5 **与物理槽的对应关系**（防文件名误导）
+5. OpenWrt 包 / sysupgrade / u-boot kit 的 md5
+6. **写入门禁 11 条用例**（见下）
+
+### 写入门禁（不是返回 false，是抛异常）
 
 ```
-必需文件:
-  OK wta301-getroot.py       97251 B  主程序
-  OK srv.py                    884 B  HTTP 服务（主程序依赖）
-  OK elink_gw4.py             4816 B  e-Link 模拟器（主程序依赖）
+永远不许写：
+  mtd0   0x0000000  一级 u-boot + SBL/QSEE/CDT   TTL 命脉
+  mtd1   0x0400000  出厂信息（机型 / MAC）
+  mtd2   0x0480000  射频校准（ART）
+  mtd14  0x4000000  boot_flag（选槽标志）
 
-镜像文件（只认 md5，不认文件名）:
-  OK stock/mtd5_kernel.bin   ...  170b2188884cc040d64ac5bed7ddc365
-  ...
-
-可用能力:
-  取 root            可以
-  刷 OpenWrt         可以
-  刷 u-boot kit      可以
-  刷回原厂（A 槽）   可以
-  修 B 槽            可以
-
-== 结论：自检通过，没有发现问题 ==    退出码 0
+需要显式授权（按动作区分，不用全局白名单）：
+  0x0700000 / 0x4700000  两槽 u-boot     <- flash-uboot
+  0x0880000 / 0x0fc0000  B 槽内核/rootfs <- restore-bslot
+  0x4fc0000              A 槽 rootfs     <- flash-op
 ```
 
-**为什么需要它**：Windows 的 `Get-Content MD5SUMS.txt` 默认按 GBK 读文本，
-清单里的中文文件名会变乱码，导致 `Test-Path` 找不到文件而误报。用 Python 读
-就没有这个问题。`使用说明.txt` 里已写明不要用 Get-Content 核对。
+自检输出（实测，11/11 通过）：
 
-### 故障注入测试（四种都抓到了）
+```
+mtd0  flash-op       -> 拒绝  (一级 u-boot，TTL 命脉)
+mtd1  flash-stock    -> 拒绝  (出厂信息)
+mtd2  flash-uboot    -> 拒绝  (射频校准)
+mtd14 flash-op       -> 拒绝  (boot_flag)
+mtd4  flash-op       -> 拒绝  (B 槽 u-boot 只能由 flash-uboot 写)
+mtd9  restore-bslot  -> 拒绝  (A 槽 u-boot 只能由 flash-uboot 写)
+mtd5  flash-stock    -> 拒绝  (B 槽内核只能由 restore-bslot 写)
+mtd6  flash-uboot    -> 拒绝  (B 槽 rootfs 只能由 restore-bslot/flash-op 写)
+mtd13 flash-op       -> 允许  (A 槽容器，flash-op 合法)
+mtd11 flash-op       -> 允许  (A 槽 rootfs，flash-op 合法)
+mtd4  flash-uboot    -> 允许  (B 槽 u-boot，flash-uboot 合法)
+```
 
-| 制造的问题 | 输出 | 退出码 |
+---
+
+## 3. 落点解析：按绝对偏移反查，不按编号
+
+`Resolve-WriteTarget` 做三件事：
+
+1. 收集所有「覆盖目标绝对偏移且装得下」的分区
+2. 优先挑起点正好对上的；否则挑**最小的能装下的**
+3. 算出 dd 的 `seek`（落点相对分区起点的块数）
+
+为什么必须这样（两个实测出来的坑）：
+
+**坑 A：同一段区域被两个分区覆盖**
+
+```
+0x4880000 既是 mtd10 kernel（4 MiB）
+          又是 mtd13 容器 firmware_bak 的 +0x80000（总 0x2620000）
+
+OpenWrt FIT 实占 0x41526c（4.28 MiB）> 4 MiB
+⇒ 直写 mtd10 会截断 => 变砖
+⇒ 必须写 mtd13 + seek 8 块（0x80000/65536）
+```
+
+实测 dry-run 输出：
+
+```
+内核 -> mtd13 0x4800000 +seek 8 块 = 绝对 0x4880000
+rootfs -> mtd11 0x4fc0000 +seek 0 块 = 绝对 0x4fc0000
+```
+
+**坑 B：分区编号跨固件错位**
+
+```
+原厂固件  mtd5 = 0x0880000（B 槽内核）
+OpenWrt   mtd5 = 0x4880000（A 槽内核）
+命名还互为主备（这边叫 kernel，那边叫 kernel_bak）
+```
+
+所以代码里没有任何一处按名字或按编号硬编码写入。
+
+---
+
+## 4. 速度：三处慢，全部修掉（实测数字）
+
+| 问题 | 改前 | 改后 |
 |---|---|---|
-| 改 `stock/mtd5_kernel.bin` 第 1000 字节 | `!!` + 实得 md5 + 期望 md5 | 5 |
-| 删 `srv.py` | `!! 缺 srv.py` + `取 root  缺 srv.py` | 5 |
-| 删 `stock/mtd11_rootfs_bak.bin` | `!! 缺 ...` + `修 B 槽  缺 ...` | 5 |
-| 改 `stock/mtd6_rootfs.bin` 第 999 字节 | `!!` + md5 不符 | 5 |
+| 每条命令固定 `sleep 30` | 12 MiB 分区 md5 要 32.01 秒 | 哨兵轮询 **1.35 秒** |
+| 备份每区读两遍（先 md5 再传） | 同一分区从 NAND 读两次 | 只传一遍，md5 本地现算 |
+| nc 单流被往返延迟卡住 | ≈0.65 MB/s（NAND 本身 8.9 MB/s） | 4 路并行 |
+| **整片备份总耗时** | **218 秒** | **29 秒** |
 
-修掉的两个自己写的 bug：
+### 哨兵机制（这是提速的关键）
 
-1. 能力判定原本写成 `("可以" if bad == 0 or True else "?")` —— 恒真，缺依赖也报「可以」。
-2. 可选镜像缺失时只 `continue` 不计入 `bad`，导致少一个文件也报「自检通过」。
-   现在缺任何镜像都算问题（这个包的定位就是「一个目录装齐全部」）。
+```
+{ <cmd> ; } 2>&1; echo <tag>$?
+```
+
+踩过的两个坑：
+
+1. **telnetd 会回显我们发的整行命令**，而那一行里就含 tag。
+   用 `tag in buf` 判断会立刻命中、返回空串。
+   ⇒ 判据必须是「行首独占 + 紧跟数字」：`(?:^|[\r\n])<tag>[0-9]`。
+   （`echo <tag>$?` 的回显里 tag 后面是 `$`，不匹配，正好区分。）
+   发送前还要把上一轮残留读干净。
+
+2. **回显清理不能按「从 `{` 删到 `}`」**：长命令会一路删到缓冲区末尾，
+   把真正的输出也删光。改成逐行精确比较（整行等于 payload）。
+
+### 为什么备份必须并行
+
+板上实测三个数字：
+
+```
+NAND 读出 12 MiB 并算 md5     1.35 秒   ≈ 8.9 MB/s
+裸 100 Mbps 网线                        12.5 MB/s
+dd | nc 单流                            ≈ 0.65 MB/s   ← 差距在这里
+```
+
+瓶颈不在 NAND、也不在带宽，而是单条 TCP 流上 busybox nc 的往返延迟。
+加带宽没用，多开几条流才能把延迟重叠掉。
 
 ---
 
-## 3. 编码与行尾（这里全是坑）
+## 5. PowerShell 的一个大坑：scriptblock 不是词法闭包
 
-| 文件 | 编码 | 行尾 | 原因 |
-|---|---|---|---|
-| `启动.bat` | UTF-8 **无 BOM** | CRLF | cmd 会把 BOM 当命令一部分报错；`chcp 65001` 后中文才正确 |
-| `使用说明.txt` | UTF-8 **带 BOM** | CRLF | 记事本靠 BOM 识别 UTF-8 |
-| `MD5SUMS.txt` | UTF-8 无 BOM | CRLF | 纯 ASCII 内容 |
+第一版把清理逻辑写成 `return @{ Cleanup = { ... } }`，在函数外 `& $root.Cleanup` 调用。
 
-`.gitattributes` 对这两个文件加了 `-text`，禁止 git 做行尾转换：
+**报错**：`管道元素中的"&"后面的表达式生成无效的对象`
 
-```
-deliver/kit/启动.bat      -text
-deliver/kit/使用说明.txt  -text
-```
+**根因**：PowerShell 的 scriptblock 是动态作用域，不是词法闭包。在函数内定义、
+函数返回后再调用时，它引用的局部变量（`$http` / `$elink`）已经随作用域销毁，
+于是变成 `& $null.Stop`。
 
-**易踩的坑**：`启动.bat` 里所有 `set /p` 读入的变量（`TGT` / `CHOICE` / `OK` /
-`AGAIN`）必须用 `!var!` 引用，不能用 `%var%`。因为整段 `if` 块在解析时
-`%var%` 就已经展开成旧值了。所以 `setlocal` 必须带 `EnableDelayedExpansion`。
+**连带后果**（更严重）：清理整个没执行 —— 网关别名和防火墙规则留在了本机。
 
-静态自检（谁改 bat 都要跑一遍）：
+**修法**：所有后台服务改成「state hashtable + 独立的 Stop 函数」：
 
-```bash
-python - <<'EOF'
-import io, re
-lines = io.open("启动.bat", encoding="utf-8").read().split("\n")
-labels = {l.strip()[1:].lower() for l in lines
-          if l.strip().startswith(":") and not l.strip().startswith("::")}
-gotos = [(i, m.group(1).lower()) for i, l in enumerate(lines, 1)
-         for m in re.finditer(r"\bgoto\s+:?(\w+)", l, re.I)]
-bad = [(i, g) for i, g in gotos if g not in labels]
-print("标签", len(labels), "goto", len(gotos), "未定义", bad or "无")
-EOF
+```powershell
+function Stop-BackgroundService { param($State, $Name) ... }
+Stop-BackgroundService -State $root.Http -Name 'HTTP 服务'
 ```
 
-当前结果：11 个标签 / 28 处 goto / 0 处未定义。
+实测收尾输出：
+
+```
+[收尾] 关闭连接、停服务、撤销本机改动
+  - 已断开 root shell
+  - 删除别名 192.168.1.1/32
+  - 删除别名 192.168.0.1/32
+  - 删除防火墙规则
+会话结束（共 1 次操作）
+```
+
+清理只删「`/32` + `SkipAsSource`」的别名 —— 那是本工具加的假网关，
+真网关是正常前缀地址，不会被误删。
 
 ---
 
-## 4. zip 里中文文件名
+## 6. 会话复用（用户提的第一个问题）
 
-用 PowerShell 的 `Compress-Archive` 打包，中文名会带 UTF-8 标志位（`flag_bits & 0x800`）。
-Windows 资源管理器和资源管理器右键「全部解压缩」都正常。
+> 「每个选项都获取一次 root，明明第一次就已经够了，剩下的操作都是在第一的基础上进行」
 
-`make-getroot-kit.sh` 里按顺序找打包工具：
+两个根因：
 
-1. `powershell.exe`（PATH 里）
-2. `/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe`（WSL interop
-   默认没把 Windows 路径塞进 PATH，所以要写绝对路径）
-3. `zip -qr -UN=UTF8`
-4. 都没有 → 只留目录，跳过 zip（目录本身已经完整可用）
+1. `main()` 判断 `interactive = not argv or argv[0] in ("-i", ...)`，
+   而 `启动.bat` 传了 `--target IP` ⇒ 掉进 CLI 单次模式，**压根没进菜单**
+2. 每个菜单分支各自 `execute()`，每次都重建 telnet、重启服务、重等回连
 
-**实测**：WSL 里 `which powershell.exe` 找不到，但绝对路径存在。所以第 2 条是
-必需的，不能只写第 1 条。
+修法：只有 argv 里出现**动作参数**才走 CLI；菜单是 `while` 循环，共享一个
+`sess`（连接 + 服务 + 分区表），每次操作前用 `echo __PONG__` 探活，断了才重连。
+
+实测（连按两次审计）：
+
+```
+设备: 192.168.1.175   第 1 次操作
+[保持] 连接保留 —— 下一次操作直接复用，不会重新 getroot
+[0] 复用已有 root 连接（不会重新 getroot）
+设备: 192.168.1.175   第 2 次操作
+```
+
+`grep -c "2323 OPEN"` = **1**。
 
 ---
 
-## 5. 验收记录（全部实测）
+## 7. 验收记录（全部在真机上跑过）
 
-### 5.1 打包与 md5
-
-```
-14 个文件，解压后 61.5 MB，zip 53.9 MB
-stock 四个 + images 三个 md5 全部等于实证值
-MD5SUMS.txt 与 zip 内实际内容逐项一致
-```
-
-### 5.2 传到另一台 Windows 解压（PowerShell Expand-Archive）
-
-```
-14 个文件全部还原，字节数与源目录逐项相同
-中文名带 utf8=Y 标志
-```
-
-### 5.3 在解压目录里跑主程序
-
-| 命令 | 结果 |
+| 项 | 结果 |
 |---|---|
-| `--help` | 参数齐全，19 个 |
-| `--explain` | 正常，中文不乱码 |
-| `--flash-stock auto --dry-run` | 找到 stock 镜像、FIT/squashfs 校验通过、计划 kernel→mtd10 / rootfs→mtd11、退出码 0 |
-| `--verify` | 逃生出口 5 条，A 槽 rootfs 判为「非已知原厂」、B 槽判为「原厂 4.4.60」，判定正确 |
-| `--restore-bslot --dry-run` | md5 门禁通过，kernel→mtd5 / rootfs→mtd6 |
+| `-SelfTest` 离线自检 | ✅ 全过（含 11 条门禁用例） |
+| getroot | ✅ `*** 2323 OPEN t=0s ***` → `uid=0(root) gid=0(root)` |
+| 会话复用 | ✅ 3 次操作只 getroot 1 次 |
+| 安全审计 [5] | ✅ 两槽 md5、u-boot md5、五条逃生出口 |
+| 整片备份 [6] | ✅ 15 分区 **29 秒**，md5 与 Python 版逐个一致 |
+| 收尾清理 | ✅ 别名 + 防火墙全清，无残留 |
+| 刷 OpenWrt dry-run | ✅ 内核 → mtd13 +seek 8 块（避开 4 MiB 截断） |
+| 刷原厂 dry-run | ✅ 选定 A 槽 2.0.2，内核 → mtd10，rootfs → mtd11 |
+| 刷 u-boot dry-run | ✅ `-> mtd9 0x4700000   mtd4 0x700000` |
+| TTL 串口刷写 | ⬜ 代码就位，本次未插 TTL 线，**未上机** |
 
-`--flash-stock auto --dry-run` 能跑通这条最关键：它同时证明了
-
-- `find_script()` 找到了同目录的 `srv.py` / `elink_gw4.py`
-- 自动 getroot 成功（Servers 起得来）
-- `find_stock_set()` 找到了同目录的 `stock/`
-- 计划落点与安全门禁都没问题
-
----
-
-## 6. 板上当前状态（`--verify` 实测，2026-11-07）
-
-```
-boot_flag (mtd14) 头 = 55aa4246          → 能选槽
-mtd4 / mtd9 = d0ada9f7… = 我们的 kit
-
-A 槽 mtd10/11   kernel FIT  2868d8e9…（原厂 4.4.60）
-                rootfs squashfs 3df05b56…（不是任何已知原厂版本）
-                → 可启动，但这个槽的原厂回退能力不完整
-
-B 槽 mtd5/6     kernel FIT  2868d8e9…  rootfs bf2f92ce…
-                → 可启动，完整原厂 4.4.60
-
-离线原厂镜像：找到 2.0.2 那组
-结论：逃生出口 5 条，mtd0/mtd1/mtd2/mtd14 都未动
-```
-
-A 槽那个 `2868d8e9` 是上一轮从 u-boot 里 `nand read 0x880000` → `nand write 0x4880000`
-写进去的（B 槽原厂内核），所以 A 槽现在是「原厂内核 + OpenWrt rootfs」的半残状态。
-跑一次菜单 `6 刷回原厂到 A 槽` 就变成完整 2.0.2（`170b2188` + `30f48741`）。
+**未实测：真正写入 flash。** 所有写入路径只跑了 dry-run。
 
 ---
 
-## 7. 重建
+## 8. 板上当前状态（原厂固件下实测）
+
+```
+内核 4.4.60   固件 stock   IP 192.168.1.175
+A 槽 kernel   mtd10 0x4880000  md5=2868d8e9...（原厂 4.4.60）
+B 槽 kernel   mtd5  0x0880000  md5=2868d8e9...（原厂 4.4.60）
+A 槽 u-boot   mtd9  0x4700000  md5=d0ada9f7...（我们的 kit）
+B 槽 u-boot   mtd4  0x0700000  md5=d0ada9f7...（我们的 kit）
+boot_flag     mtd14 0x4000000  55aa4246 00000001
+```
+
+两槽内核 md5 相同是**真实状态**：之前用 kit 把 B 槽原厂内核写过 0x4880000。
+
+---
+
+## 9. 重建
 
 ```bash
-# WSL 里跑（要 powershell 打 zip）
+# WSL 里跑（要 powershell.exe 打 zip，中文文件名才不会乱）
 cd wta301-2512
-bash deliver/make-getroot-kit.sh              # 输出 ../work/wta301-kit
+bash deliver/make-getroot-kit.sh              # 输出 ../work/wta301-kit + .zip
 bash deliver/make-getroot-kit.sh /tmp/kit     # 指定输出目录
 ```
 
-脚本会先 `rm -rf` 目标目录再从零重建，然后逐个校验 md5。任一不符即退出。
-
-源文件取自四处：
-
-```
-wta301-2512/deliver/wta301-getroot.py
-wta301-2512/deliver/kit/{启动.bat,使用说明.txt}
-wta301-2512/deliver/stock/*.bin
-work/net/{srv.py,elink_gw4.py}
-work/deliver-final-p29/*.bin
-```
-
-`deliver/stock/*.bin` 被 `.gitignore` 排除，克隆仓库后需要先按
-`deliver/stock/README.md` 从原厂全盘镜像 `flash_full_128M.bin` 里按偏移切出来
-（四个 md5 都写在那份 README 里）。
+脚本会逐个校验 md5，缺一个文件就报错退出 —— 不允许出现半套。
