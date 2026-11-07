@@ -96,6 +96,7 @@
 | `patches/mac80211/` | ath11k 低内存 DP ring 尺寸 |
 | `patches/fstools/` | `fstools_overlay_name` 支持（overlay 用自定义 UBI 卷名） |
 | `patches/bdf/` | Wi-Fi 板型容器 `board-2.bin` 的**生成位置**（仓库不分发，见下）。用 `tools/mk_board2_from_art.py` 从你自己的 ART 分区生成 |
+| `patches/tphdr/` | TP 头模板（**122 字节**，不是 128 MB 全盘镜像）。出包时拼进固件包，字段含义见该目录 README |
 | `files/` | DTS + 设备树覆盖 |
 | `files-rootfs/` | rootfs overlay：`net-tune` 守护、sysctl、LuCI 温度面板、rpcd 数据源 |
 | `files-base-files/` | base-files overlay：出厂无线配置、uci-defaults |
@@ -109,6 +110,15 @@
 
 **不包含**（按固定引用取）：OpenWrt 源码树（14 GB）、u-boot 源码树（133 MB）、工具链。
 具体 tag / commit 见 `docs/REPRODUCE.md`。
+
+**也不需要**：全盘镜像（128 MB）、u-boot 槽镜像、原厂固件包 ——
+这三样早期是构建的硬依赖，现在都解耦了：
+TP 头用 `patches/tphdr/` 里的 122 字节模板（逐字节等价，见
+`docs/REPRODUCTION-VERIFICATION.md` §8.2）；u-boot 槽只影响一个可选字段，
+缺了会明确降级并告诉你三种处理方式。
+
+已验证：把仓库 clone 到**没有 `work/` 上级目录**的地方，
+`make-release.sh` 与 `make-deliverable.sh` 都能 `RC=0`（§8.3）。
 
 ---
 
