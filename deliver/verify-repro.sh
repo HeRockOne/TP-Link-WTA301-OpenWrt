@@ -507,6 +507,52 @@ else
 fi
 
 # ══════════════════════════════════════════════════════════════════
+sec "11. files-rootfs 权限（rpcd 会静默跳过 world-writable 的 ucode 脚本）"
+# ══════════════════════════════════════════════════════════════════
+FR="$SRC/files-rootfs"
+if [ ! -d "$FR" ]; then
+	bad "缺 files-rootfs/"
+else
+	# WSL 的 /mnt/c 是 DrvFs，默认不启用 metadata，所有文件都显示 777。
+	# cp -a 会把这个假 777 带进 squashfs。rpcd 的 ucode 插件对 world-writable
+	# 零容忍（上游 rpcd/ucode.c：`if (s.st_mode & S_IWOTH) { "Ignoring..." ; continue; }`），
+	# 结果是 ubus 里没有 wta301 对象，LuCI 概览页 CPU/温度整段消失，
+	# 前端只报 Not found，完全看不出是权限问题。所以这里在 WSL 里看到的 777
+	# 不算失败（那是挂载假象），真正要查的是构建脚本有没有归一化。
+	if grep -q 'chmod 0755 {} +' "$SRC/deliver/apply-rootfs-only.sh" && 	   grep -q 'find $ROOTFILES -type f -exec chmod 0644' "$SRC/deliver/apply-rootfs-only.sh"; then
+		ok "apply-rootfs-only.sh 复制后做了权限归一化（目录 755 / 文件 644）"
+	else
+		bad "apply-rootfs-only.sh 没有权限归一化 —— /mnt/c 的假 777 会进 squashfs，rpcd 静默跳过 ucode 脚本"
+	fi
+	if grep -q 'find $ROOTFILES -type f -exec chmod 0644' "$SRC/deliver/apply-to-2512.sh"; then
+		ok "apply-to-2512.sh 同样做了权限归一化"
+	else
+		bad "apply-to-2512.sh 缺权限归一化"
+	fi
+	# 移动端修复：Argon 主题的 .table 是真表格 + .th 是 nowrap，手机上必撑爆；
+	# 而且 hide-xs / hide-sm 在 Argon 里根本没定义（只有 bootstrap/mobile.css 有）。
+	# 修法是单独的 CSS + 在 head.ut 里多一行 <link>，必须在 cascade.css 之后。
+	if [ -f "$FR/www/luci-static/argon/css/wta301-mobile.css" ]; then
+		ok "有移动端修复 CSS：www/luci-static/argon/css/wta301-mobile.css"
+	else
+		bad "缺 wta301-mobile.css（手机上看无线列表会挤成一条）"
+	fi
+	if grep -q 'wta301-mobile.css' "$FR/usr/share/ucode/luci/template/themes/argon/head.ut" && 	   grep -q 'hide-xs' "$FR/www/luci-static/argon/css/wta301-mobile.css"; then
+		ok "head.ut 已注入 <link>，且 CSS 补上了 Argon 缺失的 hide-xs"
+	else
+		bad "head.ut 没注入 wta301-mobile.css，或 CSS 没补 hide-xs"
+	fi
+	# rpcd ucode 脚本与 ACL 是这套机制的关键文件，必须存在
+	for f in usr/share/rpcd/ucode/wta301 	         usr/share/rpcd/acl.d/luci-mod-status-wta301.json 	         www/luci-static/resources/view/status/include/15_sensors.js; do
+		if [ -f "$FR/$f" ]; then
+			ok "rpcd 三件套存在：$f"
+		else
+			bad "缺 $f（概览页 CPU/温度不会出现）"
+		fi
+	done
+fi
+
+# ══════════════════════════════════════════════════════════════════
 sec "总结"
 # ══════════════════════════════════════════════════════════════════
 echo ""

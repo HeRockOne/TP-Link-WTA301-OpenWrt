@@ -1,0 +1,134 @@
+/* ============================================================================
+   WTA301 —— Argon 主题移动端修复
+   ============================================================================
+
+   为什么需要这个文件（都在真机上核对过，不是猜）：
+
+   1) Argon 的 .table 是真表格
+        cascade.css:2251  .table { position: relative; display: table; }
+        cascade.css:2271  .td, .th { display: table-cell; ... }
+      真表格的行不能折，只能把 N 列硬塞进屏宽。
+
+   2) 表头永远不换行
+        cascade.css:2290  .th { font-weight: bold; white-space: nowrap; }
+      无线关联表有 5 列（网络 / MAC 地址 / 主机 / 信号-噪声 / RX 速率 / TX 速率），
+      表头 nowrap ⇒ 每列最小宽度 = 表头整行文字宽 ⇒ 合计远超 375~414 px。
+      结果就是「Wi-Fi 名称到处歪」或「挤成一条」。
+
+   3) 有一列被写死成 23rem
+        cascade.css:8127  #wifi_assoclist_table > .tr > .td[data-title="RX Rate / TX Rate"] { width: 23rem; }
+      23rem = 368 px，单这一列就比整块手机屏还宽。
+      而且这个选择器用的是英文 data-title，中文界面下压根匹配不上 ——
+      等于中文用户既吃不到宽度限制，也没有任何适配。
+
+   4) hide-xs / hide-sm 在 Argon 里根本没有定义
+        grep -r hide-xs /www/luci-static/argon/  -> 0 个文件
+        grep -r hide-xs /www/luci-static/bootstrap/mobile.css -> 命中
+      LuCI 在无线关联表上写的是 <th class="th hide-xs">MAC 地址</th>，
+      本意是「手机上藏掉这一列」。Bootstrap 主题有 mobile.css 兜着，
+      Argon 没有 ⇒ 这个类完全失效，MAC 列在手机上照样占位。
+
+   5) SSID 徽标是 inline-flex，不会自己缩
+        cascade.css:4114  .ifacebadge { display: inline-flex; align-items: center; }
+
+   Bootstrap 主题的解法是「表格重排成卡片 + 用 data-title 补标签」
+   （mobile.css: .table{display:flex;flex-direction:column} / .td::before{content:attr(data-title)}）。
+   这条路在本板走不通：60_wifi.js 里 data-title 出现次数 = 0，
+   重排成卡片后所有数值都没有标签，反而更难读。
+
+   所以这里采用「保留表格形状 + 允许压缩换行 + 手机藏掉次要列」的办法，
+   全部包在 max-width: 767px 里，桌面端一个像素都不动。
+   ============================================================================ */
+
+/* ---------------------------------------------------------------------------
+   1. 补上 Bootstrap 有、Argon 没有的两个类
+   xs = < 768px，sm = < 992px（与 LuCI 其它地方对 hide-xs/hide-sm 的预期一致）
+   --------------------------------------------------------------------------- */
+@media screen and (max-width: 767px) {
+	.hide-xs {
+		display: none !important;
+	}
+}
+
+@media screen and (max-width: 991px) {
+	.hide-sm {
+		display: none !important;
+	}
+}
+
+@media screen and (max-width: 767px) {
+	/* -------------------------------------------------------------------
+	   2. 表格允许被压缩、允许换行
+	   ------------------------------------------------------------------- */
+
+	/* 上游 .th 是 nowrap，是「撑爆屏幕」的第一元凶 */
+	.th {
+		white-space: normal;
+		word-break: break-word;
+		overflow-wrap: anywhere;
+	}
+
+	/* 手机屏窄，内边距收一点，把宽度让给内容 */
+	.td,
+	.th {
+		padding: 0.4em 0.3em;
+	}
+
+	/* 长主机名 / 长备注不许撑列 */
+	.td {
+		word-break: break-word;
+		overflow-wrap: anywhere;
+	}
+
+	/* -------------------------------------------------------------------
+	   3. 无线关联表：去掉写死的 23rem，按内容自适应
+	   （用 .td 通配而不是那个英文 data-title 选择器 ——
+	     中文界面下 data-title 是「RX 速率 / TX 速率」，匹配不上）
+	   ------------------------------------------------------------------- */
+	#wifi_assoclist_table > .tr > .td,
+	#wifi_assoclist_table > .tr > .th {
+		width: auto !important;
+		max-width: none !important;
+	}
+
+	#wifi_assoclist_table > .tr.table-titles > .th {
+		/* 表头可换行的前提下，两行文字比一整行挤爆好 */
+		line-height: 1.2;
+	}
+
+	/* -------------------------------------------------------------------
+	   4. SSID / 接口徽标：允许折行，不再挤成一条
+	   ------------------------------------------------------------------- */
+	.ifacebadge {
+		flex-wrap: wrap;
+		max-width: 100%;
+	}
+
+	.ifacebadge > span {
+		min-width: 0;
+		overflow-wrap: anywhere;
+		word-break: break-word;
+	}
+
+	/* 图标不许被压扁 */
+	.ifacebadge > img {
+		flex: 0 0 auto;
+	}
+
+	/* 徽标里的内边距在手机上也收一点 */
+	.td > .ifacebadge,
+	.td .ifacebadge {
+		padding: 0.2rem 0.4rem;
+	}
+
+	/* -------------------------------------------------------------------
+	   5. 兜底：万一还是个宽表，就在无线区块内部横向滚动，
+	      而不是把内容压到看不清。只限无线区块，不碰别的 cbi-section
+	      （下拉框/提示框会伸出容器，全局 overflow 会把它们裁掉）。
+	   ------------------------------------------------------------------- */
+	#cbi-wireless {
+		max-width: 100%;
+		overflow-x: auto;
+		-webkit-overflow-scrolling: touch;
+	}
+}

@@ -40,6 +40,25 @@ rm -f $ROOTFILES/usr/sbin/rps-watch $ROOTFILES/etc/init.d/rps \
       $ROOTFILES/etc/sysctl.d/99-wta301-rps.conf $ROOTFILES/etc/rc.d/S99rps
 mkdir -p $ROOTFILES
 cp -a $SRC/files-rootfs/. $ROOTFILES/
+# ---------------------------------------------------------------------------
+# 权限归一化（必须，别删）
+#
+# 构建跑在 WSL 里，而源码在 /mnt/c（DrvFs）。WSL 默认不启用 metadata，
+# 所以 /mnt/c 下所有文件在 Linux 眼里都是 777 —— 那是假权限，不是仓库里的真实
+# 权限（Windows 侧看是 644/755）。上面那条 `cp -a` 会把这个假 777 原样带进
+# 构建树的 files/，再打进 squashfs。
+#
+# 踩过的坑：/usr/share/rpcd/ucode/wta301 变成 777 后，rpcd 的 ucode 插件会
+# 静默跳过它（上游 rpcd/ucode.c：`if (s.st_mode & S_IWOTH) { "Ignoring ucode
+# script ..." ; continue; }`），ubus 里根本没有 wta301 对象，于是 LuCI 概览页
+# 的「CPU 使用率与温度」整段消失，前端只报 Not found，看不出是权限问题。
+#
+# 所以这里不依赖源文件的权限，按 rootfs 惯例重新定：
+#   目录 755 / 普通文件 644 / init.d 与 sbin 下的脚本 755
+# ---------------------------------------------------------------------------
+find $ROOTFILES -type d -exec chmod 0755 {} +
+find $ROOTFILES -type f -exec chmod 0644 {} +
+find $ROOTFILES/etc/init.d $ROOTFILES/usr/sbin -type f -exec chmod 0755 {} + 2>/dev/null || true
 chmod 0755 $ROOTFILES/usr/sbin/net-tune $ROOTFILES/etc/init.d/net-tune
 # /etc/rc.d 符号链接：OpenWrt 用 S<NN><name> -> ../init.d/<name> 控制开机顺序。
 # 不用 `/etc/init.d/net-tune enable` 的原因是那要等板子起来跑；构建期放链接才叫固化。
