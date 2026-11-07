@@ -29,20 +29,47 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 
 
 def _find_backup():
-    """全盘镜像的候选路径（目录重整后 backup/ 从 op-build/ 下移到了 work/）。"""
+    """全盘镜像的候选路径（目录重整后 backup/ 从 op-build/ 下移到了 work/）。
+
+    返回 None 表示没有 —— 这不是错误，模板会从 patches/tphdr/tphdr-head.hex 读。
+    以前这里返回 cands[0]（不存在的路径），调用方只好硬失败；
+    但 128 MB 全盘镜像不可能进仓库（含 ART 校准数据），
+    而真正需要的只有 122 字节的头部字段 —— 见 patches/tphdr/README.md。
+    """
     cands = [
+        os.environ.get('FLASH_FULL', ''),
         os.path.join(HERE, 'backup', 'flash_full_128M.bin'),
         os.path.join(HERE, '..', 'backup', 'flash_full_128M.bin'),
         os.path.join(HERE, '..', '..', 'work', 'backup', 'flash_full_128M.bin'),
     ]
     for c in cands:
-        c = os.path.normpath(c)
-        if os.path.isfile(c):
-            return c
-    return os.path.normpath(cands[0])
+        if c and os.path.isfile(os.path.normpath(c)):
+            return os.path.normpath(c)
+    return None
 
 
 BACKUP = _find_backup()
+
+# TP 头模板：只有前 0x120 字节有意义（非零 122 个），后面全 0。
+# 有全盘镜像时用镜像里的原件（便于逐字节核对）；没有就用仓库里这份，
+# 两者内容一致 —— 否则外部用户无法出包。
+TPHDR_HEX = os.path.join(HERE, '..', 'patches', 'tphdr', 'tphdr-head.hex')
+
+
+def _load_tphdr():
+    """返回 (tphdr 前 0x120 字节, 来源描述)。读不到则抛 RuntimeError。"""
+    if BACKUP:
+        with open(BACKUP, 'rb') as f:
+            f.seek(A_TPHDR)
+            return f.read(0x120), '全盘镜像 %s +0x%x' % (BACKUP, A_TPHDR)
+    p = os.path.normpath(TPHDR_HEX)
+    if not os.path.isfile(p):
+        raise RuntimeError('既没有全盘镜像，也没有模板 %s' % p)
+    hexs = ''.join(l.strip() for l in open(p) if l.strip())
+    data = bytes.fromhex(hexs)
+    if len(data) < 0x120:
+        raise RuntimeError('模板 %s 只有 %d 字节，需要 0x120' % (p, len(data)))
+    return data[:0x120], '模板 %s' % p
 
 # A 槽几何（来自真机备份 + 反汇编）
 A_TPHDR = 0x4800000
@@ -159,12 +186,18 @@ def main():
     log('  rootfs 区 0x%x B，尾部补 0xFF %d B' % (len(rpad), args.rlen - len(r)))
 
     # ------------- 4. 造新的 TP 头 -------------
-    log('\n[4/6] 生成新的 TP 头（只改 +0x5c / +0x64 / +0xa0）')
-    if not os.path.isfile(BACKUP):
-        log('  *** 找不到 %s ***' % BACKUP)
+    log('\n[4/6] 生成新的 TP 头（只改 +0x5c / +0x64 / +0x90 / +0xa0）')
+    # 只需要前 0x120 字节；有全盘镜像用镜像原件，没有就用仓库里那份模板。
+    # 两者内容一致（后者就是从前者取出来的），所以产出的 tphdr 逐字节相同。
+    try:
+        head, src = _load_tphdr()
+    except RuntimeError as e:
+        log('  *** %s ***' % e)
         return 1
-    stock = open(BACKUP, 'rb').read()
-    tph = bytearray(stock[A_TPHDR:A_TPHDR + TPHDR_LEN])
+    log('  TP 头来源：%s' % src)
+    # 后面全部补 0（与 NAND 上的实际情况一致：0xe0 之后全 0，不是 0xFF）
+    tph = bytearray(TPHDR_LEN)
+    tph[:len(head)] = head
     orig = bytes(tph)
 
     if tph[:8] != b'\x00\x00\x01\x00\x55\xaa\x9d\xd1':
