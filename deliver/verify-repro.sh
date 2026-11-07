@@ -825,6 +825,47 @@ if [ -f "$AP" ]; then
 		|| bad "apply-to-2512.sh 不拦 .config 未铺（luci 包会全丢）"
 fi
 
+# ③ TP 头模板：mk_op_pack 不许再硬依赖 128 MB 全盘镜像
+TH=$SRC/patches/tphdr/tphdr-head.hex
+if [ ! -f "$TH" ]; then
+	bad "缺 patches/tphdr/tphdr-head.hex（外部用户会卡在 make-release 第 4 步）"
+else
+	nl=$(wc -l < "$TH")
+	h1=$(head -1 "$TH")
+	[ "$nl" = "18" ] && ok "tphdr 模板 18 行" || bad "tphdr 模板应 18 行，实为 $nl"
+	[ "$h1" = "0000010055aa9dd1a8c88331c969fbbf" ] \
+		&& ok "tphdr 模板 magic 正确" || bad "tphdr 模板首行不符（magic 错）"
+	# 关键字段（第 5、7 行 起）
+	if sed -n '6p' "$TH" | grep -q '^04800000000200000488000000400000$'; then
+		ok "tphdr +0x50/+0x58 = tphdr 0x4800000/0x20000 + kernel 0x4880000/0x400000"
+	else
+		bad "tphdr +0x50/+0x58 字段不符"
+	fi
+	if sed -n '7p' "$TH" | grep -q '^04fc000000c00000'; then
+		ok "tphdr +0x60 = rootfs 0x4fc0000/0xC00000"
+	else
+		bad "tphdr +0x60 字段不符"
+	fi
+	# 机型字符串在 hex 文件里是 ASCII "WTA301V1" 的十六进制
+	if grep -qi '5754413330315631' "$TH"; then
+		ok "tphdr 含机型字符串 WTA301V1（hex 5754413330315631）"
+	else
+		bad "tphdr 缺机型字符串 WTA301V1"
+	fi
+	[ -f "$SRC/patches/tphdr/README.md" ] && ok "tphdr README 在位" \
+		|| bad "缺 patches/tphdr/README.md（字段含义无人可查）"
+	# 脚本必须能走模板分支
+	grep -q '_load_tphdr' "$SRC/tools/mk_op_pack.py" 2>/dev/null \
+		&& ok "mk_op_pack.py 有 _load_tphdr（模板回落）" \
+		|| bad "mk_op_pack.py 没有模板回落，外部用户出不了包"
+	grep -q 'flash_full_128M.bin' "$SRC/tools/mk_op_pack.py" 2>/dev/null && {
+		# 允许出现在候选路径里，但不许当唯一来源后 return 1
+		grep -q "if not os.path.isfile(BACKUP):" "$SRC/tools/mk_op_pack.py" \
+			&& bad "mk_op_pack.py 又出现「BACKUP 不存在就失败」" \
+			|| ok "mk_op_pack.py 没有把全盘镜像当硬依赖"
+	}
+fi
+
 # ══════════════════════════════════════════════════════════════════
 sec "总结"
 # ══════════════════════════════════════════════════════════════════
@@ -844,4 +885,5 @@ echo "    3) bash deliver/make-deliverable.sh <ver>"
 echo "    4) bash deliver/make-open-release.sh <VER>"
 echo "    5) 上板：verify-p26.sh / verify-p28.sh"
 exit 0
+
 
