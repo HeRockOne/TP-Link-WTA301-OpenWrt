@@ -1480,10 +1480,34 @@ function Send-FileToDevice {
     return $dst
 }
 
+function Test-SameSlot {
+    <#
+        擦自己正在跑的那个槽 = 持住 MTD 全局锁 → squashfs 读也堵 → dropbear/uhttpd 全死，
+        ping 通但 22/80 断，只能断电重启。概率性发作，本轮真机踩过。
+        跑 A 写 B ✓ / 跑 B 写 A ✓ / 跑 A 写 A ✗
+        所以写之前必须确认：目标槽 != 当前根分区所在槽。
+    #>
+    param($Table, [int64]$TargetAbs, [string]$What)
+    $live = Get-LiveRootOffset -Table $Table
+    if ($live -le 0) { return }
+    $liveSlot = if ($live -eq $script:SlotA.Rootfs) { 'A' }
+                elseif ($live -eq $script:SlotB.Rootfs) { 'B' } else { '?' }
+    $tgtSlot  = if ($TargetAbs -eq $script:SlotA.Rootfs) { 'A' }
+                elseif ($TargetAbs -eq $script:SlotB.Rootfs) { 'B' } else { '?' }
+    if ($liveSlot -ne '?' -and $liveSlot -eq $tgtSlot) {
+        $msg = (-f "同槽拒绝：当前根分区在 {0} 槽，却要写 {0} 槽的{1}。", $liveSlot, $What) + `
+               "擦运行中的槽会持 MTD 全局锁把系统卡死（ping 通但 22/80 断）。" + `
+               "请先从另一个槽启动：A 槽坏了就断电重启，一级 u-boot 会自动跳到 B 槽原厂。"
+        throw $msg
+    }
+}
+
 function Invoke-FlashOpenWrt {
     param($Sess, $Table, [string]$PcIp, [string]$PkgPath)
     $facts = Get-DeviceFacts -Sess $Sess -Table $Table
     Write-Info ("当前固件: {0}  内核 {1}" -f $facts.Kind, $facts.Kernel)
+
+    Test-SameSlot -Table $Table -TargetAbs $script:SlotA.Rootfs -What 'rootfs'
 
     $fsize = (Get-Item -LiteralPath $PkgPath).Length
     $kLen  = [int64]0x480000
@@ -1557,87 +1581,6 @@ function Invoke-FlashOpenWrt {
 
     Write-Ok "写入完成且校验通过，准备重启"
     if (-not $Keep) { Send-Background -Sess $Sess -Text "reboot" ; Start-Sleep -Seconds 8 }
-    return $true
-}
-
-function Invoke-FlashStock {
-    param($Sess, $Table, [string]$PcIp, [string]$StockDir)
-    $facts = Get-DeviceFacts -Sess $Sess -Table $Table
-
-    # 只认 md5 不认文件名（文件名跨固件会反，见上面的实测证据）
-    $sets = @(
-        @{ Name='A槽原厂 2.0.2 (2024-12-04)'
-           Kernel=@('mtd5_kernel.bin',        '170b2188884cc040d64ac5bed7ddc365', 4194304)
-           Rootfs=@('mtd6_rootfs.bin',        '30f487419d90b2239b65035390f3b73f', 12582912) },
-        @{ Name='B槽原厂 4.4.60 (2024-11-28)'
-           Kernel=@('mtd10_kernel_bak.bin',   '2868d8e975da7c641e54c72b6beb8f26', 4194304)
-           Rootfs=@('mtd11_rootfs_bak.bin',   'bf2f92ceaf509093c8854825f2dc8d5e', 12582912) }
-    )
-
-    # 只挑「文件齐全且 md5 对得上」的组
-    $avail = @()
-    foreach ($s in $sets) {
-        $kp = Join-Path $StockDir $s.Kernel[0]
-        $rp = Join-Path $StockDir $s.Rootfs[0]
-        if ((Get-LocalMd5 $kp) -eq $s.Kernel[1] -and (Get-LocalMd5 $rp) -eq $s.Rootfs[1]) { $avail += $s }
-    }
-    if ($avail.Count -eq 0) { throw "在 $StockDir 里找不到完整且 md5 正确的原厂镜像组（需要 kernel + rootfs 各 4 MiB / 12 MiB）" }
-
-    # 优先选跟当前 B 槽一模一样的版本：B 槽是回退用的，两槽同版本最不容易出意外，
-    # 而且这套镜像在这块板上验证过能启动。
-    $pick = $avail[0]
-    $bK = Find-MtdByOffset -Table $Table -Offset $script:SlotB.Kernel
-    if ($bK) {
-        $bMd5 = Get-FirstMd5 (Invoke-Cmd -Sess $Sess -TimeoutSec 180 -Command `
-                ("dd if=/dev/mtdblock{0} bs=65536 count=64 2>/dev/null | md5sum" -f $bK.Index))
-        foreach ($s in $avail) {
-            if ($s.Kernel[1] -eq $bMd5) { $pick = $s; break }
-        }
-    }
-    Write-Ok "选定: $($pick.Name)"
-
-    # 原厂要写 A 槽（B 槽是当前活分区或回退槽，不碰）
-    $kt = Resolve-WriteTarget -Table $Table -AbsOffset $script:SlotA.Kernel -NeedLen 4194304 `
-                              -What '原厂内核' -Action 'flash-stock'
-    $rt = Resolve-WriteTarget -Table $Table -AbsOffset $script:SlotA.Rootfs -NeedLen 12582912 `
-                              -What '原厂 rootfs' -Action 'flash-stock'
-    Write-Info ("内核 -> mtd{0} ({1})   rootfs -> mtd{2} ({3})" -f `
-                $kt.Index, (Format-Hex $kt.Offset), $rt.Index, (Format-Hex $rt.Offset))
-
-    if ($DryRun) { Write-Warn2 "[dry-run] 不写入"; return $true }
-    if (-not $Yes) {
-        $a = Read-Host "   确认把原厂写进 A 槽？输入 YES"
-        if ($a -ne 'YES') { Write-Warn2 "已取消"; return $false }
-    }
-
-    $bad = @()
-    foreach ($pair in @(@{Mtd=$kt; Src=(Join-Path $StockDir $pick.Kernel[0]); Len=4194304; What='内核'},
-                        @{Mtd=$rt; Src=(Join-Path $StockDir $pick.Rootfs[0]); Len=12582912; What='rootfs'})) {
-        $remote = Send-FileToDevice -Sess $Sess -LocalPath $pair.Src -PcIp $PcIp -RemoteName 'stock.bin'
-        $cnt = $pair.Len / 65536
-        Write-Info ("写 $($pair.What)...")
-        $out = Invoke-Cmd -Sess $Sess -TimeoutSec 900 -Command `
-               ("dd if={0} of=/dev/mtdblock{1} bs=65536 count={2} seek={3} 2>&1 | tail -1" -f `
-                $remote, $pair.Mtd.Index, $cnt, $pair.Mtd.SeekBlocks)
-        Write-Info ("   " + $out.Replace("`n", "`n   "))
-
-        # 写入后回读校验（AGENTS.md 5.5）
-        $devMd5 = Get-FirstMd5 (Invoke-Cmd -Sess $Sess -TimeoutSec 900 -Command `
-                  ("dd if=/dev/mtdblock{0} bs=65536 skip={1} count={2} 2>/dev/null | md5sum" -f `
-                   $pair.Mtd.Index, $pair.Mtd.SeekBlocks, $cnt))
-        $locMd5 = Get-LocalMd5 -Path $pair.Src
-        if ($devMd5 -ne $locMd5) {
-            Write-Warn2 ("   {0} 校验不符：闪存 {1}  镜像 {2}" -f $pair.What, $devMd5, $locMd5)
-            $bad += $pair.What
-        } else {
-            Write-Ok ("   {0} 校验通过 {1}" -f $pair.What, $devMd5)
-        }
-    }
-    Invoke-Cmd -Sess $Sess -Command "sync" -TimeoutSec 60 | Out-Null
-    if ($bad.Count -gt 0) {
-        throw ("写入后校验失败：{0}。A 槽内容不可信，请重刷一次。" -f ($bad -join '、'))
-    }
-    Write-Ok "写入完成且校验通过"
     return $true
 }
 
@@ -1953,7 +1896,11 @@ function Show-Explain {
 function Read-Choice {
     param([string]$Prompt = "   输入序号")
     Write-Host ("   {0}: " -f $Prompt) -NoNewline
-    return (Read-Host).Trim()
+    # stdin 被重定向（或某些非交互宿主）时 Read-Host 返回 $null，
+    # 直接 .Trim() 会报「不能对 Null 值表达式调用方法」。当空输入处理即可。
+    $v = Read-Host
+    if ($null -eq $v) { return '' }
+    return $v.Trim()
 }
 
 function Test-IpAlive {
@@ -2065,26 +2012,6 @@ function Invoke-FullStockToOpenWrt {
     return $true
 }
 
-function Invoke-FullOpenWrtToStock {
-    <#
-        OpenWrt -> 原厂完整流程。这条路**不动 u-boot**：
-        两个槽的 kit 已经装好，留着没坏处（一级 u-boot 校验过去之后就交给 kit，
-        kit 再按槽头决定 bootm 哪个内核）。
-        只覆盖 A 槽的 kernel/rootfs 两个区，B 槽原厂仍然完好。
-    #>
-    param($Sess, $Table, [string]$PcIp, [string]$StockDir)
-
-    # 不备份当前 OpenWrt。
-    # 理由：原厂镜像本来就在 B 槽（0x880000 / 0xfc0000）完好躺着，刷坏了
-    # 一级 u-boot 验 B 槽就退回原厂；想回 OpenWrt 再刷一遍安装包即可。
-    # 备份这一份 OpenWrt 除了多等三十秒、多占 140MB，没有任何额外保险。
-    # 真要存底，菜单里另有 [5] 整片备份，由用户自己选。
-
-    Write-Step "[1/1] 刷原厂到 A 槽（内核 0x4880000 / rootfs 0x4fc0000）"
-    [void](Invoke-FlashStock -Sess $Sess -Table $Table -PcIp $PcIp -StockDir $StockDir)
-    return $true
-}
-
 function Main {
     Write-Host ""
     Write-Host " ====================================================================" -ForegroundColor Cyan
@@ -2099,27 +2026,11 @@ function Main {
     if (-not $pcIp) { throw "本机没有和设备 $devIp 同网段的地址。请确认网线插在设备的 LAN1、本机也在同一网段。" }
     Write-Info "设备 $devIp   本机 $pcIp"
 
-    # ---- 走哪条路由用户自己定，不探测 ----
-    # 探测（看 22 端口）看着聪明，实际上是多余的：用户自己知道手上是什么固件。
-    # 而且探测一旦判错，后面整条流程都是错的 —— 不如让人选。
-    $kind = $Kind
-    while (-not $kind) {
-        Write-Host ""
-        Write-Host " 现在板子上跑的是什么固件？" -ForegroundColor Cyan
-        Write-Host "   [1] 原厂固件  —— 我要刷成 OpenWrt（会先 getroot，再备份原厂）"
-        Write-Host "   [2] OpenWrt  —— 我要刷回原厂（输 root 密码就能进，本来就有 root）"
-        Write-Host "   [0] 退出"
-        $k = Read-Choice -Prompt "选 1 或 2"
-        if ($k -eq '0') { return }
-        if ($k -eq '1') { $kind = 'stock' }
-        elseif ($k -eq '2') { $kind = 'openwrt' }
-        else { Write-Warn2 "请输入 1 或 2" }
-    }
-    if ($kind -eq 'openwrt') {
-        Write-Ok "路线：OpenWrt -> 原厂。SSH 登录（本来就有 root，不需要 getroot）"
-    } else {
-        Write-Ok "路线：原厂 -> OpenWrt。先 getroot 打进去，再备份原厂，最后刷"
-    }
+    # ---- 只有一条路：原厂 -> OpenWrt ----
+    # 不探测固件、也不问「你现在是什么固件」：这个工具就是给手里拿着原厂
+    # 机器的人用的。只有原厂需要先 getroot，也只有原厂需要先备份。
+    $kind = 'stock'
+    Write-Ok "路线：原厂 -> OpenWrt（先 getroot，再备份原厂，然后刷 u-boot + OpenWrt）"
 
     $sess  = $null     # 当前 root 连接（跨菜单项复用）
     $nops  = 0
@@ -2131,24 +2042,16 @@ function Main {
     while ($true) {
         Write-Host ""
         Write-Host " --------------------------------------------------------------------" -ForegroundColor DarkGray
-        if ($sess) { Write-Host ("   [已连上 {0}   {1}]" -f $devIp, $(if ($kind -eq 'openwrt') { 'OpenWrt' } else { '原厂' })) -ForegroundColor Green }
-        else       { Write-Host ("   [未连接   {0}]" -f $(if ($kind -eq 'openwrt') { 'OpenWrt' } else { '原厂' })) -ForegroundColor Yellow }
+        if ($sess) { Write-Host ("   [已连上 {0}   {1}]" -f $devIp, '原厂') -ForegroundColor Green }
+        else       { Write-Host ("   [未连接   {0}]" -f '原厂') -ForegroundColor Yellow }
 
-        if ($kind -eq 'openwrt') {
-            Write-Host "     [1] 连接（输 root 密码，只连不刷）"
-            Write-Host "     [2] ★ 一键：刷回原厂（A 槽 0x4880000 + 0x4fc0000，不备份、不动 u-boot）"
-            Write-Host "     [3] 只刷 u-boot kit"
-            Write-Host "     [4] 安全审计（只读）"
-            Write-Host "     [5] 整片备份到本机"
-        } else {
-            Write-Host "     [1] getroot 建立连接（只连不刷）"
-            Write-Host "     [2] ★ 一键：备份原厂 -> 刷 u-boot -> 刷 OpenWrt"
-            Write-Host "     [3] 只备份原厂"
-            Write-Host "     [4] 只刷 u-boot kit"
-            Write-Host "     [5] 只刷 OpenWrt"
-            Write-Host "     [6] 安全审计（只读）"
-            Write-Host "     [7] 整片备份到本机"
-        }
+        Write-Host "     [1] getroot 建立连接（只连不刷）"
+        Write-Host "     [2] ★ 一键：备份原厂 -> 刷 u-boot -> 刷 OpenWrt"
+        Write-Host "     [3] 只备份原厂"
+        Write-Host "     [4] 只刷 u-boot kit"
+        Write-Host "     [5] 只刷 OpenWrt"
+        Write-Host "     [6] 安全审计（只读）"
+        Write-Host "     [7] 整片备份到本机"
         Write-Host "     [9] 看分区表与风险说明"
         Write-Host "     [T] TTL 串口刷 u-boot（救砖；能上网就不用它）"
         Write-Host "     [0] 退出"
@@ -2187,53 +2090,33 @@ function Main {
             $facts = Get-DeviceFacts -Sess $sess -Table $table
             Write-Info ("当前固件: {0}  内核 {1}" -f $facts.Kind, $facts.Kernel)
 
-            if ($kind -eq 'openwrt') {
-                switch ($ch) {
-                    '1' { Write-Ok "已连上，什么也没改" }
-                    '2' {
-                        $sd = if ($StockDir) { $StockDir } else { Join-Path $script:Here 'stock' }
-                        [void](Invoke-FullOpenWrtToStock -Sess $sess -Table $table -PcIp $pcIp -StockDir $sd)
-                    }
-                    '3' {
-                        $bin = Join-Path $script:Here 'uboot\wta301-uboot-p21c.bin'
-                        [void](Invoke-FlashUbootKit -Sess $sess -Table $table -PcIp $pcIp -BinPath $bin)
-                    }
-                    '4' { [void](Invoke-Audit -Sess $sess -Table $table) }
-                    '5' {
-                        $d = if ($BackupDir) { $BackupDir } else { Join-Path $script:Here ("backup-" + (Get-Date -Format 'MMdd-HHmm')) }
-                        [void](Invoke-Backup -Sess $sess -Table $table -PcIp $pcIp -DestDir $d)
-                    }
-                    default { Write-Warn2 "OpenWrt 模式下没有这一项（输 9 看说明）" }
+            switch ($ch) {
+                '1' { Write-Ok "已拿到 root，什么也没改" }
+                '2' {
+                    $pkg = Read-Choice -Prompt "OpenWrt 完整包路径（回车 = images\wta301-op-25.12.6-p29.bin）"
+                    if (-not $pkg) { $pkg = Join-Path $script:Here 'images\wta301-op-25.12.6-p29.bin' }
+                    $d = if ($BackupDir) { $BackupDir } else { Join-Path $script:Here ("backup-" + (Get-Date -Format 'MMdd-HHmm')) }
+                    [void](Invoke-FullStockToOpenWrt -Sess $sess -Table $table -PcIp $pcIp -PkgPath $pkg -BackupDir $d)
                 }
-            } else {
-                switch ($ch) {
-                    '1' { Write-Ok "已拿到 root，什么也没改" }
-                    '2' {
-                        $pkg = Read-Choice -Prompt "OpenWrt 完整包路径（回车 = images\wta301-op-25.12.6-p29.bin）"
-                        if (-not $pkg) { $pkg = Join-Path $script:Here 'images\wta301-op-25.12.6-p29.bin' }
-                        $d = if ($BackupDir) { $BackupDir } else { Join-Path $script:Here ("backup-" + (Get-Date -Format 'MMdd-HHmm')) }
-                        [void](Invoke-FullStockToOpenWrt -Sess $sess -Table $table -PcIp $pcIp -PkgPath $pkg -BackupDir $d)
-                    }
-                    '3' {
-                        $d = if ($BackupDir) { $BackupDir } else { Join-Path $script:Here ("backup-" + (Get-Date -Format 'MMdd-HHmm')) }
-                        [void](Invoke-Backup -Sess $sess -Table $table -PcIp $pcIp -DestDir $d)
-                    }
-                    '4' {
-                        $bin = Join-Path $script:Here 'uboot\wta301-uboot-p21c.bin'
-                        [void](Invoke-FlashUbootKit -Sess $sess -Table $table -PcIp $pcIp -BinPath $bin)
-                    }
-                    '5' {
-                        $pkg = Read-Choice -Prompt "OpenWrt 完整包路径（回车 = images\wta301-op-25.12.6-p29.bin）"
-                        if (-not $pkg) { $pkg = Join-Path $script:Here 'images\wta301-op-25.12.6-p29.bin' }
-                        [void](Invoke-FlashOpenWrt -Sess $sess -Table $table -PcIp $pcIp -PkgPath $pkg)
-                    }
-                    '6' { [void](Invoke-Audit -Sess $sess -Table $table) }
-                    '7' {
-                        $d = if ($BackupDir) { $BackupDir } else { Join-Path $script:Here ("backup-" + (Get-Date -Format 'MMdd-HHmm')) }
-                        [void](Invoke-Backup -Sess $sess -Table $table -PcIp $pcIp -DestDir $d)
-                    }
-                    default { Write-Warn2 "原厂模式下没有这一项（输 9 看说明）" }
+                '3' {
+                    $d = if ($BackupDir) { $BackupDir } else { Join-Path $script:Here ("backup-" + (Get-Date -Format 'MMdd-HHmm')) }
+                    [void](Invoke-Backup -Sess $sess -Table $table -PcIp $pcIp -DestDir $d)
                 }
+                '4' {
+                    $bin = Join-Path $script:Here 'uboot\wta301-uboot-p21c.bin'
+                    [void](Invoke-FlashUbootKit -Sess $sess -Table $table -PcIp $pcIp -BinPath $bin)
+                }
+                '5' {
+                    $pkg = Read-Choice -Prompt "OpenWrt 完整包路径（回车 = images\wta301-op-25.12.6-p29.bin）"
+                    if (-not $pkg) { $pkg = Join-Path $script:Here 'images\wta301-op-25.12.6-p29.bin' }
+                    [void](Invoke-FlashOpenWrt -Sess $sess -Table $table -PcIp $pcIp -PkgPath $pkg)
+                }
+                '6' { [void](Invoke-Audit -Sess $sess -Table $table) }
+                '7' {
+                    $d = if ($BackupDir) { $BackupDir } else { Join-Path $script:Here ("backup-" + (Get-Date -Format 'MMdd-HHmm')) }
+                    [void](Invoke-Backup -Sess $sess -Table $table -PcIp $pcIp -DestDir $d)
+                }
+                default { Write-Warn2 "原厂模式下没有这一项（输 9 看说明）" }
             }
         } catch {
             Write-Err2 $_.Exception.Message

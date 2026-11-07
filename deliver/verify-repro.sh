@@ -453,41 +453,44 @@ for pair in "0x1060000:网页包紧凑布局:" \
 done
 
 # ══════════════════════════════════════════════════════════════════
-sec "10. Go 版一键工具的刷写正确性（防回退到裸 dd）"
+sec "10. 一键工具刷写正确性（防回退：裸 mtd / 无同槽保护 / 无回读）"
 # ══════════════════════════════════════════════════════════════════
-KITGO="$SRC/deliver/kitgo"
-if [ ! -d "$KITGO" ]; then
-	bad "deliver/kitgo 不存在"
+KITPS="$SRC/deliver/kit/wta301.ps1"
+if [ ! -f "$KITPS" ]; then
+	bad "deliver/kit/wta301.ps1 不存在"
 else
-	# 写 flash 必须走内核 MTD，绝不能 dd of=/dev/mtdN（不写 ECC，分区报废）
-	if grep -q 'mtd erase ' "$KITGO/flash.go" && grep -q 'mtd -q write' "$KITGO/flash.go"; then
-		ok "写 flash 走内核 MTD（mtd erase + mtd -q write）"
+	# 原厂 4.4.60 内核下写 /dev/mtdblockN 可用（本工具唯一路径：跑 B 槽写 A 槽）；
+	# OpenWrt 6.12.112 下 mtdblock 报 I/O error，那边必须 mtd erase + mtd -q write。
+	# 无论哪种，绝不能写裸 /dev/mtdN —— 内核不参与就不写 ECC，分区直接报废。
+	if grep -nE 'dd [^|]*of=/dev/mtd[0-9]' "$KITPS" | grep -v 'mtdblock' | grep -qv '#'; then
+		bad "ps1 里在写裸 /dev/mtdN（不写 ECC，分区会报废）"
 	else
-		bad "flash.go 里没有 mtd erase + mtd -q write，写 flash 会绕过 ECC"
+		ok "没有写裸 /dev/mtdN（只写 mtdblock，由内核算 ECC）"
 	fi
-	# 只查真代码，不查注释 —— 注释里写 dd of=/dev/mtdN 是在解释为什么不能用它
-	if grep -vE '^[[:space:]]*(//|\*|/\*)' "$KITGO"/*.go | grep -qE 'dd .*of=/dev/(mtd|mtdblock)'; then
-		bad "kitgo 里还在用 dd of=/dev/mtd*，会写坏 ECC"
-	else
-		ok "kitgo 里没有 dd of=/dev/mtd*"
-	fi
-	# 同槽保护：擦自己正在跑的槽会持 MTD 全局锁卡死系统
-	if grep -q 'func CheckSameSlot' "$KITGO/guard.go" && 	   grep -q 'CheckSameSlot(' "$KITGO/flash.go"; then
-		ok "有同槽保护（CheckSameSlot，交叉刷才放行）"
+	# 同槽保护：擦运行中的槽会持 MTD 全局锁把系统卡死
+	if grep -q 'function Test-SameSlot' "$KITPS" && grep -q 'Test-SameSlot -Table' "$KITPS"; then
+		ok "有同槽保护（Test-SameSlot，交叉刷才放行）"
 	else
 		bad "缺同槽保护 —— 擦运行中的槽会把系统卡死"
 	fi
 	# 永不写的分区必须按绝对偏移挡
-	if grep -q 'OffBootFlag' "$KITGO/guard.go" && grep -q 'OffFactoryBoot' "$KITGO/guard.go"; then
+	if grep -q "0x4000000' = 'boot_flag" "$KITPS" && \
+	   grep -q "0x0'       = 'factory_boot" "$KITPS"; then
 		ok "写入门禁按绝对偏移（含 mtd0 / boot_flag）"
 	else
-		bad "guard.go 里没按绝对偏移挡住 mtd0 / boot_flag"
+		bad "缺按绝对偏移的写入门禁（mtd0 / boot_flag）"
 	fi
 	# 回读校验必须存在
-	if grep -q '回读' "$KITGO/flash.go"; then
+	if [ "$(grep -c '回读' "$KITPS")" -ge 3 ]; then
 		ok "写入后有回读 md5 校验"
 	else
 		bad "写入后没有回读校验"
+	fi
+	# 只保留原厂 -> OpenWrt 一条路
+	if grep -q "kind = 'stock'" "$KITPS" && ! grep -q 'Invoke-FullOpenWrtToStock' "$KITPS"; then
+		ok "只有原厂 -> OpenWrt 一条路径（无 OpenWrt -> 原厂 分支）"
+	else
+		bad "路径未收敛到原厂 -> OpenWrt 单一路径"
 	fi
 fi
 
