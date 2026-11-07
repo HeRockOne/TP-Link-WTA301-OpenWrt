@@ -602,6 +602,12 @@ else
 		grep -q -- '--stage' "$KITSH" 			&& ok "make-getroot-kit.sh 支持 --stage（默认自动挑最新 deliver-final-*）" 			|| warn "make-getroot-kit.sh 不支持 --stage"
 		bash -n "$KITSH" 2>/dev/null && ok "make-getroot-kit.sh 语法 OK" 			|| bad "make-getroot-kit.sh 语法错误"
 	fi
+	# 上板验收脚本存在且语法正确（v30 的每一项改动都要能在板上复核）
+	if [ -f "$SRC/deliver/check-v30.sh" ]; then
+		sh -n "$SRC/deliver/check-v30.sh" 2>/dev/null 			&& ok "check-v30.sh 语法 OK（上板逐项验收 v30 改动）" 			|| bad "check-v30.sh 语法错误"
+	else
+		bad "缺 deliver/check-v30.sh（没有可复现的上板验收）"
+	fi
 	# 移动端修复：Argon 主题的 .table 是真表格 + .th 是 nowrap，手机上必撑爆；
 	# 而且 hide-xs / hide-sm 在 Argon 里根本没定义（只有 bootstrap/mobile.css 有）。
 	# 修法是单独的 CSS + 在 head.ut 里多一行 <link>，必须在 cascade.css 之后。
