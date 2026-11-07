@@ -74,15 +74,29 @@ $script:MtdAbs = @{
 # 永远不许写的分区：mtd0 是一级 u-boot（TTL 命脉），
 # mtd1/mtd2 是出厂信息与射频校准（写坏不可恢复），
 # mtd14 是 boot_flag（选槽依据）。
-$script:HardDeny = @{ 0 = 'factory_boot 一级 u-boot（TTL 命脉）'
-                      1 = 'factory_info 出厂信息'
-                      2 = 'art 射频校准'
-                      14 = 'boot_flag 选槽标志' }
+# ★★★ 门禁一律按【绝对偏移】判，绝不按 mtd 编号 ★★★
+#   踩过的真 bug：按编号判的时候，写 A 槽内核（OpenWrt 下是 mtd5，0x4880000）
+#   被当成「原厂下 mtd5 = B 槽内核」，报「mtd5 只允许 restore-bslot 写」。
+#   同一个数字在两个固件里指两个完全不同的分区，按编号判必然出错。
+# 键用 Format-Hex 出来的字符串（"0x4880000"）而不是十六进制字面量。
+# 踩过的坑：PowerShell 里 @{ 0x4880000 = ... } 的键是 Int32，
+# 而查找时传的是 Int64，装箱后 Int32 0x4880000 -ne Int64 0x4880000，
+# ContainsKey 一律返回 false —— 门禁全部静默失效，自检才发现。
+$script:HardDeny = @{
+    '0x0'       = 'factory_boot 一级 u-boot（TTL 命脉）'
+    '0x400000'  = 'factory_info 出厂信息'
+    '0x480000'  = 'art 射频校准'
+    '0x4000000' = 'boot_flag 选槽标志'
+}
 
-# 受保护分区：允许写，但必须显式走对应动作，不能顺手写
+# 受保护区域：允许写，但必须显式走对应动作，不能顺手写
 $script:Guarded = @{
-    4  = @('flash-uboot'); 9  = @('flash-uboot')
-    5  = @('restore-bslot'); 6 = @('restore-bslot', 'flash-op')
+    '0x700000'  = @('flash-uboot')                      # u-boot B 槽
+    '0x4700000' = @('flash-uboot')                      # u-boot A 槽
+    '0x880000'  = @('restore-bslot')                    # 内核 B 槽（原厂回退）
+    '0xfc0000'  = @('restore-bslot')                    # rootfs B 槽（原厂回退）
+    '0x4880000' = @('flash-op', 'flash-stock')          # 内核 A 槽（工作区）
+    '0x4fc0000' = @('flash-op', 'flash-stock')          # rootfs A 槽（工作区）
 }
 
 $script:BackupSkip = @(15, 16)   # UBI 卷视图，不是独立区域
@@ -771,6 +785,70 @@ function Close-SshSession {
     }
 }
 
+function Invoke-SshPipe {
+    <#
+        SSH 通道直接搬字节，不经过 HTTP。
+
+        PC -> 设备：ssh root@ip "cat > /tmp/x"  < 本地文件
+        设备 -> PC：ssh root@ip "cat /dev/mtd5"  > 本地文件
+
+        为什么不用 wget/HTTP：
+          实测在 OpenWrt 上走的 wget 其实是 uclient-fetch，连工具自己的 HTTP 服务
+          报 `Failed to send request: Operation not permitted`（EPERM），得 0 字节；
+          而同一个 SSH 通道刚才还在正常跑命令。
+          既然本来就要 SSH，就别再开第二条 HTTP 路 —— 少一个端口、少一层防火墙、
+          少一个 wget 变体差异，也省掉「上传后还要比 md5」的往返。
+
+        坑（和 Invoke-SshRaw 同源，改了会坏）：
+          · 必须 `< 文件` / `> 文件` 真重定向，不能用管道喂 stdin
+          · stdin 被 SSH 占用后，密码只能走 SSH_ASKPASS
+    #>
+    param($Sess, [string]$RemoteCmd, [string]$StdinPath, [string]$StdoutPath,
+          [int]$TimeoutSec = 1800)
+
+    $id  = [guid]::NewGuid().ToString('N').Substring(0, 8)
+    $baF = Join-Path $env:TEMP "wta301p_$id.bat"
+    $erF = Join-Path $env:TEMP "wta301p_$id.err"
+
+    $remote = ("{0}@{1}" -f $Sess.User, $Sess.Ip)
+    $in  = if ($StdinPath)  { ' < "' + $StdinPath  + '"' } else { '' }
+    $out = if ($StdoutPath) { ' > "' + $StdoutPath + '"' } else { ' > NUL' }
+
+    $bat = @(
+        '@echo off'
+        ('set "SSH_ASKPASS=' + $Sess.Ask + '"')
+        'set "SSH_ASKPASS_REQUIRE=force"'
+        'set "DISPLAY=localhost:0"'
+        ('"' + $Sess.SshExe + '" -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL ' +
+         '-o LogLevel=ERROR -o PubkeyAuthentication=no ' +
+         '-o PreferredAuthentications=password,keyboard-interactive ' +
+         '-o NumberOfPasswordPrompts=1 -o ConnectTimeout=10 ' +
+         $remote + ' ' + $RemoteCmd + $in + $out + ' 2> "' + $erF + '"')
+        'exit /b %ERRORLEVEL%'
+    )
+    [IO.File]::WriteAllLines($baF, $bat, (New-Object Text.UTF8Encoding $false))
+
+    try {
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName  = (Join-Path $env:SystemRoot 'System32\cmd.exe')
+        $psi.Arguments = ('/c "' + $baF + '"')
+        $psi.UseShellExecute = $false
+        $psi.CreateNoWindow = $true
+        $p = [System.Diagnostics.Process]::Start($psi)
+        if (-not $p.WaitForExit($TimeoutSec * 1000)) {
+            try { $p.Kill() } catch { }
+            throw ("SSH 传输超时（{0}s）：{1}" -f $TimeoutSec, $RemoteCmd)
+        }
+        if ($p.ExitCode -ne 0) {
+            $e = if (Test-Path -LiteralPath $erF) { (Get-Content -LiteralPath $erF -Raw) } else { '' }
+            throw ("SSH 传输失败（exit {0}）：{1}  {2}" -f $p.ExitCode, $RemoteCmd, $e.Trim())
+        }
+    } finally {
+        Remove-Item -LiteralPath $baF -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $erF -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Connect-Device {
     param([string]$Ip, [int]$TcpPort = 2323, [int]$TimeoutMs = 6000)
     $c = [System.Net.Sockets.TcpClient]::new()
@@ -1010,16 +1088,17 @@ function Get-LiveRootOffset {
 # 写入门禁 —— 不是返回值，是抛异常。--yes 也绕不过 HardDeny。
 # ===========================================================================
 function Test-WriteAllowed {
-    param([int]$MtdIndex, [string]$Action)
-    if ($script:HardDeny.ContainsKey($MtdIndex)) {
-        throw ("拒绝写入 mtd{0}（{1}）。这是硬禁止分区，任何参数都绕不过。" -f `
-               $MtdIndex, $script:HardDeny[$MtdIndex])
+    param([int64]$AbsOffset, [string]$Action)
+    $key = Format-Hex $AbsOffset
+    if ($script:HardDeny.ContainsKey($key)) {
+        throw ("拒绝写入 {0}（{1}）。这是硬禁止区域，任何参数都绕不过。" -f `
+               $key, $script:HardDeny[$key])
     }
-    if ($script:Guarded.ContainsKey($MtdIndex)) {
-        $allow = $script:Guarded[$MtdIndex]
+    if ($script:Guarded.ContainsKey($key)) {
+        $allow = $script:Guarded[$key]
         if ($allow -notcontains $Action) {
-            throw ("拒绝：mtd{0} 只允许 [{1}] 写，当前动作是 [{2}]。" -f `
-                   $MtdIndex, ($allow -join ','), $Action)
+            throw ("拒绝：{0} 只允许 [{1}] 写，当前动作是 [{2}]。" -f `
+                   $key, ($allow -join ','), $Action)
         }
     }
     return $true
@@ -1169,6 +1248,10 @@ function Start-NcSink {
 
 function Invoke-Backup {
     param($Sess, $Table, [string]$PcIp, [string]$OutDir)
+    # 空目录会一路传到 Get-FileHash/Send-FileToDevice，最后报
+    # 「无法将参数绑定到参数"LiteralPath"，因为该参数为空字符串」——
+    # 报错点离根因十万八千里。在这里拦死。
+    if ([string]::IsNullOrWhiteSpace($OutDir)) { throw "备份目录为空（内部错误：调用方没有给 -OutDir）" }
     if (-not (Test-Path -LiteralPath $OutDir)) { [void](New-Item -ItemType Directory -Path $OutDir -Force) }
 
     $plan = @()
@@ -1287,7 +1370,8 @@ function Resolve-WriteTarget {
     $pick  = if ($exact.Count) { $exact | Sort-Object Size | Select-Object -First 1 }
              else { $cands | Sort-Object Size | Select-Object -First 1 }
 
-    [void](Test-WriteAllowed -MtdIndex $pick.Index -Action $Action)
+    # 用写入起点 $AbsOffset，不是 $pick.Offset —— mtd13 容器的落点是 +0x80000
+    [void](Test-WriteAllowed -AbsOffset $AbsOffset -Action $Action)
     [void](Test-WriteSpan -Table $Table -Abs $AbsOffset -Len $NeedLen -What $What)
 
     $delta = $AbsOffset - $pick.Offset
@@ -1347,11 +1431,29 @@ function Get-RelUrlPath {
 function Send-FileToDevice {
     param($Sess, [string]$LocalPath, [string]$PcIp, [string]$RemoteName)
     if (-not (Test-Path -LiteralPath $LocalPath)) { throw "文件不存在：$LocalPath" }
-    $rel  = Get-RelUrlPath -LocalPath $LocalPath
-    $url  = "http://{0}:{1}/{2}" -f $PcIp, $script:SRV_PORT, $rel
-    $dst  = "/tmp/$RemoteName"
     $want = Get-LocalMd5 -Path $LocalPath
     $wsize = (Get-Item -LiteralPath $LocalPath).Length
+    $dst  = "/tmp/$RemoteName"
+
+    # SSH 通道：直接 cat > 过去。不走 HTTP/wget。
+    if ($Sess.Kind -eq 'ssh') {
+        Write-Info ("上传 {0} -> {1}  ({2} 字节，走 SSH 通道)" -f (Split-Path $LocalPath -Leaf), $dst, $wsize)
+        [void](Invoke-Cmd -Sess $Sess -TimeoutSec 60 -Command ("rm -f {0}" -f $dst))
+        Invoke-SshPipe -Sess $Sess -RemoteCmd ("cat > {0}" -f $dst) -StdinPath $LocalPath
+        $sysize = (Invoke-Cmd -Sess $Sess -TimeoutSec 60 -Command ("wc -c < {0} 2>/dev/null || echo 0" -f $dst))
+        $sysize = ("$sysize" -replace '[^0-9]', '')
+        if (-not $sysize) { $sysize = '0' }
+        if ([int64]$sysize -ne [int64]$wsize) {
+            throw ("上传不完整：设备 {0} 字节 / 本地 {1} 字节（{2}）" -f $sysize, $wsize, $dst)
+        }
+        $got = Get-FirstMd5 (Invoke-Cmd -Sess $Sess -TimeoutSec 300 -Command "md5sum $dst")
+        if ($got -ne $want) { throw ("传输后 md5 不符：本地 {0}  设备 {1}（{2}）" -f $want, $got, $dst) }
+        Write-Ok "已送达设备 $dst  md5=$got"
+        return $dst
+    }
+
+    $rel  = Get-RelUrlPath -LocalPath $LocalPath
+    $url  = "http://{0}:{1}/{2}" -f $PcIp, $script:SRV_PORT, $rel
 
     # 先删旧文件：否则 wget 失败时会拿上一次的残留下判断，看起来像成功
     [void](Invoke-Cmd -Sess $Sess -TimeoutSec 60 -Command ("rm -f {0}" -f $dst))
@@ -1970,13 +2072,15 @@ function Invoke-FullOpenWrtToStock {
         kit 再按槽头决定 bootm 哪个内核）。
         只覆盖 A 槽的 kernel/rootfs 两个区，B 槽原厂仍然完好。
     #>
-    param($Sess, $Table, [string]$PcIp, [string]$StockDir, [string]$BackupDir)
+    param($Sess, $Table, [string]$PcIp, [string]$StockDir)
 
-    Write-Step "[1/2] 备份当前 OpenWrt（先存底）"
-    $bk = Invoke-Backup -Sess $Sess -Table $Table -PcIp $PcIp -DestDir $BackupDir
-    if (-not $bk) { throw "备份失败，中止（什么都没改）" }
+    # 不备份当前 OpenWrt。
+    # 理由：原厂镜像本来就在 B 槽（0x880000 / 0xfc0000）完好躺着，刷坏了
+    # 一级 u-boot 验 B 槽就退回原厂；想回 OpenWrt 再刷一遍安装包即可。
+    # 备份这一份 OpenWrt 除了多等三十秒、多占 140MB，没有任何额外保险。
+    # 真要存底，菜单里另有 [5] 整片备份，由用户自己选。
 
-    Write-Step "[2/2] 刷原厂到 A 槽（内核 0x4880000 / rootfs 0x4fc0000）"
+    Write-Step "[1/1] 刷原厂到 A 槽（内核 0x4880000 / rootfs 0x4fc0000）"
     [void](Invoke-FlashStock -Sess $Sess -Table $Table -PcIp $PcIp -StockDir $StockDir)
     return $true
 }
@@ -2032,7 +2136,7 @@ function Main {
 
         if ($kind -eq 'openwrt') {
             Write-Host "     [1] 连接（输 root 密码，只连不刷）"
-            Write-Host "     [2] ★ 一键：备份 OpenWrt -> 刷回原厂（A 槽 0x4880000 + 0x4fc0000）"
+            Write-Host "     [2] ★ 一键：刷回原厂（A 槽 0x4880000 + 0x4fc0000，不备份、不动 u-boot）"
             Write-Host "     [3] 只刷 u-boot kit"
             Write-Host "     [4] 安全审计（只读）"
             Write-Host "     [5] 整片备份到本机"
@@ -2088,9 +2192,7 @@ function Main {
                     '1' { Write-Ok "已连上，什么也没改" }
                     '2' {
                         $sd = if ($StockDir) { $StockDir } else { Join-Path $script:Here 'stock' }
-                        $d  = if ($BackupDir) { $BackupDir } else { Join-Path $script:Here ("backup-" + (Get-Date -Format 'MMdd-HHmm')) }
-                        [void](Invoke-FullOpenWrtToStock -Sess $sess -Table $table -PcIp $pcIp `
-                                -StockDir $sd -BackupDir $d)
+                        [void](Invoke-FullOpenWrtToStock -Sess $sess -Table $table -PcIp $pcIp -StockDir $sd)
                     }
                     '3' {
                         $bin = Join-Path $script:Here 'uboot\wta301-uboot-p21c.bin'
@@ -2246,28 +2348,34 @@ function Invoke-SelfTest {
     # ---- 写入门禁：必须真的抛异常，不是返回 false ----
     Write-Info ""
     Write-Info "写入门禁用例:"
+    # 用例按绝对偏移，不按 mtd 编号 —— 编号跨固件会错位
     $cases = @(
-        @{ Mtd=0;  Action='flash-op';       Want=$false; Why='一级 u-boot，TTL 命脉' }
-        @{ Mtd=1;  Action='flash-stock';    Want=$false; Why='出厂信息' }
-        @{ Mtd=2;  Action='flash-uboot';    Want=$false; Why='射频校准' }
-        @{ Mtd=14; Action='flash-op';       Want=$false; Why='boot_flag' }
-        @{ Mtd=4;  Action='flash-op';       Want=$false; Why='B 槽 u-boot 只能由 flash-uboot 写' }
-        @{ Mtd=9;  Action='restore-bslot';  Want=$false; Why='A 槽 u-boot 只能由 flash-uboot 写' }
-        @{ Mtd=5;  Action='flash-stock';    Want=$false; Why='B 槽内核只能由 restore-bslot 写' }
-        @{ Mtd=6;  Action='flash-uboot';    Want=$false; Why='B 槽 rootfs 只能由 restore-bslot/flash-op 写' }
-        @{ Mtd=13; Action='flash-op';       Want=$true;  Why='A 槽容器，flash-op 合法' }
-        @{ Mtd=11; Action='flash-op';       Want=$true;  Why='A 槽 rootfs，flash-op 合法' }
-        @{ Mtd=4;  Action='flash-uboot';    Want=$true;  Why='B 槽 u-boot，flash-uboot 合法' }
+        @{ Off=0x0000000; Action='flash-op';    Want=$false; Why='factory_boot 一级 u-boot，TTL 命脉' }
+        @{ Off=0x0400000; Action='flash-stock'; Want=$false; Why='factory_info 出厂信息' }
+        @{ Off=0x0480000; Action='flash-uboot'; Want=$false; Why='art 射频校准' }
+        @{ Off=0x4000000; Action='flash-op';    Want=$false; Why='boot_flag' }
+        @{ Off=0x0700000; Action='flash-op';    Want=$false; Why='u-boot B 槽只能由 flash-uboot 写' }
+        @{ Off=0x4700000; Action='restore-bslot'; Want=$false; Why='u-boot A 槽只能由 flash-uboot 写' }
+        @{ Off=0x0880000; Action='flash-stock'; Want=$false; Why='内核 B 槽（原厂回退）只能由 restore-bslot 写' }
+        @{ Off=0x0FC0000; Action='flash-uboot'; Want=$false; Why='rootfs B 槽只能由 restore-bslot 写' }
+        @{ Off=0x4880000; Action='flash-op';    Want=$true;  Why='内核 A 槽，flash-op 合法' }
+        @{ Off=0x4880000; Action='flash-stock'; Want=$true;  Why='内核 A 槽，flash-stock 合法' }
+        @{ Off=0x4FC0000; Action='flash-op';    Want=$true;  Why='rootfs A 槽，flash-op 合法' }
+        @{ Off=0x4FC0000; Action='flash-stock'; Want=$true;  Why='rootfs A 槽，flash-stock 合法' }
+        @{ Off=0x0700000; Action='flash-uboot'; Want=$true;  Why='u-boot B 槽，flash-uboot 合法' }
+        @{ Off=0x4700000; Action='flash-uboot'; Want=$true;  Why='u-boot A 槽，flash-uboot 合法' }
+        @{ Off=0x0880000; Action='restore-bslot'; Want=$true; Why='内核 B 槽，restore-bslot 合法' }
+        @{ Off=0x0FC0000; Action='restore-bslot'; Want=$true; Why='rootfs B 槽，restore-bslot 合法' }
     )
     foreach ($c in $cases) {
         $threw = $false
-        try { [void](Test-WriteAllowed -MtdIndex $c.Mtd -Action $c.Action) } catch { $threw = $true }
+        try { [void](Test-WriteAllowed -AbsOffset $c.Off -Action $c.Action) } catch { $threw = $true }
         $allowed = -not $threw
         if ($allowed -eq $c.Want) {
-            Write-Ok ("mtd{0,-2} {1,-14} -> {2}  ({3})" -f $c.Mtd, $c.Action,
+            Write-Ok ("{0,-9} {1,-14} -> {2}  ({3})" -f (Format-Hex $c.Off), $c.Action,
                       $(if ($allowed) { '允许' } else { '拒绝' }), $c.Why)
         } else {
-            Write-Err2 ("mtd{0,-2} {1,-14} -> 期望 {2} 实际 {3}  ({4})" -f $c.Mtd, $c.Action,
+            Write-Err2 ("{0,-9} {1,-14} -> 期望 {2} 实际 {3}  ({4})" -f (Format-Hex $c.Off), $c.Action,
                         $(if ($c.Want) { '允许' } else { '拒绝' }),
                         $(if ($allowed) { '允许' } else { '拒绝' }), $c.Why)
             $bad++
