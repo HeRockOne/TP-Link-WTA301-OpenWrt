@@ -185,6 +185,23 @@ make -j6 target/install
 | 7 | rootfs 里 `15_sensors.js`、`rpcd/ucode/wta301` 在位 | ⬜ |
 | 8 | 产物尺寸与已发布一致（±UBI 时间戳带来的膨胀） | ⬜ |
 
+### 这八条有脚本，不用手工判
+
+```bash
+bash deliver/verify-scratch-build.sh \
+     --log  /tmp/scratch-build.log   \   # 里面有 WORLD_RC= / INSTALL_RC=
+     --tree /root/repro-verify2      \   # apply 过的那棵源码树
+     --rel  /root/rel-repro               # make-release.sh 的 --out
+#   → OK=20 WARN=0 FAIL=0
+```
+
+★ **别人 clone 下来自己编一遍，要判断「编的对不对」也直接跑这个**，
+不用回头读上面那张表。它把八条判据都做成了检查项，并把
+`FAIL` 区分成「结构错了（会变砖）」与「只是缺工具」。
+
+脚本**有意不判 md5 相同** —— 那不可能，原因见 §3。
+它判的是：分区偏移、内嵌 DTB、关键文件内容、区域尺寸。
+
 改动 `/root/repro-verify2/**` 前后 `diff -rq` 应只差时间戳相关字节。
 
 ---

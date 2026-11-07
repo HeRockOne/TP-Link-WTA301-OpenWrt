@@ -732,6 +732,46 @@ else
 fi
 
 # ══════════════════════════════════════════════════════════════════
+sec "13. 从零构建判据脚本（回答「别人能否构建+刷入」）"
+# ══════════════════════════════════════════════════════════════════
+# 这个脚本本身不跑构建（要几小时），只做静态判据：
+# 它在位、可执行、语法正确、判据条目数对得上、基线常量与已发布版一致。
+VS=$SRC/deliver/verify-scratch-build.sh
+if [ ! -f "$VS" ]; then
+	bad "缺 deliver/verify-scratch-build.sh"
+else
+	ok "verify-scratch-build.sh 在位（$(wc -l < "$VS") 行）"
+	[ -x "$VS" ] && ok "可执行位正确" || bad "verify-scratch-build.sh 没有可执行位"
+	bash -n "$VS" 2>/dev/null && ok "语法通过" || bad "verify-scratch-build.sh 语法错误"
+
+	# 八条判据必须都还在（有人删判据 = 自检形同虚设）
+	miss=""
+	for k in '①' '②' '③' '④' '⑤' '⑥' '⑦' '⑧'; do
+		grep -q "\"$k" "$VS" || miss="$miss $k"
+	done
+	[ -z "$miss" ] && ok "八条判据齐全（①~⑧）" || bad "判据被删：$miss"
+
+	# 基线常量必须与已发布的 v1.0.0/p30 一致，
+	# 否则「别人编出来的和发布版比」就没有参照物。
+	WANT_MD5=8eaaa52f11cc9a1e1e4c6e01edc421f9
+	WANT_REG='0x4880000 0x740000'
+	grep -q "$WANT_MD5" "$VS" && ok "基线 net-tune md5 与发布版一致" \
+		|| bad "基线 net-tune md5 被改（应为 $WANT_MD5）"
+	grep -q "$WANT_REG" "$VS" && ok "基线 kernel reg 与发布版一致" \
+		|| bad "基线 kernel reg 被改（应为 $WANT_REG）"
+
+	# 必须明确写着「md5 不可能相同」，否则等于对外撒谎
+	grep -q 'md5 是否与发布版相同.*不可能相同\|不能.*逐字节\|不可能相同' "$VS" \
+		&& ok "写明「做不到 md5 相同」（避免误导）" \
+		|| warn "脚本里没写明 md5 不可能相同"
+
+	# 复现文档必须指向它（否则别人不知道有这个工具）
+	grep -q 'verify-scratch-build' "$SRC/docs/REPRODUCTION-VERIFICATION.md" \
+		&& ok "REPRODUCTION-VERIFICATION.md 指向它" \
+		|| bad "REPRODUCTION-VERIFICATION.md 没提这个判据脚本"
+fi
+
+# ══════════════════════════════════════════════════════════════════
 sec "总结"
 # ══════════════════════════════════════════════════════════════════
 echo ""
