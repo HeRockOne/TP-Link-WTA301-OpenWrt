@@ -19,10 +19,10 @@
 # 证据日志保留
 !docs/evidence/*.txt
 
-# BDF 例外：board-2.bin 是 WiFi 板型/校准数据，上游任何 repo 都没有。
-# 它是**输入**不是产物，必须入库；否则构出来的固件 WiFi 起不来。
-# 它的来历与 IP 注意事项见 THIRD-PARTY.md §2。
-!patches/bdf/*.bin
+# BDF：board-2.bin 装的是【逐台】射频校准数据（从 ART 分区提取），
+# 属于厂商烧进 flash 的数据 —— 仓库故意不分发（THIRD-PARTY.md §2）。
+# 使用者用自己的 ART 生成后放在 patches/bdf/，该目录已 gitignore，不会误入库。
+patches/bdf/*.bin
 
 # 本地临时物
 __pycache__/

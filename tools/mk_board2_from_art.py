@@ -3,13 +3,14 @@
 
 为什么需要这个工具
 ------------------
-`patches/bdf/` 里随仓库分发的两个 board-2.bin，装的是**本工程作者那台机器**
-的逐台射频校准数据（从它的 ART 分区提取）。功能上没问题 —— 运行时 ath11k
-的校准始终来自刷机者自己的 ART（见 `files-base-files/etc/hotplug.d/firmware/
-12-wta301-caldata`），board-2.bin 只负责板型/variant 匹配。
+`patches/bdf/` 里**不再随仓库分发** board-2.bin。它装的是**逐台**射频校准数据
+（从 ART 分区提取），属于厂商烧进 flash 的数据，不该由我们转手。
 
-但从开源分发角度，厂商烧进 flash 的校准数据不该由我们转手。
-本工具让使用者用**自己的** ART 生成等价文件，仓库因此可以只留脚本。
+本工具用**你自己的** ART 分区生成等价文件。
+
+注意：这不影响射频性能 —— 运行时 ath11k 的校准始终来自刷机者自己的 ART
+（见 `files-base-files/etc/hotplug.d/firmware/12-wta301-caldata`），
+board-2.bin 只负责板型/variant 匹配（必须有，否则 ath11k 报 -12）。
 
 用法
 ----

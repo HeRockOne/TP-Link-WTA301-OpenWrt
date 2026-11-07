@@ -49,9 +49,8 @@ REQUIRED=(
 	patches/kernel-6.12/0954-net-stmmac-Introduce-Qualcomm-IPQ5018-DWMAC-driver.patch
 	patches/mac80211/0950-wifi-ath11k-reduce-DP-ring-sizes-256M.patch
 	patches/fstools/0001-fstools-honor-fstools_overlay_name.patch
-	# Wi-Fi 板型数据（上游没有，必须带）
-	patches/bdf/board2-wta301-ipq5018-2g.bin
-	patches/bdf/board2-wta301-qcn6122-5g.bin
+	# Wi-Fi 板型数据（board-2.bin）不在 REQUIRED 里：见 §8 —— 它装的是
+	# 逐台校准数据，仓库故意不分发，由使用者用自己的 ART 生成。
 	# u-boot kit
 	patches/uboot/files/configs/ipq5018_tplink_wta301_defconfig
 	patches/uboot/files/arch/arm/dts/ipq5018-tplink-wta301.dts
@@ -402,9 +401,19 @@ fi
 # ══════════════════════════════════════════════════════════════════
 sec "8. BDF 与板级匹配（Wi-Fi 起不来的经典原因）"
 # ══════════════════════════════════════════════════════════════════
+# board-2.bin 装的是**逐台**射频校准数据（从 ART 分区提取），
+# 属于厂商烧进 flash 的数据 —— 本仓库故意不分发（THIRD-PARTY §2）。
+# 所以这里的分支是：
+#   文件不在 → WARN 且给出生成方法（这是正常的、预期的状态）
+#   文件在   → 必须过完整校验（variant 名 / 小端结构），错了一样是 BAD
+BDF_MISSING=0
 for b in patches/bdf/board2-wta301-ipq5018-2g.bin patches/bdf/board2-wta301-qcn6122-5g.bin; do
 	f="$SRC/$b"
-	[ -f "$f" ] || { bad "缺 $b"; continue; }
+	if [ ! -f "$f" ]; then
+		BDF_MISSING=1
+		warn "未生成 $b（正常：仓库不分发校准数据）。"
+		continue
+	fi
 	# variant 名必须与 DTS 的 qcom,ath11k-calibration-variant 逐字节一致
 	if grep -qa 'variant=TP-Link-WTA301' "$f"; then
 		ok "$(basename "$b") variant=TP-Link-WTA301"
@@ -430,6 +439,13 @@ elif [ -z "$distinct" ]; then
 	bad "DTS 里没有 qcom,ath11k-calibration-variant（ath11k 会 -12）"
 else
 	bad "DTS calibration-variant = '$(echo $distinct)'，应为 TP-Link-WTA301"
+fi
+
+# 缺 BDF 时给一条可直接复制的用法（WARN 已计过，这里只补操作指引）
+if [ "${BDF_MISSING:-0}" = "1" ]; then
+	warn "生成方法：python3 tools/mk_board2_from_art.py --art <你的art.bin> --outdir patches/bdf"
+	warn "            先 dump：ssh root@192.168.1.1 'dd if=/dev/mtdblock2 of=/tmp/art.bin' 再 scp 回来"
+	warn "            详见 patches/bdf/README.md 与 THIRD-PARTY.md §2"
 fi
 
 # ══════════════════════════════════════════════════════════════════

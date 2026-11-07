@@ -95,7 +95,7 @@
 | `patches/kernel-6.12/` | 内核补丁：UNIPHY PCS、stmmac DWMAC、gephy 时钟、dt-binding |
 | `patches/mac80211/` | ath11k 低内存 DP ring 尺寸 |
 | `patches/fstools/` | `fstools_overlay_name` 支持（overlay 用自定义 UBI 卷名） |
-| `patches/bdf/` | 两个 `board-2.bin`（Wi-Fi 板型容器）—— **上游任何仓库都没有**。可用 `tools/mk_board2_from_art.py` 从你自己的 ART 分区重新生成 |
+| `patches/bdf/` | Wi-Fi 板型容器 `board-2.bin` 的**生成位置**（仓库不分发，见下）。用 `tools/mk_board2_from_art.py` 从你自己的 ART 分区生成 |
 | `files/` | DTS + 设备树覆盖 |
 | `files-rootfs/` | rootfs overlay：`net-tune` 守护、sysctl、LuCI 温度面板、rpcd 数据源 |
 | `files-base-files/` | base-files overlay：出厂无线配置、uci-defaults |
@@ -113,6 +113,27 @@
 ---
 
 ## 从源码构建
+
+### 先做一步：生成 board-2.bin
+
+`board-2.bin` 里装的是**逐台**射频校准数据（从 ART 分区提取），属于厂商烧进
+flash 的数据，**本仓库不分发**。构建前用你自己的板子生成一次：
+
+```bash
+# 需要本机 root（不拆机、不接 TTL）：见 tools/getroot/README.md
+# 板子有 python3：
+scp tools/mk_board2_from_art.py root@192.168.1.1:/tmp/
+ssh root@192.168.1.1 "python3 /tmp/mk_board2_from_art.py --art /dev/mtdblock2 --outdir /tmp/bdf"
+scp root@192.168.1.1:/tmp/bdf/board2-wta301-*.bin patches/bdf/
+
+# 板子没有 python3：先 dump 再本地跑
+ssh root@192.168.1.1 "dd if=/dev/mtdblock2 of=/tmp/art.bin"
+scp root@192.168.1.1:/tmp/art.bin .
+python3 tools/mk_board2_from_art.py --art art.bin --outdir patches/bdf
+```
+
+为什么不分发、以及为什么这不影响射频性能：`THIRD-PARTY.md` §2。
+细节：`patches/bdf/README.md`。`patches/bdf/*.bin` 已 gitignore，不会误入库。
 
 ### OpenWrt
 

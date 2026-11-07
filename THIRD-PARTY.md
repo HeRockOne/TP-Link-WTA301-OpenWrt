@@ -10,39 +10,43 @@
 
 | 路径 | 内容 | 来源 | 许可状态 |
 |---|---|---|---|
-| `patches/bdf/board2-wta301-ipq5018-2g.bin` | ath11k `board-2.bin` 容器（131,180 B） | 本机 ART 分区提取后封装 | ⚠️ **见 §2，务必读** |
-| `patches/bdf/board2-wta301-qcn6122-5g.bin` | 同上，5 GHz | 同上 | ⚠️ **见 §2** |
+| ~~`patches/bdf/*.bin`~~ | ath11k `board-2.bin` 容器（2.4G + 5G） | 本机 ART 分区提取后封装 | **已从仓库移除** —— 见 §2，请用 `tools/mk_board2_from_art.py` 自己生成 |
 | `patches/factory/fdt_mp02.1.*` … `fdt_mp03.3.*` | 原厂固件里的设备树（dtb + 反编译 dts） | 本机原厂固件提取 | ⚠️ 厂商固件内容，仅供分析对照，非运行时依赖 |
 | `patches/s7-actual-dtb.dts` | 板子跑 S7 时的实际 DTB 反编译结果 | 本机提取 | 同上，分析用途 |
 | `pin/s7-actual-dtb.dtb` | 同上，二进制 | 本机提取 | 同上 |
 | `evidence/*.txt` `*.log` | 串口 / 刷机实测日志 | 本机采集 | 我们自己的记录 |
 
 **注意**：`patches/factory/`、`patches/s7-actual-dtb.dts`、`pin/s7-actual-dtb.dtb`
-是**分析用的对照材料**，不参与固件构建。真正参与构建的只有 `patches/bdf/` 两个文件。
+是**分析用的对照材料**，不参与固件构建。
+
+构建真正需要的第三方**数据**只有 `patches/bdf/` 里的两个 `board-2.bin`，
+而它们**不在仓库里** —— 请用 `tools/mk_board2_from_art.py` 从你自己的 ART 生成（§2）。
 
 ---
 
-## 2. ⚠️ `patches/bdf/`：校准数据的来历与影响
+## 2. `patches/bdf/`：校准数据**不分发**，请用你自己的 ART 生成
 
-这是本仓库**唯一一处需要认真对待的**第三方数据问题。
+### 2.1 结论先行
 
-### 2.1 这些文件里装的是什么
+**本仓库不包含 `board-2.bin`。** 构建前你必须用自己的板子生成一次
+（`patches/bdf/README.md` 有完整步骤）。`deliver/apply-to-2512.sh` 在缺失时会
+停下来并打印生成方法 —— 这是设计行为，不是 bug。
+
+### 2.2 这些文件里装的是什么，以及为什么不该由我们转手
 
 `board-2.bin` 是 ath11k 的「板型容器」，里面装一块 131,072 字节的 BDF。
 本板的 ART 分区（`mtd2`，gzip+tar 包着一个 512 KiB 的 `virtual_art.bin`）
-在 `+0x1000` 和 `+0x26800` 各存一份 128 KiB 数据 —— 那是**这台机器出厂时逐台校准的
-射频参数**（功率、频偏等）。
+在 `+0x1000` 和 `+0x26800` 各存一份 128 KiB 数据 —— 那是**这台机器出厂时
+逐台校准的**射频参数（功率、频偏等）。
 
-随仓库分发的两个 `board2-wta301-*.bin` 装的就是**本机这两份校准数据**。
+ART 校准数据是厂商烧进 flash 的。Qualcomm 的 ath11k-firmware 仓库
+（`Notice.txt`）只覆盖 q6/m3 固件，**明确不覆盖 `board-2.bin` / `caldata.bin`**。
+我们若把它们放进公开仓库，就是替厂商把一台机器的校准数据公开出去。
 
-### 2.2 为什么用本机 cal 而不是原厂通用模板
-
-原厂 rootfs 里另有 `bdwlan.b10` / `bdwlan.b50`（各 131,072 B）—— 那是**通用模板**。
-实测两者差异极小（2.4G 差 25 字节、5G 差 79 字节），集中在 `0xa` 头字段和
-`0x1a00+` / `0x2700+` 的功率校准区。
-
-⇒ `bdwlan` = 通用模板；ART 里的 = 通用模板 + 逐台校准微调。
-用通用模板会丢掉本机的功率校准。推导过程见 `docs/M12-FIRMWARE-BDF.md` §1.2。
+所以我们选择不分发，只提供生成器 `tools/mk_board2_from_art.py`。
+它从**你自己的** ART 分区生成等价文件 —— 已实证：用本工程作者的 ART dump
+跑出来的两个文件与当年随仓库分发的那两份**逐字节相同**
+（`78f5b21b…` / `e4904f13…`），说明工具是对的。
 
 ### 2.3 别人刷了这个固件，用的是谁的校准？—— **他自己的**
 
@@ -57,41 +61,33 @@ qcn6122 : virtual_art.bin + 0x26800 len 0x20000
 ```
 
 ath11k 分别加载 board data（`board-2.bin`）与 caldata（`cal-*.wifi.bin`），
-**校准以 caldata 为准**。也就是说：`board-2.bin` 提供板型/variant 匹配（必须有，
-否则 `-12` 加载失败），而**射频校准始终来自刷机者自己的 ART**。
+**校准以 caldata 为准**。也就是说：`board-2.bin` 只提供板型/variant 匹配
+（必须有，否则 `-12` 加载失败），而**射频校准始终来自刷机者自己的 ART**。
 
-⇒ 把这份 `board-2.bin` 分发给别的 WTA301，不会让别人用我们的发射功率。
+所以「用谁生成的 board-2.bin」在射频性能上没有区别 —— 这只影响你能否构建出固件。
 
-### 2.4 仍然存在的两个问题（诚实列出）
+### 2.4 为什么用 ART 的版本而不是原厂通用模板
 
-1. **IP 层面**：ART 校准数据是厂商烧进 flash 的，理论上不是可自由分发的内容。
-   Qualcomm 的 ath11k-firmware 仓库（`Notice.txt`）只覆盖 q6/m3 固件，
-   **不覆盖 `board-2.bin` / `caldata.bin`** —— 上游明确「这两个不提供」。
-   我们在本仓库分发，等于把一台机器自己的校准数据公开。
+原厂 rootfs 里另有 `bdwlan.b10` / `bdwlan.b50`（各 131,072 B）—— 那是**通用模板**。
+实测两者差异极小（2.4G 差 25 字节、5G 差 79 字节），集中在 `0xa` 头字段和
+`0x1a00+` / `0x2700+` 的功率校准区。
 
-2. **要不要因此删掉**：现在**不需要删**了。
-   `tools/mk_board2_from_art.py` 可以从**你自己的** ART 分区生成等价文件：
+⇒ `bdwlan` = 通用模板；ART 里的 = 通用模板 + 逐台校准微调。
+生成器读的是 ART，所以拿到的是你自己那台的校准。
+推导过程见 `docs/M12-FIRMWARE-BDF.md` §1.2。
 
-   ```bash
-   # 板子上直接跑
-   scp tools/mk_board2_from_art.py root@192.168.1.1:/tmp/
-   python3 /tmp/mk_board2_from_art.py --art /dev/mtdblock2 --outdir /tmp/bdf
-   # 或先 dump 再本地跑
-   dd if=/dev/mtdblock2 of=/tmp/art.bin
-   python3 tools/mk_board2_from_art.py --art art.bin --outdir /tmp/bdf
-   ```
+### 2.5 生成方法
 
-   **已验证**：用本工程作者的 ART dump 跑出来的两个文件，与仓库自带的
-   `patches/bdf/*.bin` **逐字节相同**（`78f5b21b…` / `e4904f13…`）。
+见 [`patches/bdf/README.md`](patches/bdf/README.md)。一句话版本：
 
-   仓库现在保留 `patches/bdf/` 只为了一个目的：让**没有本机硬件**的环境
-   （CI、想先构建后刷机的人）也能产出固件。如果你不接受这一点，
-   就用上面的工具自己生成两份、覆盖 `patches/bdf/` 后构建。
+```bash
+python3 tools/mk_board2_from_art.py --art <你自己的 art.bin> --outdir patches/bdf
+```
 
-**如果你是要基于本仓库做二次分发**：请自行决定是否保留 `patches/bdf/`，
-或改用自己的 ART 数据。我们保留它们是因为这个工程的可复现性依赖它。
+`patches/bdf/*.bin` 已在 `.gitignore` 里，误 `git add` 不会入库。
 
 ---
+
 
 ## 3. 构建时从上游获取（不随仓库分发）
 

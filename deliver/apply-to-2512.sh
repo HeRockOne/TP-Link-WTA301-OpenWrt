@@ -285,10 +285,43 @@ cp -a $SRC/deliver/ipq50xx-base-files/. $T/ipq50xx/base-files/
 ls -l $T/ipq50xx/base-files/etc/board.d/90_wta301 $T/ipq50xx/base-files/etc/hotplug.d/firmware/12-wta301-caldata
 
 echo "== 7. board-2.bin（两个容器，S7 已实证；不从 ipq-wifi 取）=="
-# 优先用仓库内的副本（patches/bdf/），仓库外那份只做兼容回退。
-# BDF 是二进制 blob，不在上游任何 repo 里，必须随仓库走，否则 WiFi 起不来。
-BDF=$SRC/patches/bdf
-[ -f "$BDF/board2-wta301-ipq5018-2g.bin" ] || BDF=$SRC/../work/op-build/assets/bdf
+# ⚠️ board-2.bin **不随仓库分发**（厂商逐台校准数据，不该由我们转手）。
+#    必须先用自己的 ART 分区生成一次。三条来源，按优先级：
+#      ① $BDFDIR（环境变量显式指定）
+#      ② patches/bdf/（你自己生成后放在这里）
+#      ③ ../work/op-build/assets/bdf（本工程作者的本地资产，别人没有）
+BDF=${BDFDIR:-}
+if [ -z "$BDF" ]; then
+	for c in "$SRC/patches/bdf" "$SRC/../work/op-build/assets/bdf"; do
+		[ -f "$c/board2-wta301-ipq5018-2g.bin" ] && { BDF=$c; break; }
+	done
+fi
+if [ -z "${BDF:-}" ] || [ ! -f "$BDF/board2-wta301-qcn6122-5g.bin" ]; then
+	cat >&2 <<'BDFMISS'
+!! 缺 board-2.bin —— 这不是遗漏，是故意的。
+
+   这两个文件装的是【逐台】射频校准数据（从 ART 分区提取），
+   属于厂商烧进 flash 的数据，本仓库不分发。
+
+   用你自己的板子生成（先拿到本机 root，见 tools/getroot/README.md）：
+
+     # 板子上跑（推荐，读的就是本机真实校准）
+     scp tools/mk_board2_from_art.py root@192.168.1.1:/tmp/
+     ssh root@192.168.1.1 "python3 /tmp/mk_board2_from_art.py --art /dev/mtdblock2 --outdir /tmp/bdf"
+
+     # 板子没有 python3 时：先 dump 到本地再跑
+     ssh root@192.168.1.1 "dd if=/dev/mtdblock2 of=/tmp/art.bin"
+     scp root@192.168.1.1:/tmp/art.bin .
+     python3 tools/mk_board2_from_art.py --art art.bin --outdir patches/bdf
+
+   生成后放回 patches/bdf/（或设 BDFDIR=/path/to/bdf）。
+   说明见 patches/bdf/README.md 与 THIRD-PARTY.md §2。
+
+   注：运行时 ath11k 的校准始终来自刷机者自己的 ART（hotplug 12-wta301-caldata），
+   board-2.bin 只负责板型/variant 匹配 —— 但文件里仍然含有提取它的那台的校准字节。
+BDFMISS
+	exit 1
+fi
 mkdir -p $T/ipq50xx/base-files/lib/firmware/ath11k/IPQ5018/hw1.0 \
          $T/ipq50xx/base-files/lib/firmware/ath11k/QCN6122/hw1.0
 cp -f "$BDF/board2-wta301-ipq5018-2g.bin"  $T/ipq50xx/base-files/lib/firmware/ath11k/IPQ5018/hw1.0/board-2.bin
