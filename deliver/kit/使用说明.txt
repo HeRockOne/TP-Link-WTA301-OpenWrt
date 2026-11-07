@@ -1,0 +1,205 @@
+﻿================================================================
+ WTA301 一键工具 —— 使用说明
+================================================================
+
+这个目录里是「拿来就能用」的完整一套，不要只拷 .py 文件，
+整个文件夹一起拷走。
+
+----------------------------------------------------------------
+ 一、里面有什么
+----------------------------------------------------------------
+
+  启动.bat                 双击它。自动提权、自检环境、给菜单
+  wta301-getroot.py        主程序（也可直接命令行调用）
+  srv.py                   HTTP 服务（主程序的依赖，别删）
+  elink_gw4.py             e-Link 模拟器（主程序的依赖，别删）
+
+  stock\                   四份原厂镜像，刷回原厂 / 修 B 槽用
+      mtd5_kernel.bin          A 槽原厂 2.0.2 内核      4 MB
+      mtd6_rootfs.bin          A 槽原厂 2.0.2 rootfs   12 MB
+      mtd10_kernel_bak.bin     B 槽原厂 4.4.60 内核     4 MB
+      mtd11_rootfs_bak.bin     B 槽原厂 4.4.60 rootfs  12 MB
+
+  images\                  OpenWrt 相关
+      wta301-op-25.12.6-p29.bin              刷 A 槽用（网页版格式）
+      wta301-op-25.12.6-p29-sysupgrade.bin   已经装了 OpenWrt 时用这个
+      wta301-uboot-p21c.bin                  u-boot kit（二级 u-boot）
+      README-刷机说明.txt                      TTL 首次刷机的详细步骤
+
+----------------------------------------------------------------
+ 二、环境要求
+----------------------------------------------------------------
+
+  1. Windows 10 / 11
+  2. Python 3.8 以上。安装时务必勾选 "Add Python to PATH"
+  3. 网线接到设备的 LAN 口（不是 WAN）
+  4. 全程需要管理员权限 —— 启动.bat 会自己申请
+
+  第一次跑会自动装 cryptography 模块。
+
+----------------------------------------------------------------
+ 三、怎么用
+----------------------------------------------------------------
+
+  双击  启动.bat
+  输入设备 IP（一般默认 192.168.1.175 就行）
+  按菜单选。
+
+  主菜单：
+
+    1  只取 root
+       最轻的操作。拿到后可以 telnet 设备 2323 端口。
+       成功后窗口会显示 uid=0(root)。
+
+    2  安全审计
+       只读，什么都不写。会告诉你现在有几个槽能启动、
+       离线镜像齐不齐。建议第一次就先跑这个。
+
+    3  整片备份
+       把设备所有分区拉回本机 backup\ 目录，约 126 MB。
+       完成后会生成 MD5SUMS.txt 逐个核对。
+
+    4  刷 OpenWrt 到 A 槽
+       会先空跑一遍给你看计划，你输入 y 才真正写。
+
+    5  只刷 u-boot kit
+       保留当前系统，只换二级 u-boot。
+
+    6  刷回原厂到 A 槽
+       把 stock\ 里的原厂 2.0.2 写进 A 槽。
+       B 槽完全不动。写完不重启，当前系统不受影响。
+
+    7  修 B 槽
+       把原厂 4.4.60 写回 B 槽，修好回退出口。
+
+    8  看分区说明
+       讲清楚 mtd 编号为什么会骗人。
+
+----------------------------------------------------------------
+ 四、为什么会"不小心搞死"以及为什么不会
+----------------------------------------------------------------
+
+  设备是双槽设计：
+
+      A 槽  u-boot 0x4700000  内核 0x4880000  rootfs 0x4FC0000
+      B 槽  u-boot 0x0700000  内核 0x0880000  rootfs 0x0FC0000
+
+  一级 u-boot 在 mtd0（0x0 ~ 0x3C0000），它每次开机都会校验两个槽：
+
+      两个都过 -> 按 boot_flag 选一个
+      一个坏   -> 自动跳到另一个   （"Image_1 check failed, to check image_2 now"
+                                     "Image_2 check failed, to check image_1 now"）
+      两个都坏 -> 进恢复模式        （"Firmware check failed! Enter recovery mode."）
+
+  mtd0 本身还带着一整套救援手段：tftp、nand read/write/erase、bootm、crc32，
+  以及一个网页恢复界面（192.168.1.1）。
+
+  所以：只要 mtd0 没被写，任何槽刷坏都能救回来。
+
+  本工具对这些分区是硬性禁止写入的，--yes 也绕不过：
+
+      mtd0  factory_boot   一级 u-boot，唯一命脉
+      mtd1  factory_info   机型 / MAC
+      mtd2  art            射频校准
+      mtd14 boot_flag      槽选择标志
+
+  另外四个是可写但要声明的：
+
+      mtd4  B 槽 u-boot     只允许「刷 u-boot kit」写
+      mtd9  A 槽 u-boot     只允许「刷 u-boot kit」写
+      mtd5  B 槽内核        只允许「修 B 槽」写
+      mtd6  B 槽 rootfs     只允许「修 B 槽」和「刷 OpenWrt」写
+
+  写错落点会被直接拒绝，一个字节都不会写。
+
+----------------------------------------------------------------
+ 五、分区编号的坑（一定要知道）
+----------------------------------------------------------------
+
+  同一块 flash，原厂固件和 OpenWrt 给分区的编号是错位的：
+
+      物理偏移      原厂叫           OpenWrt 叫
+      0x0700000     normal_boot     normal_boot_bak
+      0x0880000     kernel          kernel_bak
+      0x0FC0000     rootfs          rootfs_bak
+      0x4700000     normal_boot_bak normal_boot
+      0x4880000     kernel_bak      kernel
+      0x4FC0000     rootfs_bak      rootfs
+
+  两种固件的启动命令行里都写 root=/dev/mtdblock6，
+  但原厂的 6 是 0xFC0000，OpenWrt 的 6 是 0x4FC0000。
+
+  所以：判断槽位只能用物理偏移，不能看名字，也不能看编号。
+
+  本工具内部一律按物理偏移算，并且读 /sys/class/mtd/mtdN/offset 核对。
+
+----------------------------------------------------------------
+ 六、常见问题
+----------------------------------------------------------------
+
+  Q: 卡在"冒充网关"之后不动
+  A: 别名没加上。确认是管理员权限运行。
+
+  Q: 提示"找不到固件"
+  A: 自动 getroot 没成功。先手动确认 2323 通不通：
+         Test-NetConnection <设备IP> -Port 2323
+     不通就重跑一次「1 只取 root」。
+
+  Q: 输出中文是乱码
+  A: 先在窗口里敲一行  chcp 65001  再重新运行。
+
+  Q: 提示"写入已被安全门禁拒绝"
+  A: 说明落点算错了。不要加 --yes 硬来，把整段输出发出来看。
+
+  Q: 跑完本机网络变怪
+  A: 工具会加两个假网关地址。按退出时屏幕上的五行命令删掉：
+
+         Remove-NetIPAddress -IPAddress 192.168.1.1  -PrefixLength 32 -Confirm:$false
+         Remove-NetIPAddress -IPAddress 192.168.0.1 -PrefixLength 32 -Confirm:$false
+         netsh advfirewall firewall delete rule name=WTA_ELINK
+         netsh advfirewall firewall delete rule name=WTA_SRV
+         netsh advfirewall firewall delete rule name=WTA_BKUP
+
+----------------------------------------------------------------
+ 七、命令行长什么样（不想用菜单的话）
+----------------------------------------------------------------
+
+  先开管理员 PowerShell，cd 到本目录，然后：
+
+    set PYTHONIOENCODING=utf-8
+
+    python wta301-getroot.py --target 192.168.1.175 --verify
+    python wta301-getroot.py --target 192.168.1.175 --flash-stock auto --dry-run
+    python wta301-getroot.py --target 192.168.1.175 --flash-stock auto
+    python wta301-getroot.py --target 192.168.1.175 --backup backup
+    python wta301-getroot.py --target 192.168.1.175 --restore-bslot
+    python wta301-getroot.py --explain
+
+  任何写入类命令加 --dry-run 就只打印计划不写入。
+  --keep 表示跑完保留 IP 别名和防火墙规则，方便连着跑多条。
+  不加 --keep 会自己清理。
+
+----------------------------------------------------------------
+ 八、原理（好奇再看）
+----------------------------------------------------------------
+
+  设备上的 elinkclt 会周期性反连"网关"的 32768 端口。
+  只要那个网关地址在局域网上没人占，给本机加一个 /32 别名就合法地
+  变成了它的网关。
+
+  握手用 DH128 + AES-128-CBC，之后下发：
+
+      ubus_call ctcapd.appd install {"url": "http://<PC>:8099/x;(<命令>);"}
+
+  appd 用 asprintf 拼出 wget 命令再 popen，URL 没有过滤分号，
+  于是分号后面的命令被当成 shell 执行，而且是以 root 身份。
+
+  注入的就是起一个 telnetd 监听 2323。
+
+  补充：appd 返回 "download failed: file not found" 是假失败，
+  判据要看 2323 端口开没开。
+
+================================================================
+ 生成脚本：deliver/make-getroot-kit.sh
+ 自检：OK=41 WARN=0 FAIL=0
+================================================================

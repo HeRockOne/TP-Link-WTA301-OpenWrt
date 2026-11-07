@@ -1,1 +1,7 @@
 * -text
+
+# 一键工具包里的两个 Windows 文件：行尾/编码必须原样保留
+# 启动.bat       UTF-8 无 BOM + CRLF（cmd 要求）
+# 使用说明.txt   UTF-8 带 BOM + CRLF（记事本要求）
+deliver/kit/启动.bat      -text
+deliver/kit/使用说明.txt  -text
