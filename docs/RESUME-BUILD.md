@@ -2,6 +2,10 @@
 
 > 状态文件。构建被用户中断（白天要用电脑），等用户下指令续跑。
 > 用户说下面任一触发词，立即执行 §2，不要重新问、不要重新规划。
+>
+> **本次目标（2026-03 记）**：不是「编出个东西」，而是把
+> `docs/REPRODUCTION-VERIFICATION.md` §4 那 7 条 ⬜ 变成实测数字 ——
+> 这是两仓开源后唯一还欠着对方的答案（「别人能不能构建 + 刷入成功」）。
 
 ---
 
@@ -97,15 +101,16 @@ OWTREE=/root/repro-verify2 REL=/root/rel-repro \
 | ⑦ | `15_sensors.js` + `rpcd/ucode/wta301` 在位 | `unsquashfs -l <rootfs.sq> \| grep -E "15_sensors\|ucode/wta301"` |
 | ⑧ | 产物尺寸对得上 | 网页 `0x1060000` 附近 / TTL `0x1380000` / sysupgrade 量级 ~13.4MB |
 
-### 4.4 与已发布 p29 比对
+### 4.4 与已发布版本比对
 
-已发布基线（用户手上那份，刷机成功）：
+已发布基线（**v1.0.0 / p30**，用户手上那份，真机刷机 PASS=30/30）：
 ```
-网页包     c5ac0911accd2ec48033329c383d5c4c   17,170,432 B
-sysupgrade 76df463df4d8b5acba5d52852870c127   13,394,197 B
-uboot      d0ada9f76e4f1aba9b96a559a5220cee      262,144 B
-TTL        e1424fea2494bcb9b527f9540a5bc91d   20,447,232 B
+网页包      c823af1d54403ff811f8876dd1190101   17,170,432 B
+sysupgrade  8980eb34f1652e6c78a700ce7f778d47   13,394,197 B
+uboot       d0ada9f76e4f1aba9b96a559a5220cee      262,144 B
+TTL        9218fb43672a08e37669873e0c93ea0a   20,447,232 B
 ```
+（p29 的 `c5ac0911…`/`76df463d…`/`e1424fea…` 是上一版，**别再拿它比**。）
 
 **已知 md5 必不相同**（squashfs 时间戳，见 `docs/REPRODUCTION-VERIFICATION.md` §3）。
 要比的是：**尺寸量级**、**解包后文件清单与内容**、**DTS/DTS 内嵌 DTB**、**rootfs 关键文件 md5**。
