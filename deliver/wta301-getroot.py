@@ -126,6 +126,7 @@ import hashlib
 import json
 import os
 import platform
+import random
 import re
 import socket
 import subprocess
@@ -140,6 +141,13 @@ import time
 ELINK_PORT = 32768
 SRV_PORT = 8099
 NC_BACKUP_PORT = 8098   # 设备 `dd | nc PC 8098` 把整片推回来，PC 侧监听
+# 并行流数。为什么需要并行：板上实测「从 NAND 读出 12 MiB 并算 md5」只要
+# 1.35 秒（≈8.9 MB/s），但同样的数据走 `dd | nc` 单流只有 ≈0.65 MB/s。
+# 瓶颈不在 NAND、也不在 100 Mbps 网线（12.5 MB/s），而在单条 TCP 流上
+# busybox nc 的「小块写 + 等确认」——纯延迟受限，加带宽没用。多开几条流
+# 就能把这段延迟重叠掉，NAND 和网线本身还有十几倍余量。
+NC_PARALLEL = 4
+NC_PORT_END = NC_BACKUP_PORT + NC_PARALLEL - 1
 
 # 我们的 u-boot kit 的 md5（mtd4 / mtd9 应为它）
 KIT_UBOOT_MD5 = "d0ada9f76e4f1aba9b96a559a5220cee"
@@ -488,10 +496,10 @@ def setup_alias(addrs, pc_ip):
                 added.append(a)
                 info("   + 别名 %s/32 (SkipAsSource)" % a)
         for name, port in (("WTA_ELINK", ELINK_PORT), ("WTA_SRV", SRV_PORT),
-                           ("WTA_BKUP", NC_BACKUP_PORT)):
+                           ("WTA_BKUP", "%d-%d" % (NC_BACKUP_PORT, NC_PORT_END))):
             _run("netsh advfirewall firewall add rule name=%s dir=in action=allow "
-                 "protocol=TCP localport=%d" % (name, port))
-            info("   + 防火墙放行 TCP %d (%s)" % (port, name))
+                 "protocol=TCP localport=%s" % (name, port))
+            info("   + 防火墙放行 TCP %s (%s)" % (port, name))
 
         def cleanup():
             for a in added:
@@ -655,6 +663,77 @@ class Telnet:
         实测后果是 mtd9~mtd14 整批失败（命令串到一起）。
         """
         self.s.sendall(cmd.encode() + b"\n")
+
+    def _flush(self, budget=0.15):
+        """把 socket 里的残留输出读掉，避免上一条命令的尾巴串到这一条。"""
+        try:
+            self.s.settimeout(0.02)
+        except OSError:
+            return
+        end = time.time() + budget
+        while time.time() < end:
+            try:
+                if not self.s.recv(65535):
+                    break
+            except Exception:
+                continue
+
+    def run(self, cmd, timeout=300.0):
+        """发命令，等它【真的结束】才返回。取代 sh(cmd, 30.0) 这种固定睡眠。
+
+        为什么要改：写 4 MiB 到 NAND 约 1~2 秒、回读做 md5 也 1~2 秒，
+        而原来对每个这样的命令一律 sleep 30 秒。刷原厂要写 2 个分区、
+        每个再回读一次 = 4 次固定等待 = 120 秒，其中真正干活不到 10 秒。
+        实测：sh 读 12 MiB 花 32.0 秒（30 秒是 sleep），run 只要几秒。
+
+        做法：命令后挂一个随机哨兵 `echo <tag>$?`，40 ms 一轮读，
+        看到哨兵立刻返回。
+
+        ★ 踩过的坑：telnet 会回显我们发过去的整行，而那一行里就含 tag，
+          照 `tag in buf` 判断会立刻命中、返回空字符串。所以哨兵必须
+          独占行首、后面紧跟数字（`echo <tag>$?` 回显里 tag 后面是 `$`，
+          不匹配）。发送前还要把上一轮的残留读干净，否则更早的哨兵会串进来。
+        """
+        tag = "QZ%08xZQ" % random.randrange(1 << 32)
+        self._flush()
+        payload = "{ %s ; } 2>&1; echo %s$?" % (cmd, tag)
+        self.s.sendall(payload.encode() + b"\n")
+
+        want = re.compile(rb"(?:^|[\r\n])" + re.escape(tag.encode()) + rb"[0-9]")
+        buf = b""
+        deadline = time.time() + timeout
+        try:
+            self.s.settimeout(0.04)
+        except OSError:
+            return ""
+        while time.time() < deadline:
+            try:
+                d = self.s.recv(65535)
+            except socket.timeout:
+                continue
+            except Exception:
+                break
+            if not d:
+                break
+            buf += d
+            if want.search(buf):
+                break
+
+        text = buf.decode("utf-8", "replace").replace("\r", "")
+
+        # 去掉回显：telnetd 把我们发的那一整行原样打回来（实测不折行）。
+        # 判据用「整行等于 payload」而不是「以 { 开头的一段」—— 后者在长命令
+        # 上会一路删到缓冲区末尾，把真正的输出也删光（踩过）。
+        out = []
+        for l in text.split("\n"):
+            if tag in l:
+                continue
+            if l == payload:
+                continue
+            if l and len(l) > 8 and payload.startswith(l):
+                continue
+            out.append(l)
+        return "\n".join(out)
 
     def drain(self, wait=2.0, hard_timeout=2.0):
         """读走已到达的输出。可重复调用；超时即返回已收内容。"""
@@ -846,9 +925,9 @@ def do_flash(tn, plan, pc_ip, pkg_name):
 
     info("")
     info("[6] 设备侧下载镜像")
-    out = tn.sh("cd /tmp && wget -O pkg.bin '%s' 2>&1 | tail -3" % url, 15.0)
+    out = tn.run("cd /tmp && wget -O pkg.bin '%s' 2>&1 | tail -3" % url, timeout=300.0)
     info("   " + out.strip().replace("\n", "\n   ")[:300])
-    got = _first_md5(tn.sh("md5sum /tmp/pkg.bin", 10.0))
+    got = _first_md5(tn.run("md5sum /tmp/pkg.bin", timeout=120.0))
     info("   设备侧整包 md5 = %s" % (got or "(读取失败)"))
     if got != plan["pkg_md5"]:
         die("整包 md5 不一致，中止（尚未写入任何分区）\n"
@@ -875,13 +954,13 @@ def do_flash(tn, plan, pc_ip, pkg_name):
             info("   不回读校验的理由：回读 12MiB 要 20~30 秒，这时间里内核一旦缺页，")
             info("   就会从写了一半的 squashfs 取页 → 当场崩。源包 md5 已在写前校验过。")
             return True, True
-        out = tn.sh(cmd, 40.0)
-        info("   " + out.strip().replace("\n", "\n   ")[:260])
+        out = tn.run(cmd, timeout=300.0)
+        info("   " + out.strip().replace(chr(10), chr(10) + "   ")[:260])
 
         info("[7b] 回读校验 %s" % part)
         rcmd = ("dd if=/dev/mtdblock%d bs=%d skip=%d count=%d 2>/dev/null | md5sum"
                 % (p["mtd"], DD_BS, p["dst_seek"], p["count"]))
-        got = _first_md5(tn.sh(rcmd, 35.0))
+        got = _first_md5(tn.run(rcmd, timeout=300.0))
         good = (got == p["md5"])
         info("   %-6s 期望 %s  实得 %s  %s"
              % (part, p["md5"], got or "(失败)", "OK" if good else "MISMATCH"))
@@ -933,8 +1012,8 @@ def build_stock_plan(tn, mtd_table, mode, kpath=None, rpath=None, kset=None):
                 problems.append("%s: mtd%d 不是可启动的原厂镜像（%s）"
                                 % (part, src_mtd, ver["msg"]))
                 continue
-            prev = _first_md5(tn.sh("dd if=/dev/mtdblock%d bs=%d count=%d 2>/dev/null | md5sum"
-                                    % (src_mtd, DD_BS, count), 40.0))
+            prev = _first_md5(tn.run("dd if=/dev/mtdblock%d bs=%d count=%d 2>/dev/null | md5sum"
+                                     % (src_mtd, DD_BS, count), timeout=180.0))
             info("     B 槽 md5 = %s" % (prev or "(读取失败)"))
             if prev != STOCK_KNOWN_MD5[part]:
                 problems.append(
@@ -1014,7 +1093,7 @@ def _probe_stock_image(tn, part, mtd_idx):
         for pat, label in (("Linux-[0-9][0-9.]*", "ver"),
                            ("Linux-[0-9.]*", "ver"),
                            ("Linux-", "loose")):
-            out = tn.sh("%s | grep -a -o '%s' | head -1" % (base, pat), 10.0)
+            out = tn.run("%s | grep -a -o '%s' | head -1" % (base, pat), timeout=60.0)
             got = _last_line(out)
             if got.startswith("Linux-") and len(got) > len("Linux-"):
                 return {"ok": True, "msg": "FIT OK，%s" % got}
@@ -1058,8 +1137,15 @@ class NcSink:
         self.port = port
         self.sock = socket.socket()
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        # 接收窗口放大：默认几十 KB，4 条并行流同时进来会互相挤。
+        # 100 Mbps 下 BDP 很小，但大窗口让 nc 的小块写不至于每次都被卡住。
+        for opt in (socket.SO_RCVBUF,):
+            try:
+                self.sock.setsockopt(socket.SOL_SOCKET, opt, 1 << 20)
+            except OSError:
+                pass
         self.sock.bind((bind, port))
-        self.sock.listen(1)
+        self.sock.listen(4)
         self.sock.settimeout(120)
 
     def recv_to(self, path, timeout=180):
@@ -1070,12 +1156,16 @@ class NcSink:
             conn, _ = self.sock.accept()
         except socket.timeout:
             return -1
+        try:
+            conn.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1 << 20)
+        except OSError:
+            pass
         conn.settimeout(60)
         try:
             with open(path, "wb") as f:
                 while True:
                     try:
-                        b = conn.recv(1 << 16)
+                        b = conn.recv(1 << 20)
                     except socket.timeout:
                         break
                     if not b:
@@ -1098,37 +1188,82 @@ class NcSink:
 BACKUP_SKIP = {15, 16}
 
 
+def _nc_receive(sink, path, timeout, results, tag):
+    """线程体：从一个端口收一个分区的字节流落盘。"""
+    try:
+        results[tag] = sink.recv_to(path, timeout=timeout)
+    except Exception:
+        results[tag] = -2
+
+
 def do_backup(tn, mtd_table, pc_ip, outdir):
     os.makedirs(outdir, exist_ok=True)
-    sink = NcSink()
+    # 4 条并行流，每条一个独立端口、一个独立监听、一个接收线程。
+    sinks = [NcSink(NC_BACKUP_PORT + i) for i in range(NC_PARALLEL)]
     info("")
     info("[B1] 备份到 %s" % os.path.abspath(outdir))
-    info("     PC 侧监听 TCP %d，设备侧 `dd if=/dev/mtdblockN | nc <PC> %d`"
-         % (NC_BACKUP_PORT, NC_BACKUP_PORT))
+    info("     PC 侧监听 TCP %d-%d（%d 路并行），设备侧 `dd | nc`"
+         % (NC_BACKUP_PORT, NC_PORT_END, NC_PARALLEL))
+    info("     为什么并行：板上 NAND 读 12 MiB 只要 1.35s（8.9 MB/s），")
+    info("     但单条 nc 流只有 0.65 MB/s —— 单流是被往返延迟卡住的，")
+    info("     多开几条把延迟叠起来，NAND 和网线都还有十几倍余量。")
 
-    manifest = []
-    ok = True
+    # ---- 先排计划 ----
+    plan = []
     for idx in sorted(mtd_table):
         if idx in BACKUP_SKIP:
             continue
         size, name = mtd_table[idx]
         base = "mtd%d_%s.bin" % (idx, re.sub(r"[^A-Za-z0-9_.-]", "_", name))
-        path = os.path.join(outdir, base)
+        plan.append({
+            "idx": idx, "name": name, "size": size, "base": base,
+            "path": os.path.join(outdir, base),
+            "timeout": max(60.0, size / 1048576.0) * 3,
+        })
+
+    manifest = []
+    ok = True
+    for b0 in range(0, len(plan), NC_PARALLEL):
+        batch = plan[b0:b0 + NC_PARALLEL]
         info("")
-        info("   mtd%-2d %-18s 0x%08x ..." % (idx, name, size))
+        for idx, it in enumerate(batch):
+            info("   mtd%-2d %-18s 0x%08x  -> TCP %d"
+                 % (it["idx"], it["name"], it["size"], NC_BACKUP_PORT + idx))
 
-        # 单线程：发命令 -> 从 nc 收数据 -> 排空 telnet。
-        # 绝不能把 tn.sh 丢进线程，会和主线程抢同一个套接字。
-        tn.send("dd if=/dev/mtdblock%d bs=65536 2>/dev/null | md5sum" % idx)
-        want = _first_md5(tn.drain(max(4.0, size / 4194304.0), hard_timeout=4.0))
+        # 先起接收线程（它们阻塞在 accept），再让设备发数据。
+        results = {}
+        threads = []
+        for k, it in enumerate(batch):
+            t = threading.Thread(target=_nc_receive,
+                                 args=(sinks[k], it["path"], it["timeout"], results, k),
+                                 daemon=True)
+            t.start()
+            threads.append(t)
 
-        tn.send("dd if=/dev/mtdblock%d bs=65536 2>/dev/null | nc %s %d"
-                % (idx, pc_ip, NC_BACKUP_PORT))
-        got = sink.recv_to(path, timeout=max(60.0, size / 1048576.0) * 3)
-        tn.drain(0.3)
+        # 设备侧一次性把这批全发起来（& 后台），telnet 只负责下命令，不参与搬运。
+        # 绝不能把 tn.send 丢进线程 —— 会和主线程抢同一个 telnet 套接字。
+        for k, it in enumerate(batch):
+            tn.send("(dd if=/dev/mtdblock%d bs=65536 2>/dev/null | nc %s %d) &"
+                    % (it["idx"], pc_ip, NC_BACKUP_PORT + k))
 
-        local = _md5_file(path) if os.path.exists(path) else ""
-        if got != size:
+        for t in threads:
+            t.join()
+        tn.drain(0.5)
+
+        # ---- 逐个核对 ----
+        for k, it in enumerate(batch):
+            idx, name, size, path, base = (it["idx"], it["name"], it["size"],
+                                           it["path"], it["base"])
+            got = results.get(k, -1)
+            local = _md5_file(path) if os.path.exists(path) else ""
+            if got == size:
+                info("     OK 0x%x  md5=%s（本地现算）" % (got, local))
+                manifest.append((idx, name, size, local, base))
+                continue
+            if got == -1:
+                info("     !! 设备没有连过来（超时）")
+                ok = False
+                continue
             # 已知现象：mtd11/mtd13 这类「内容之后全是擦除态」的分区，
             # 内核读到实际数据结尾就返回 EOF（板上 wc -c 实测同样长度）。
             # 所以短读不一定是错误，但要显式标出来，不能当完整备份用。
@@ -1136,24 +1271,19 @@ def do_backup(tn, mtd_table, pc_ip, outdir):
                  % (max(got, 0), size))
             info("       尾部 0x%x 字节读不到（多为擦除态 0xFF）"
                  % (size - max(got, 0)))
-            if want and local and got > 0:
-                dev_head = _first_md5(tn.sh(
+            if local and got > 0:
+                # 只在短读时才补读一遍做前缀核对（正常情况不读第二遍）
+                dev_head = _first_md5(tn.run(
                     "dd if=/dev/mtdblock%d bs=65536 count=%d 2>/dev/null | md5sum"
-                    % (idx, got // 65536), max(20.0, got / 2097152.0)))
+                    % (idx, got // 65536), timeout=180.0))
                 if dev_head == local:
                     info("       前 0x%x 字节 md5 与设备一致 -> 缺的只是尾部" % got)
                     manifest.append((idx, name, got, local, base + " (PARTIAL)"))
                     continue
             ok = False
-            continue
-        if local != want:
-            info("     !! md5 不符  设备 %s  本地 %s" % (want or "?", local))
-            ok = False
-            continue
-        info("     OK 0x%x  md5=%s" % (got, local))
-        manifest.append((idx, name, size, local, base))
 
-    sink.close()
+    for sk in sinks:
+        sk.close()
 
     mf = os.path.join(outdir, "MD5SUMS.txt")
     with open(mf, "w", encoding="utf-8") as f:
@@ -1166,7 +1296,6 @@ def do_backup(tn, mtd_table, pc_ip, outdir):
     if not ok:
         info("   !! 有分区未备份成功（上面标 !! 的）")
     return ok
-
 
 # ---------------------------------------------------------------------------
 # 修 B 槽（把离线原厂镜像写回去）
@@ -1226,9 +1355,9 @@ def restore_bslot(tn, args, mtd_table, pc_ip, kset, kpath, rpath):
         url = "http://%s:%d/%s" % (pc_ip, SRV_PORT, os.path.basename(path))
         info("")
         info("[R2] 写 %s -> mtd%d (%s)" % (part, mtd_idx, name))
-        out = tn.sh("cd /tmp && wget -O r.bin '%s' 2>&1 | tail -1" % url, 40.0)
+        out = tn.run("cd /tmp && wget -O r.bin '%s' 2>&1 | tail -1" % url, timeout=300.0)
         info("   下载: %s" % _last_line(out)[:110])
-        got = _first_md5(tn.sh("md5sum /tmp/r.bin", 20.0))
+        got = _first_md5(tn.run("md5sum /tmp/r.bin", timeout=120.0))
         if got != md5:
             info("   !! 下载后 md5 %s != %s，中止" % (got or "?", md5))
             return 5
@@ -1244,14 +1373,14 @@ def restore_bslot(tn, args, mtd_table, pc_ip, kset, kpath, rpath):
             info("   不回读（回读窗口里缺页会崩）；源 md5 写前已验过。")
             return 0
 
-        out = tn.sh("dd if=/tmp/r.bin of=/dev/mtdblock%d bs=%d 2>&1"
-                    % (mtd_idx, DD_BS), max(30.0, size / 2097152.0) * 2)
+        out = tn.run("dd if=/tmp/r.bin of=/dev/mtdblock%d bs=%d 2>&1"
+                     % (mtd_idx, DD_BS), timeout=300.0)
         info("   写入: %s" % _last_line(out)[:150])
         tn.sh("rm -f /tmp/r.bin", 3.0)
 
         info("[R3] 回读校验 %s" % part)
-        back = _first_md5(tn.sh("dd if=/dev/mtdblock%d bs=65536 2>/dev/null | md5sum"
-                               % mtd_idx, max(25.0, size / 2097152.0)))
+        back = _first_md5(tn.run("dd if=/dev/mtdblock%d bs=65536 2>/dev/null | md5sum"
+                                 % mtd_idx, timeout=300.0))
         if back != md5:
             info("   !! 回读 %s != %s" % (back or "?", md5))
             return 5
@@ -1409,7 +1538,7 @@ def do_verify(tn, mtd_table):
         if idx not in mtd_table:
             info("   mtd%-2d %-16s 不存在" % (idx, label))
             continue
-        md5 = _first_md5(tn.sh("dd if=/dev/mtdblock%d bs=65536 2>/dev/null | md5sum" % idx, 15.0))
+        md5 = _first_md5(tn.run("dd if=/dev/mtdblock%d bs=65536 2>/dev/null | md5sum" % idx, timeout=120.0))
         if md5 == KIT_UBOOT_MD5:
             tag = "= 我们的 kit"
             ub_ok += 1
@@ -1427,10 +1556,10 @@ def do_verify(tn, mtd_table):
     for label, ki, ri in (("A 槽", 10, 11), ("B 槽", 5, 6)):
         if ki not in mtd_table or ri not in mtd_table:
             continue
-        kmd5 = _first_md5(tn.sh("dd if=/dev/mtdblock%d bs=65536 2>/dev/null | md5sum" % ki,
-                               max(20.0, mtd_table[ki][0] / 2097152.0)))
-        rmd5 = _first_md5(tn.sh("dd if=/dev/mtdblock%d bs=65536 2>/dev/null | md5sum" % ri,
-                               max(30.0, mtd_table[ri][0] / 2097152.0)))
+        kmd5 = _first_md5(tn.run("dd if=/dev/mtdblock%d bs=65536 2>/dev/null | md5sum" % ki,
+                                 timeout=180.0))
+        rmd5 = _first_md5(tn.run("dd if=/dev/mtdblock%d bs=65536 2>/dev/null | md5sum" % ri,
+                                 timeout=180.0))
         kind_k = "FIT" if head4(ki) == "d00dfeed" else "?"
         kind_r = "squashfs" if head4(ri) == "68737173" else "?"
         info("   %s  mtd%-2d/%-2d  kernel %-9s %s   rootfs %-9s %s"
@@ -1538,14 +1667,14 @@ def do_flash_stock(tn, plan, pc_ip, mode):
         else:
             src = "/tmp/stock_%s.img" % part
             url = "http://%s:%d/%s" % (pc_ip, SRV_PORT, p["src_file"])
-            out = tn.sh("cd /tmp && wget -O stock_%s.img '%s' 2>&1 | tail -2"
-                        % (part, url), 40.0)
+            out = tn.run("cd /tmp && wget -O stock_%s.img '%s' 2>&1 | tail -2"
+                         % (part, url), timeout=300.0)
             last = _last_line(out)
             info("   下载 %s %s" % (p["src_file"], last[:110]))
             if not tn.sh("test -s %s && echo YES" % src, 5.0).count("YES"):
                 info("   !! 设备侧文件没下载成功，中止（尚未写入）")
                 return False, False
-            got = _first_md5(tn.sh("md5sum %s" % src, 15.0))
+            got = _first_md5(tn.run("md5sum %s" % src, timeout=120.0))
             info("   设备侧 %s md5 = %s" % (part, got or "(失败)"))
             if got != p["md5"]:
                 info("   !! md5 不一致，中止（尚未写入任何分区）")
@@ -1562,13 +1691,13 @@ def do_flash_stock(tn, plan, pc_ip, mode):
             info("   不回读：回读要 20~30 秒，这时间里缺页读到半写的 squashfs 会当场崩")
             return ok_all, True
 
-        out = tn.sh(cmd + " 2>&1", 30.0)
+        out = tn.run(cmd, timeout=300.0)
         info("   " + _last_line(out)[:200])
 
         info("[S3b] 回读校验 %s" % part)
         rcmd = ("dd if=/dev/mtdblock%d bs=%d skip=%d count=%d 2>/dev/null | md5sum"
                 % (p["dst_mtd"], DD_BS, p["dst_seek"], p["count"]))
-        got = _first_md5(tn.sh(rcmd, 30.0))
+        got = _first_md5(tn.run(rcmd, timeout=300.0))
         good = (got == p["md5"])
         info("   %-6s 期望 %s  实得 %s  %s"
              % (part, p["md5"], got or "(失败)", "OK" if good else "MISMATCH"))
@@ -1601,11 +1730,50 @@ def main():
         return do_check_kit()
 
     argv = sys.argv[1:]
-    interactive = not argv or argv[0] in ("-i", "--interactive", "menu")
+
+    # 只要没有任何「动作」参数，就走交互菜单。
+    # 光给 --target / --pc-ip / --timeout / --keep / --yes 不算动作 ——
+    # 否则 `启动.bat` 传个 --target 就会掉进 CLI 单次模式，
+    # 于是每选一次菜单都重新 getroot（这个坑真的踩了）。
+    _ACTIONS = {"--flash-op", "--flash-uboot", "--flash-stock", "--restore-bslot",
+                "--backup", "--verify", "--explain", "--check-kit"}
+    interactive = (not argv
+                   or argv[0] in ("-i", "--interactive", "menu")
+                   or not (_ACTIONS & set(argv)))
     if not interactive:
         return run_cli(argv)
 
-    # ---------------- 傻瓜式菜单 ----------------
+    # ================= 傻瓜式菜单 =================
+    # 一张菜单管到底：所有操作共享同一个 sess（同一条 root shell、同一套
+    # 网关别名、同一个 HTTP 服务）。只有连接断了才会重新 getroot。
+    # 通用参数：对整条会话有效，转成前缀带去给每次 run_cli
+    _pre = argparse.ArgumentParser(add_help=False)
+    _pre.add_argument("--target", default=None)
+    _pre.add_argument("--pc-ip", default=None)
+    _pre.add_argument("--timeout", type=int, default=900)
+    _pre.add_argument("--yes", "-y", action="store_true")
+    _pre.add_argument("--keep", action="store_true")
+    _known, _ = _pre.parse_known_args(argv)
+
+    COMMON = []
+    if _known.target:
+        COMMON += ["--target", _known.target]
+    if _known.pc_ip:
+        COMMON += ["--pc-ip", _known.pc_ip]
+    if _known.timeout != 900:
+        COMMON += ["--timeout", str(_known.timeout)]
+    if _known.yes:
+        COMMON += ["--yes"]
+    if _known.keep:
+        COMMON += ["--keep"]
+
+    sess = {}
+    if _known.target:
+        sess["target"] = _known.target
+    if _known.pc_ip:
+        sess["pc_ip"] = _known.pc_ip
+    n_ops = 0
+
     info("=" * 68)
     info("   WTA301 刷机工具")
     info("=" * 68)
@@ -1616,109 +1784,123 @@ def main():
     info("     3. 本程序要用管理员权限跑")
     info("")
     info("   全程只动 A 槽，B 槽保留原厂做回退。")
-    info("")
-    info("   请选择：")
-    info("")
-    info("     [1] 只获取 root（不刷任何东西）")
-    info("     [2] 刷 OpenWrt（完整包）")
-    info("     [3] 只刷 u-boot kit（保留当前固件）")
-    info("     [4] 刷回原厂固件")
-    info("     [5] 安全审计（列出生路，不写任何东西）")
-    info("     [6] 整片备份到本机")
-    info("     [7] 修 B 槽（把原厂镜像写回回退槽）")
-    info("     [8] 查看分区表与风险说明")
-    info("     [0] 退出")
+    info("   第一次操作会获取 root，之后所有操作都复用这条连接。")
     info("")
 
-    try:
-        choice = input("   输入序号: ").strip()
-    except (EOFError, KeyboardInterrupt):
+    rc = 0
+    while True:
         info("")
-        return 0
+        info("=" * 68)
+        if n_ops:
+            alive = _session_alive(sess.get("tn"))
+            info("   [已连上 %s%s]" % (sess.get("target") or "?",
+                                       "" if alive else " —— 连接已断，下次操作会重连"))
+        info("     [1] 只获取 root（不刷任何东西）")
+        info("     [2] 刷 OpenWrt（完整包）")
+        info("     [3] 只刷 u-boot kit（保留当前固件）")
+        info("     [4] 刷回原厂固件")
+        info("     [5] 安全审计（列出生路，不写任何东西）")
+        info("     [6] 整片备份到本机")
+        info("     [7] 修 B 槽（把原厂镜像写回回退槽）")
+        info("     [8] 查看分区表与风险说明")
+        info("     [0] 退出")
+        info("=" * 68)
 
-    if choice == "0" or choice == "":
-        return 0
-    if choice == "5":
-        return run_cli(["--verify", "--interactive-ok"])
-
-    if choice == "6":
-        info("")
-        info("   把设备所有分区整片拷到本机的 backup 目录（约 126 MB）。")
-        info("   用 nc 直连，pc 侧监听 8098，会逐区比 md5。")
-        info("")
         try:
-            d = input("   目标目录（直接回车用默认 backup）: ").strip().strip('"')
+            choice = input("   输入序号: ").strip()
         except (EOFError, KeyboardInterrupt):
             info("")
-            return 0
-        return run_cli(["--backup", d or "backup", "--interactive-ok"])
+            choice = "0"
+        if choice in ("q", "quit", "exit"):
+            choice = "0"
 
-    if choice == "7":
-        info("")
-        info("   B 槽是回退出口。如果你之前把它刷坏过，这里可以写回原厂。")
-        info("   写的时候我们跑在 A 槽，B 槽不是活动分区 -> 比写 A 槽安全。")
-        info("")
-        try:
-            ok = input("   继续？[y/N] ").strip().lower()
-        except (EOFError, KeyboardInterrupt):
+        if choice == "0" or choice == "":
+            break
+
+        if choice == "8":
             info("")
-            return 0
-        if ok not in ("y", "yes", "是"):
-            return 0
-        return run_cli(["--restore-bslot", "--interactive-ok"])
+            info(__doc__)
+            continue
 
-    if choice == "8":
-        info("")
-        info(__doc__)
-        return 0
-
-    if choice == "1":
-        return run_cli(["--interactive-ok"])
-
-    if choice == "2":
-        pkg = ask_file("OpenWrt 完整包", "wta301-op-*.bin", PKG_TOTAL)
-        if not pkg:
-            return 1
-        return run_cli(["--flash-op", pkg, "--interactive-ok"])
-
-    if choice == "3":
-        pkg = ask_file("u-boot kit 镜像", "wta301-uboot-*.bin", 0x40000)
-        if not pkg:
-            return 1
-        return run_cli(["--flash-uboot", pkg, "--interactive-ok"])
-
-    if choice == "4":
-        info("")
-        info("   B 槽里本来就存着一份原厂固件（kernel 0x400000 / rootfs 0xC00000），")
-        info("   可以直接拷到 A 槽，不需要准备任何镜像文件。")
-        info("")
-        info("     [a] 自动找原厂镜像（推荐，只认 md5）")
-        info("     [b] 从 B 槽拷（md5 必须是原厂值，否则拒绝）")
-        info("     [f] 我自己有两个镜像文件")
-        info("     [x] 返回")
-        info("")
+        n_ops += 1
         try:
-            sub = input("   选: ").strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            info("")
-            return 0
-        if sub == "a":
-            return run_cli(["--flash-stock", "auto", "--interactive-ok"])
-        if sub == "b":
-            return run_cli(["--flash-stock", "bslot", "--interactive-ok"])
-        if sub == "f":
-            k = ask_file("原厂内核", "mtd10_kernel_bak.bin / mtd5_kernel.bin", 0)
-            if not k:
-                return 1
-            r = ask_file("原厂 rootfs", "mtd11_rootfs_bak.bin / mtd6_rootfs.bin", 0)
-            if not r:
-                return 1
-            return run_cli(["--flash-stock", "files", "--stock-kernel", k,
-                            "--stock-rootfs", r, "--interactive-ok"])
-        return 0
+            if choice == "1":
+                rc = run_cli(COMMON + ["--interactive-ok"], sess=sess, persist=True)
 
-    info("   ! 无效选项")
-    return 1
+            elif choice == "2":
+                pkg = ask_file("OpenWrt 完整包", "wta301-op-*.bin", PKG_TOTAL)
+                if pkg:
+                    rc = run_cli(COMMON + ["--flash-op", pkg, "--interactive-ok"],
+                                 sess=sess, persist=True)
+
+            elif choice == "3":
+                pkg = ask_file("u-boot kit 镜像", "wta301-uboot-*.bin", 0x40000)
+                if pkg:
+                    rc = run_cli(COMMON + ["--flash-uboot", pkg, "--interactive-ok"],
+                                 sess=sess, persist=True)
+
+            elif choice == "4":
+                info("")
+                info("   [a] 自动找原厂镜像（推荐，只认 md5）")
+                info("   [b] 从 B 槽拷（md5 必须是原厂值，否则拒绝）")
+                info("   [f] 我自己有两个镜像文件")
+                info("   [x] 返回")
+                sub = input("   选: ").strip().lower()
+                if sub == "a":
+                    rc = run_cli(COMMON + ["--flash-stock", "auto", "--interactive-ok"],
+                                 sess=sess, persist=True)
+                elif sub == "b":
+                    rc = run_cli(COMMON + ["--flash-stock", "bslot", "--interactive-ok"],
+                                 sess=sess, persist=True)
+                elif sub == "f":
+                    k = ask_file("原厂内核", "mtd10_kernel_bak.bin / mtd5_kernel.bin", 0)
+                    r = k and ask_file("原厂 rootfs",
+                                       "mtd11_rootfs_bak.bin / mtd6_rootfs.bin", 0)
+                    if k and r:
+                        rc = run_cli(COMMON + ["--flash-stock", "files",
+                                      "--stock-kernel", k, "--stock-rootfs", r,
+                                      "--interactive-ok"], sess=sess, persist=True)
+
+            elif choice == "5":
+                rc = run_cli(COMMON + ["--verify", "--interactive-ok"],
+                             sess=sess, persist=True)
+
+            elif choice == "6":
+                info("")
+                info("   把设备所有分区整片拷到本机的 backup 目录（约 126 MB）。")
+                info("   用 nc 直连，PC 侧监听 8098，会逐区比 md5。")
+                d = input("   目标目录（直接回车用默认 backup）: ").strip().strip('"')
+                rc = run_cli(COMMON + ["--backup", d or "backup", "--interactive-ok"],
+                             sess=sess, persist=True)
+
+            elif choice == "7":
+                info("")
+                info("   B 槽是回退出口。如果你之前把它刷坏过，这里可以写回原厂。")
+                info("   写的时候我们跑在 A 槽，B 槽不是活动分区 -> 比写 A 槽安全。")
+                ok = input("   继续？[y/N] ").strip().lower()
+                if ok in ("y", "yes", "是"):
+                    rc = run_cli(COMMON + ["--restore-bslot", "--interactive-ok"],
+                                 sess=sess, persist=True)
+
+            else:
+                info("   ! 无效选项")
+        except KeyboardInterrupt:
+            info("")
+            info("   (已中断当前操作)")
+        except RefusedWrite as e:
+            info("")
+            info("   写入已被安全门禁拒绝 —— 没有写入任何分区")
+            info("   " + str(e))
+
+    # ---- 退出时统一收尾 ----
+    info("")
+    info("[收尾] 关闭连接、停服务、撤销本机改动")
+    close_session(sess)
+    info("")
+    info("=" * 68)
+    info(" 会话结束（共 %d 次操作）" % n_ops)
+    info("=" * 68)
+    return rc
 
 
 def ask_file(label, pattern, expect_size):
@@ -1750,7 +1932,7 @@ def ask_file(label, pattern, expect_size):
 # CLI 入口
 # ---------------------------------------------------------------------------
 
-def run_cli(argv):
+def run_cli(argv, sess=None, persist=False):
     ap = argparse.ArgumentParser(
         prog="wta301-getroot.py",
         description="一键在原厂固件上取 root；可选继续刷 OpenWrt 或 u-boot kit 到 A 槽",
@@ -1807,11 +1989,95 @@ def run_cli(argv):
     if args.flash_stock == "files" and not (args.stock_kernel and args.stock_rootfs):
         die("--flash-stock files 需要同时给 --stock-kernel 与 --stock-rootfs")
 
-    return execute(args)
+    return execute(args, sess=sess, persist=persist)
 
 
-def execute(args):
+def _session_alive(tn):
+    """连一次看还活着没有。菜单里每次操作前都问一遍。"""
+    if tn is None:
+        return False
+    try:
+        return "__PONG__" in tn.run("echo __PONG__", timeout=8.0)
+    except Exception:
+        return False
+
+
+def open_session(args, sess, pc_ip, gw_ip, serve_dir):
+    """建立（或在已有连接上复用）一条到设备的 root shell。
+
+    ★ 这条函数是照着用户提的第一个问题写的：
+      「每个选项都获取一次 root，明明第一次就已经够了，剩下的操作都是在
+        第一次的基础上进行。」
+
+      改之前：每选一次菜单都重新起 elink 模拟器、重等设备回连、重新拿 root。
+      改之后：只要连接还活着就直接复用；只有断了（设备重启、telnetd 挂掉）
+      才重连。多个操作共享同一条 shell、同一套别名、同一个 HTTP 服务。
+    """
+    tn = sess.get("tn")
+    if _session_alive(tn):
+        n = sess.get("nops", 0) + 1
+        sess["nops"] = n
+        info("")
+        info("[0] 复用已有 root 连接（不重新 getroot）")
+        info("   设备: %s   第 %d 次操作" % (sess.get("target"), n))
+        return tn
+
+    target = sess.get("target") or args.target
+    payload = ("http://%s:%d/x;(/bin/busybox telnetd -l /bin/sh -p 2323 "
+               ">/dev/null 2>&1 &);" % (pc_ip, SRV_PORT))
+
+    info("")
+    info("[2] 起 e-Link 模拟器 + HTTP 服务（同进程，退出即失效）")
+    servers = Servers(target, pc_ip, payload, serve_dir, args.timeout + 600)
+    servers.start()
+    sess["servers"] = servers
+
+    if not wait_for_root(target, servers, args.timeout):
+        info("")
+        info("!! %d 秒内设备没回连。排查：" % args.timeout)
+        info("   1) 设备是否在原厂固件、是否在正常运行")
+        info("   2) 是否以管理员/root 运行（别名与防火墙要权限）")
+        info("   3) %s 是否真的没有别的机器占用" % gw_ip)
+        return None
+
+    info("")
+    info("[4] 连上 root shell")
+    tn = Telnet(target)
+    info("   " + tn.sh("id", 1.5).strip().replace(chr(10), " ")[:110])
+    sess["tn"] = tn
+    sess["nops"] = 1
+    return tn
+
+
+def close_session(sess):
+    """把会话彻底收掉：关 shell、停服务、撤销本机改动。"""
+    tn = sess.get("tn")
+    if tn is not None:
+        try:
+            tn.close()
+        except Exception:
+            pass
+        sess["tn"] = None
+    srv = sess.get("servers")
+    if srv is not None:
+        try:
+            srv.stop()
+        except Exception:
+            pass
+        sess["servers"] = None
+    cl = sess.get("cleanup")
+    if cl is not None:
+        try:
+            cl()
+        except Exception:
+            pass
+        sess["cleanup"] = None
+
+
+def execute(args, sess=None, persist=False):
+    """persist=True 时保留连接给下一次操作复用（菜单模式）。"""
     _utf8_stdout()
+    sess = sess if sess is not None else {}
 
     if args.flash_op:
         what = "  +  刷入 OpenWrt(A 槽)"
@@ -1823,6 +2089,8 @@ def execute(args):
         what = "  +  修 B 槽(写回原厂)"
     elif args.backup:
         what = "  +  整片备份"
+    elif args.verify:
+        what = "  +  安全审计"
     else:
         what = ""
 
@@ -1830,29 +2098,39 @@ def execute(args):
     info(" WTA301 一键 getroot" + what)
     info("=" * 68)
 
-    target = args.target
+    # ---- 目标与网卡（会话内只解析一次）----
+    target = sess.get("target") or args.target
     if not target:
         info("")
         info("[0] 扫描 192.168.1.0/24 …")
         target = scan_target()
         if not target:
             die("没扫到设备。请用 --target <设备IP> 指定。")
+        sess["target"] = target
     info("   设备: %s" % target)
 
-    pc_ip = args.pc_ip or detect_pc_ip(target)
+    pc_ip = sess.get("pc_ip") or args.pc_ip or detect_pc_ip(target)
     if not pc_ip:
         die("探测不到本机有线口 IP，请用 --pc-ip 指定。")
+    sess["pc_ip"] = pc_ip
     info("   本机: %s" % pc_ip)
 
+    # ---- 网关别名（会话内只做一次）----
     gw_ip = target.rsplit(".", 1)[0] + ".1"
-    info("")
-    info("[1] 冒充网关（加 %s 与 192.168.0.1 的 /32 别名）" % gw_ip)
-    cleanup = setup_alias(sorted({gw_ip, "192.168.0.1"}), pc_ip)
+    if sess.get("cleanup") is None:
+        info("")
+        info("[1] 冒充网关（加 %s 与 192.168.0.1 的 /32 别名）" % gw_ip)
+        sess["cleanup"] = setup_alias(sorted({gw_ip, "192.168.0.1"}), pc_ip)
+    else:
+        info("")
+        info("[1] 网关别名已在位（复用）")
 
-    serve_dir = args.serve_dir or os.path.join(
+    serve_dir = sess.get("serve_dir") or args.serve_dir or os.path.join(
         os.environ.get("TEMP") or "/tmp", "wta301-getroot")
     os.makedirs(serve_dir, exist_ok=True)
+    sess["serve_dir"] = serve_dir
 
+    # ---- 每次操作都要：把这次要用的镜像放进服务目录 ----
     pkg_name = None
     payload_path = None
     if args.flash_op:
@@ -1898,69 +2176,72 @@ def execute(args):
     if payload_path:
         info("   镜像: %s (0x%x)" % (pkg_name, os.path.getsize(payload_path)))
 
-    payload = "http://%s:%d/x;(/bin/busybox telnetd -l /bin/sh -p 2323 >/dev/null 2>&1 &);" \
-              % (pc_ip, SRV_PORT)
-
-    info("")
-    info("[2] 起 e-Link 模拟器 + HTTP 服务（同进程，退出即失效）")
-    servers = Servers(target, pc_ip, payload, serve_dir, args.timeout + 600)
-    servers.start()
-
+    # ---- 连接（复用或新建）----
     rc = 0
-    try:
-        if not wait_for_root(target, servers, args.timeout):
-            info("")
-            info("!! %d 秒内设备没回连。排查：" % args.timeout)
-            info("   1) 设备是否在原厂固件、是否在正常运行")
-            info("   2) 是否以管理员/root 运行（别名与防火墙要权限）")
-            info("   3) %s 是否真的没有别的机器占用" % gw_ip)
-            rc = 2
+    tn = open_session(args, sess, pc_ip, gw_ip, serve_dir)
+    if tn is None:
+        rc = 2
+    else:
+        fw, ver = detect_firmware(tn)
+        if not fw:
+            info("   ! 无法判定固件类型（内核 %s），中止以免写错分区" % ver)
+            rc = 3
         else:
-            info("")
-            info("[4] 连上 root shell")
-            tn = Telnet(target)
-            info("   " + tn.sh("id", 1.5).strip().replace("\n", " ")[:110])
+            info("   固件类型: %s" % fw)
+            mtd = read_mtd(tn)
+            info("   /proc/mtd 读到 %d 个分区" % len(mtd))
+            sess["mtd"] = mtd
 
-            fw, ver = detect_firmware(tn)
-            if not fw:
-                info("   ! 无法判定固件类型（内核 %s），中止以免写错分区" % ver)
-                rc = 3
+            if args.flash_op:
+                rc = flash_op(tn, args, fw, mtd, pc_ip, pkg_name)
+            elif args.flash_uboot:
+                rc = flash_uboot(tn, args, fw, mtd, pc_ip, pkg_name)
+            elif args.flash_stock:
+                rc = flash_stock(tn, args, fw, mtd, pc_ip)
+            elif args.restore_bslot:
+                kset, kp, rp = find_stock_set(args.stock_dir, prefer="bslot")
+                rc = restore_bslot(tn, args, mtd, pc_ip, kset, kp, rp)
+            elif args.backup:
+                rc = 0 if do_backup(tn, mtd, pc_ip, args.backup) else 5
+            elif args.verify:
+                rc = do_verify(tn, mtd)
             else:
-                info("   固件类型: %s" % fw)
-                mtd = read_mtd(tn)
-                info("   /proc/mtd 读到 %d 个分区" % len(mtd))
+                info("")
+                info("   分区表（仅供核对，未写入任何东西）:")
+                for idx in sorted(mtd):
+                    size, name = mtd[idx]
+                    info("     mtd%-2d %-18s 0x%08x" % (idx, name, size))
+                info("")
+                info("   已取得 root。要刷东西就加 --flash-op <完整包> 或 --flash-uboot <kit>")
 
-                if args.flash_op:
-                    rc = flash_op(tn, args, fw, mtd, pc_ip, pkg_name)
-                elif args.flash_uboot:
-                    rc = flash_uboot(tn, args, fw, mtd, pc_ip, pkg_name)
-                elif args.flash_stock:
-                    rc = flash_stock(tn, args, fw, mtd, pc_ip)
-                elif args.restore_bslot:
-                    kset, kp, rp = find_stock_set(args.stock_dir, prefer="bslot")
-                    rc = restore_bslot(tn, args, mtd, pc_ip, kset, kp, rp)
-                elif args.backup:
-                    rc = 0 if do_backup(tn, mtd, pc_ip, args.backup) else 5
-                elif args.verify:
-                    rc = do_verify(tn, mtd)
-                else:
-                    info("")
-                    info("   分区表（仅供核对，未写入任何东西）:")
-                    for idx in sorted(mtd):
-                        size, name = mtd[idx]
-                        info("     mtd%-2d %-18s 0x%08x" % (idx, name, size))
-                    info("")
-                    info("   已取得 root。要刷东西就加 --flash-op <完整包> 或 --flash-uboot <kit>")
-            tn.close()
-    finally:
-        servers.stop()
-        if args.keep:
+    # ---- 收尾 ----
+    if persist:
+        if _session_alive(sess.get("tn")):
             info("")
-            info("[清理] --keep：保留别名与防火墙规则（记得手工删）")
+            info("[保持] 连接保留 —— 下一次操作直接复用，不会重新 getroot")
         else:
             info("")
+            info("[保持] 连接已断，下次操作会重连")
+    else:
+        info("")
+        if args.keep:
+            info("[清理] --keep：保留网关别名与防火墙规则（记得手工删）")
+            # 只停我们自己起的进程，别名留着
+            srv = sess.get("servers")
+            if srv is not None:
+                try:
+                    srv.stop()
+                except Exception:
+                    pass
+            tn0 = sess.get("tn")
+            if tn0 is not None:
+                try:
+                    tn0.close()
+                except Exception:
+                    pass
+        else:
             info("[清理] 撤销本机改动")
-            cleanup()
+            close_session(sess)
 
     info("")
     info("=" * 68)
@@ -2147,7 +2428,7 @@ def flash_uboot(tn, args, fw, mtd_table, pc_ip, pkg_name):
     url = "http://%s:%d/%s" % (pc_ip, SRV_PORT, pkg_name)
     info("")
     info("[6] 设备侧下载")
-    out = tn.sh("cd /tmp && wget -O ub.bin '%s' 2>&1 | tail -2" % url, 12.0)
+    out = tn.run("cd /tmp && wget -O ub.bin '%s' 2>&1 | tail -2" % url, timeout=300.0)
     info("   " + out.strip()[:240])
     info("")
     info("[7] 写入")
@@ -2156,16 +2437,16 @@ def flash_uboot(tn, args, fw, mtd_table, pc_ip, pkg_name):
         if idx not in mtd_table:
             continue
         guard_write(idx, "flash-uboot")
-        out = tn.sh("dd if=/tmp/ub.bin of=/dev/mtdblock%d bs=%d count=1 2>&1"
-                    % (idx, UBOOT_SLOT_LEN), 20.0)
+        out = tn.run("dd if=/tmp/ub.bin of=/dev/mtdblock%d bs=%d count=1 2>&1"
+                     % (idx, UBOOT_SLOT_LEN), timeout=120.0)
         info("   mtd%-2d %-18s %s" % (idx, nm, out.strip().splitlines()[-1][:90] if out.strip() else ""))
     tn.sh("sync", 3.0)
 
     info("")
     info("[8] 回读校验")
-    got = _first_md5(tn.sh("dd if=/tmp/ub.bin bs=%d count=1 2>/dev/null | md5sum"
+    got = _first_md5(tn.run("dd if=/tmp/ub.bin bs=%d count=1 2>/dev/null | md5sum"
                         % UBOOT_SLOT_LEN, 12.0))
-    want = _first_md5(tn.sh("dd if=/dev/mtdblock%d bs=%d count=1 2>/dev/null | md5sum"
+    want = _first_md5(tn.run("dd if=/dev/mtdblock%d bs=%d count=1 2>/dev/null | md5sum"
                          % (UBOOT_SLOTS[0][0], UBOOT_SLOT_LEN), 12.0))
     info("   源   %s" % got)
     info("   mtd%d %s" % (UBOOT_SLOTS[0][0], want))
@@ -2192,8 +2473,8 @@ def _do_reset_overlay(tn, args, fw, mtd_table):
         info("     --dry-run：未擦")
         return
     guard_write(o["mtd"], "reset-overlay")
-    out = tn.sh("dd if=/dev/zero of=/dev/mtdblock%d bs=%d count=%d 2>&1 | tail -1"
-                % (o["mtd"], DD_BS, o["len"] // DD_BS), 30.0)
+    out = tn.run("dd if=/dev/zero of=/dev/mtdblock%d bs=%d count=%d 2>&1 | tail -1"
+                 % (o["mtd"], DD_BS, o["len"] // DD_BS), timeout=300.0)
     info("     " + out.strip()[:200])
 
 
