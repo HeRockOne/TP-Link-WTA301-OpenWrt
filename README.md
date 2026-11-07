@@ -104,7 +104,7 @@
 | `tools/` | 校验 / 刷写 / 串口 / 三方差异表工具 |
 | `tools/getroot/` | **免拆机拿原厂 root** 的脚本（`rawtcp_gw.py`）+ 反面证据 + 失败模式。见 `tools/getroot/README.md` |
 | `pin/` | 事实快照（上游 `.config`、S7 基线、板级实测数据） |
-| `docs/` | 分析、风险登记、阶段记录、外部证据、复现指南 |
+| `docs/` | 分析、风险登记、阶段记录、外部证据、复现指南。**读之前先看 `docs/README.md`**（里的路径与 IP 是取证记录，不是配置） |
 | `evidence/` | 实测日志 |
 
 **不包含**（按固定引用取）：OpenWrt 源码树（14 GB）、u-boot 源码树（133 MB）、工具链。
