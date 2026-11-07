@@ -57,7 +57,7 @@ apply_radio() {
 
 	case "$band" in
 	2g) chan=11;  htmode='HT20'; ssid='OpenWrt-WTA301' ;;
-	5g) chan=161; htmode='HE80'; ssid='OpenWrt-WTA301-5G' ;;
+	5g) chan=161; htmode='HE40'; ssid='OpenWrt-WTA301-5G' ;;
 	*)  return 0 ;;
 	esac
 

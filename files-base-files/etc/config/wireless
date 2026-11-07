@@ -74,15 +74,17 @@
 # 副作用：真·离线客户端不会被及时清理，靠 ap_max_inactivity（默认 300 s）兜。
 #
 # ============================================================================
-# 四、信道与带宽（沿用 P24 实测结论，未改）
+# 四、信道与带宽
 # ============================================================================
 # radio1  161  CN 非 DFS 段。避开 DFS 52-64 / 100-144（需 CAC，起不来会让 AP
 #              彻底不可用；实测设 64 后 hostapd 循环 DFS-CAC-START → DISABLED）。
-#         HE80 不用 HE160：客户端只 80MHz，开 160 实测 busy 0.4%→63%、
+#         ★ 带宽选 HE40（v30 决定）：80→40MHz = 10*log10(80/40) = **+3 dB**
+#              （距离 ×1.41）。代价是峰值吞吐减半（约 887 → 440 Mbps）。
+#              用户明确选择「覆盖优先」（「不择手段只要能增强」）。
+#              换回吞吐优先：uci set wireless.radio1.htmode='HE80'
+#                             uci commit wireless && wifi reload
+#             不用 HE160：客户端只 80MHz，开 160 实测 busy 0.4%→63%、
 #              expected throughput 887→551。
-#               ★ 若要 5G 覆盖再 +3 dB，改 HE40（10*log10(80/40)=3 dB），
-#                 代价是峰值吞吐减半。一条命令：
-#                 uci set wireless.radio1.htmode='HE40'; uci commit; wifi reload
 # radio0  11   ch11 HT20 = 66/49/26 Mbps；ch6 HT20 约 20 Mbps（被 CTS 压着）。
 #         HT20 强开 HT40 要加 noscan，会挤邻居 ⇒ 家用长期稳定优先。
 
@@ -115,7 +117,7 @@ config wifi-device 'radio1'
 	option band '5g'
 	option hwmode '11a'
 	option channel '161'
-	option htmode 'HE80'
+	option htmode 'HE40'
 	option country 'CN'
 	option cell_density '1'
 	option basic_rate '6000 12000 24000'

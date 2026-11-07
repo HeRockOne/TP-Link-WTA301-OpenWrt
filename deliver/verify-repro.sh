@@ -553,6 +553,20 @@ else
 		else
 			bad "disassoc_low_ack 未关（$n 处），弱信号客户端会被反复踢下线"
 		fi
+		# 5G 带宽 HE40（v30 决定）：80->40MHz = +3 dB，代价峰值吞吐减半。
+		# 信道 161：本板扫描 44=26个AP(最强 -63dBm) / 161=1个AP，161 完胜。
+		if grep -q "option htmode 'HE40'" "$WCFG"; then
+			ok "5G 带宽 HE40（+3 dB 覆盖，峰值吞吐约减半）"
+		else
+			bad "5G htmode 不是 HE40（覆盖档的 +3 dB 丢失）"
+		fi
+		# 用 sed 取 radio1 段（awk 的区间若首尾同行会立刻结束，不能这么写）
+		R1=$(sed -n "/config wifi-device 'radio1'/,/^config wifi-iface/p" "$WCFG")
+		if echo "$R1" | grep -q "option channel '161'"; then
+			ok "5G 信道 161（扫描实测本机 44=26 AP / 161=1 AP）"
+		else
+			warn "5G 信道不是 161（44 在本机实测有 26 个 AP，含 -63 dBm 强邻居）"
+		fi
 		# 不许写死 txpower：驱动默认即 BDF 上限，写了也不会更高，只会误导
 		if grep -q "option txpower" "$WCFG"; then
 			warn "wireless 里写了 txpower —— BDF 硬限 24 dBm，写了无用（建议删）"

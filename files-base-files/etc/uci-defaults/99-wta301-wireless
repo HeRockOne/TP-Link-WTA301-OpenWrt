@@ -26,7 +26,7 @@
 # 配置取值（P24 实测，见 docs/P24-WIFI-5G-PERF.md）
 # ------------------------------------------------
 #   radio0 (2g): ssid OpenWrt-WTA301     ch11 HT20       cell_density 2  country CN
-#   radio1 (5g): ssid OpenWrt-WTA301-5G  ch161 HE80       cell_density 2  country CN
+#   radio1 (5g): ssid OpenWrt-WTA301-5G  ch161 HE40       cell_density 1  country CN
 #   两个 iface : mode ap / network lan / encryption psk2 / key 123456789
 #
 # 为什么 5G 用 161 不用 36：CN 非 DFS 段，避 CAC；36 也非 DFS 但实测同一套
@@ -75,7 +75,7 @@ apply_radio() {
 
 	case "$band" in
 	2g) chan=11;  htmode='HT20'; ssid='OpenWrt-WTA301';    noscan=0 ;;
-	5g) chan=161; htmode='HE80'; ssid='OpenWrt-WTA301-5G'; noscan=0 ;;
+	5g) chan=161; htmode='HE40'; ssid='OpenWrt-WTA301-5G'; noscan=0 ;;
 	*)  return 0 ;;
 	esac
 

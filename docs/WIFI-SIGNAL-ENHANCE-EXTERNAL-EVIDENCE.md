@@ -11,6 +11,7 @@
 | 手段 | 结论 | 效果 |
 |---|---|---|
 | **降低 beacon / 管理帧 / 最低数据速率** | ✅ **已实施，最大收益** | 2.4G 等效 **+10.8 dB（距离 ×3.4）**，5G **+6 dB（×2.0）** |
+| **5G 带宽 HE80 → HE40** | ✅ **已实施（v30 决定）** | **+3 dB（距离 ×1.41）**，代价峰值吞吐减半 |
 | **2.4G 加回 802.11b CCK（1/2/5.5/11 Mbps）** | ✅ **已实施** | 接收灵敏度 **+8 dB**（−88 → −96 dBm） |
 | **关掉 `disassoc_low_ack`** | ✅ **已实施** | 弱信号下不再被误踢掉线 |
 | 提高发射功率 | ❌ **不可行，已两次实测否决** | 0（软硬件都到顶） |
@@ -115,6 +116,7 @@ board-2.bin 容器里 BDF payload 起于 **0x6c**（`0x24 + align(61,4) + 8`，�
 **`set_default` 只在用户没显式设置时生效**，所以直接写死 `basic_rate` / `supported_rates` 完全接管。
 
 ```
+radio1 (5G)    htmode HE40            ← v30 改（原 HE80），+3 dB，吞吐减半
 radio0 (2.4G)  cell_density 0
                supported_rates 1000 2000 5500 11000 6000 9000 12000 18000 24000 36000 48000 54000
                basic_rate      1000 2000          ← beacon 用 1 Mbps
@@ -195,13 +197,45 @@ uci commit wireless && wifi reload
 | 项 | 值 | 为什么不动 |
 |---|---|---|
 | 5G 信道 | 161 | CN 非 DFS。DFS 信道要 CAC，起不来会让 AP 彻底不可用（实测设 64 后 hostapd 循环 DFS-CAC-START → DISABLED） |
-| 5G 带宽 | HE80 | 开 HE160 实测信道 busy 0.4%→63%、expected 887→551 |
+| 5G 带宽 | **HE40**（v30 改，原 HE80） | 80→40MHz = +3 dB。不用 HE160：实测 busy 0.4%→63%、expected 887→551。换回：`uci set wireless.radio1.htmode='HE80'; uci commit wireless && wifi reload` |
 | 2.4G 带宽 | HT20 | 强开 HT40 要 `noscan`，会挤邻居（扫到 ch1=4 / ch11=4 个 AP） |
 | 2.4G 信道 | 11 | ch11 HT20 = 66/49/26 Mbps；ch6 HT20 约 20 Mbps（被 CTS 压着） |
 | LDPC / TX-STBC / RX-STBC1 / short-GI | 已开 | `iw phy` 确认硬件支持且 hostapd 已下发 |
 | 天线 | 双天线 `TX 0x3 RX 0x3` | 硬件固定；`RX STBC 1-stream` 已在用（多径 ≈ 3 dB 增益） |
 | 不做 threaded NAPI | — | 上游 13aa2fb 合入后因 QCN9074 被 revert（d265ebe） |
 | 不写 txpower | — | 驱动默认即 BDF 上限 24 dBm，写了也一样 |
+
+---
+
+## 4.1 5G 信道实测：161 完胜 44（v30 前修正）
+
+板上当时跑 **ch44**（宽度 80MHz），而构建配置写的是 ch161。用 `iw scan` 点数后改 161：
+
+| 5G 信道 | 扫描到的 AP 数 | 最强邻居 |
+|---|---|---|
+| 36 | 9 | −92 dBm |
+| 40 | 9 | −82 dBm |
+| **44** | **26** | **−63 dBm（Redmi Note 12T Pro）/ −64 dBm（HUAWEI）** |
+| 48 | 8 | — |
+| 52/56/60/64 | 2/1/6/6 | DFS 段，不选 |
+| 149 | 5 | — |
+| 153 | 3 | — |
+| 157 | 2 | — |
+| **161** | **1** | 本 AP |
+
+HE40 在 161 上占 157+161 两块，合计只有 2 个邻居；而在 44 上占 44+48，
+要跟 26+8 个 AP 抢。⇒ **161 胜出，与构建配置一致，已把板子改到 161。**
+
+`[本板实证]` 161 + HE40 起来正常，无 DFS/CAC：
+```
+phy1-ap0: interface state HT_SCAN->ENABLED
+phy1-ap0: AP-ENABLED
+channel 161 (5805 MHz), width: 40 MHz, center1: 5795 MHz
+txpower 24.00 dBm
+```
+
+注：5805 MHz 比 5220 MHz 路径损耗高 `20·log10(5805/5220) = 0.92 dB`，
+但 ch44 的拥塞代价远大于 0.92 dB（−63 dBm 的邻居直接把空口占了），所以仍选 161。
 
 ---
 
