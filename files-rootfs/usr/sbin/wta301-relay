@@ -1,0 +1,302 @@
+#!/bin/sh
+# wta301-relay — 一键把 WTA301 配成 5G 无线中继（WISP / 路由模式）
+#
+# 为什么需要这个脚本：手动在 LuCI 里配 5G 中继有 4 个必踩的坑，
+# 任何一个踩中都会导致「中继后 5G 不广播」。本脚本一次全规避。
+#
+#   坑 1  wifinet.network='wwan lan'
+#         → 日志 `wifi-scripts: Device setup failed: BRIDGE_NOT_ALLOWED`
+#         → STA 接口不允许加入网桥（mac80211/ath11k 限制），接口根本不创建
+#         → 正确：STA 只挂 wwan，靠路由 + NAT 转发
+#
+#   坑 2  radio1.channel 写死成具体信道
+#         → STA 连上邻居后必须与邻居同信道，写死就冲突
+#         → 正确：channel='auto'，由 STA 决定，AP 跟随
+#         → 外部依据 forum.openwrt.org/t/…/140217：
+#             "If you have a single radio that will operate in STA + AP modes,
+#              you will need to set the channel to auto."
+#
+#   坑 3  wwan 留在 lan firewall zone
+#         → 没有 masquerade，LAN 客户端拿 192.168.1.x 直接出 wwan，
+#           上游路由器不知道回程路由 → 能连不能上网
+#         → 正确：wwan 放进 wan zone（带 masq=1），lan→wan forwarding
+#
+#   坑 4  频宽不一致
+#         → STA 按邻居的频宽（如 80MHz）连上，AP 却写 20MHz 会出现
+#           "Wrong coupling between HT and VHT/HE channel setting"
+#         → 正确：AP 频宽 <= 邻居频宽，且同一 primary channel 段内
+#
+# 用法：
+#   wta301-relay scan                       列出附近 5G AP（含信道/信号）
+#   wta301-relay set <SSID> <密码> [AP密码]  配置并启动中继
+#   wta301-relay status                     查看当前状态
+#   wta301-relay off                        关闭中继（回到普通 AP 模式）
+#
+# 注意：<密码> 是邻居 WiFi 的密码；[AP密码] 是自己开的热点密码，
+#       省略则用同一个密码。自己热点 SSID 默认 "<SSID>-relay"。
+
+set -e
+CONF=/etc/config/wireless
+NETW=/etc/config/network
+FW=/etc/config/firewall
+
+log() { echo "[relay] $*"; }
+die() { echo "[relay] 错误: $*" >&2; exit 1; }
+
+need_uci() { command -v uci >/dev/null 2>&1 || die "找不到 uci"; }
+
+# 找到承载 5G 的 wifi-device（radio1），按 band 反查而不是写死名字
+find_5g_radio() {
+    for s in $(uci show wireless | sed -n "s/^wireless\.\([^.=]*\)=wifi-device$/\1/p"); do
+        if [ "$(uci -q get wireless.$s.band)" = "5g" ]; then
+            echo "$s"; return 0
+        fi
+    done
+    return 1
+}
+
+# 找到 STA 的 wifi-iface（mode=sta 且 device 是 5G radio）
+find_sta() {
+    _dev="$1"
+    for s in $(uci show wireless | sed -n "s/^wireless\.\([^.=]*\)=wifi-iface$/\1/p"); do
+        if [ "$(uci -q get wireless.$s.mode)" = "sta" ] && \
+           [ "$(uci -q get wireless.$s.device)" = "$_dev" ]; then
+            echo "$s"; return 0
+        fi
+    done
+    return 1
+}
+
+find_ap_on() {
+    _dev="$1"
+    for s in $(uci show wireless | sed -n "s/^wireless\.\([^.=]*\)=wifi-iface$/\1/p"); do
+        if [ "$(uci -q get wireless.$s.mode)" = "ap" ] && \
+           [ "$(uci -q get wireless.$s.device)" = "$_dev" ]; then
+            echo "$s"; return 0
+        fi
+    done
+    return 1
+}
+
+cmd_scan() {
+    RADIO=$(find_5g_radio) || die "找不到 5g radio"
+    # 需要一个 up 的接口才能扫描；优先用 AP 接口
+    IF=$(iw dev 2>/dev/null | awk '/Interface/{i=$2} /type AP/{print i; exit}')
+    [ -n "$IF" ] || die "没有可用的 5G 接口可扫描"
+    log "扫描 $IF（约 10 秒）..."
+    iw dev "$IF" scan 2>/dev/null | awk '
+        /^BSS /            { mac=$2 }
+        /SSID:/            { ssid=substr($0,index($0,"SSID:")+6) }
+        /signal:/          { sig=$2 }
+        /freq:/            { freq=$2 }
+        /primary channel:/ { pch=$4 }
+        /channel width:/   { cw=$NF" MHz" }
+        /^[ \t]*\* /       { }
+        /RSN:/             { rsn=1 }
+        /^[ \t]*$/ {
+            if (ssid != "" && freq > 5000)
+                printf "%-28s ch=%-4s %-9s %8s dBm  %s  %s\n", ssid, pch, freq, sig, cw, (rsn?"WPA2":"OPEN");
+            ssid=""; sig=""; freq=""; pch=""; cw=""; rsn=0
+        }
+    ' | sort -t= -k1 | head -40
+}
+
+cmd_set() {
+    SSID="$1"; KEY="$2"; APKEY="${3:-$2}"
+    [ -n "$SSID" ] || die "用法: wta301-relay set <SSID> <密码> [AP密码]"
+    [ -n "$KEY" ]  || die "缺少邻居 WiFi 密码"
+
+    RADIO=$(find_5g_radio) || die "找不到 5g radio"
+    log "5G radio = $RADIO"
+
+    # ---- 备份 ----
+    TS=$(date +%s)
+    cp "$CONF"  /root/wireless.bak.$TS  2>/dev/null || true
+    cp "$NETW"  /root/network.bak.$TS   2>/dev/null || true
+    cp "$FW"    /root/firewall.bak.$TS  2>/dev/null || true
+    log "已备份到 /root/*.bak.$TS"
+
+    # ---- 坑 2：信道必须 auto ----
+    uci set wireless.$RADIO.channel='auto'
+    # 频宽不要超过邻居常见值；HT40 在 5G 上容易与邻居 80MHz 冲突
+    HT=$(uci -q get wireless.$RADIO.htmode)
+    case "$HT" in
+        *160*|*80*) uci set wireless.$RADIO.htmode='VHT40' ;;
+    esac
+    # 中继必须允许 DFS 跟随（邻居可能在 DFS 信道）
+    uci set wireless.$RADIO.disabled='0'
+
+    # ---- STA 接口 ----
+    STA=$(find_sta "$RADIO" 2>/dev/null) || STA=""
+    [ -n "$STA" ] || STA="wifinet_relay_sta"
+    uci -q get wireless.$STA >/dev/null 2>&1 || uci set wireless.$STA='wifi-iface'
+    uci set wireless.$STA.device="$RADIO"
+    uci set wireless.$STA.mode='sta'
+    uci set wireless.$STA.ssid="$SSID"
+    uci set wireless.$STA.encryption='psk2'
+    uci set wireless.$STA.key="$KEY"
+    uci -q delete wireless.$STA.bssid      # 不锁 BSSID，邻居换 mesh 节点也能跟随
+    uci set wireless.$STA.disabled='0'
+    # 坑 1：只挂 wwan，绝不带 lan
+    uci set wireless.$STA.network='wwan'
+    # 弱信号链路防误踢（-80dBm 附近 ACK 丢失很常见）
+    uci set wireless.$STA.disassoc_low_ack='0'
+    log "STA 接口 = $STA (SSID=$SSID, network=wwan)"
+
+    # ---- 自家 AP ----
+    # 已有 AP 接口就沿用它的 SSID/密码，不要覆盖用户已经在 LuCI 里设好的名字
+    AP=$(find_ap_on "$RADIO" 2>/dev/null) || AP=""
+    if [ -z "$AP" ]; then
+        AP="wifinet_relay_ap"
+        uci -q get wireless.$AP >/dev/null 2>&1 || uci set wireless.$AP='wifi-iface'
+        uci set wireless.$AP.device="$RADIO"
+        uci set wireless.$AP.mode='ap'
+        uci set wireless.$AP.network='lan'
+        uci set wireless.$AP.ssid="$SSID-relay"
+        uci set wireless.$AP.encryption='psk2'
+        uci set wireless.$AP.key="$APKEY"
+        log "AP  接口 = $AP (新建, SSID=$SSID-relay)"
+    else
+        # 已有 AP：只在没有密码时才补一个
+        if [ "$(uci -q get wireless.$AP.encryption)" = "none" ] || [ -z "$(uci -q get wireless.$AP.key)" ]; then
+            uci set wireless.$AP.encryption='psk2'
+            uci set wireless.$AP.key="$APKEY"
+            log "AP  接口 = $AP (原为开放，已加密码)"
+        else
+            log "AP  接口 = $AP (沿用 SSID=$(uci -q get wireless.$AP.ssid))"
+        fi
+    fi
+    uci set wireless.$AP.disabled='0'
+    uci set wireless.$AP.disassoc_low_ack='0'
+
+    # ---- wwan 网络 ----
+    uci -q get network.wwan >/dev/null 2>&1 || uci set network.wwan='interface'
+    uci set network.wwan.proto='dhcp'
+
+    # ---- 坑 3：wwan 必须在 wan zone（带 masq）----
+    # 先把它从所有 zone 里摘掉，再加进 wan zone
+    _zones=$(uci show firewall | sed -n "s/^firewall\.\(@zone\[[0-9]*\]\)\.network=.*/\1/p" | sort -u)
+    for z in $_zones; do
+        _nets=$(uci -q get firewall.$z.network)
+        _new=""
+        for n in $_nets; do [ "$n" = "wwan" ] || _new="$_new $n"; done
+        if [ -n "$_new" ] && [ "$_new" != " $_nets" ]; then
+            uci -q delete firewall.$z.network
+            for n in $_new; do uci add_list firewall.$z.network="$n"; done
+        fi
+    done
+    WANZ=""
+    for z in $_zones; do
+        [ "$(uci -q get firewall.$z.name)" = "wan" ] && WANZ="$z"
+    done
+    if [ -z "$WANZ" ]; then
+        uci add firewall zone
+        WANZ=$(uci show firewall | sed -n "s/^firewall\.\(@zone\[[0-9]*\]\)=zone$/\1/p" | tail -1)
+        uci set firewall.$WANZ.name='wan'
+        uci set firewall.$WANZ.input='REJECT'
+        uci set firewall.$WANZ.output='ACCEPT'
+        uci set firewall.$WANZ.forward='DROP'
+    fi
+    uci set firewall.$WANZ.masq='1'
+    uci set firewall.$WANZ.mtu_fix='1'
+    uci add_list firewall.$WANZ.network='wwan'
+    log "wwan 已加入 firewall zone $WANZ (masq=1)"
+
+    # lan -> wan 转发
+    _has=""
+    for f in $(uci show firewall | sed -n "s/^firewall\.\(@forwarding\[[0-9]*\]\)=forwarding$/\1/p"); do
+        [ "$(uci -q get firewall.$f.src)" = "lan" ] && [ "$(uci -q get firewall.$f.dest)" = "wan" ] && _has=1
+    done
+    if [ -z "$_has" ]; then
+        uci add firewall forwarding
+        FWD=$(uci show firewall | sed -n "s/^firewall\.\(@forwarding\[[0-9]*\]\)=forwarding$/\1/p" | tail -1)
+        uci set firewall.$FWD.src='lan'
+        uci set firewall.$FWD.dest='wan'
+        log "已添加 lan -> wan forwarding"
+    fi
+
+    uci commit wireless
+    uci commit network
+    uci commit firewall
+
+    log "重载 wifi ..."
+    # ★ 必须用 wifi down/up 整组重启，不能用 wifi reload：
+    #   25.12 + ath11k 下 `wifi reload` 会打 "command failed: Not supported (-95)"
+    #   然后 phy-ap0 停在 Channel 0 (unknown) = AP 不广播。
+    #   外部依据：github.com/openwrt/openwrt/issues/24294
+    wifi down >/dev/null 2>&1 || /sbin/wifi down
+    sleep 3
+    wifi up   >/dev/null 2>&1 || /sbin/wifi up
+    sleep 12
+    /etc/init.d/firewall reload >/dev/null 2>&1 || true
+    sleep 3
+
+    cmd_status
+}
+
+cmd_status() {
+    RADIO=$(find_5g_radio) || die "找不到 5g radio"
+    STA=$(find_sta "$RADIO" 2>/dev/null) || STA=""
+    echo "================= 中继状态 ================="
+    echo "5G radio      : $RADIO  channel=$(uci -q get wireless.$RADIO.channel)  htmode=$(uci -q get wireless.$RADIO.htmode)"
+    echo "STA 接口      : ${STA:-<无>}  SSID=$(uci -q get wireless.$STA.ssid 2>/dev/null)"
+    echo
+    echo "--- 无线接口 ---"
+    iw dev 2>/dev/null | grep -E 'Interface|type |channel'
+    echo
+    echo "--- STA 关联 ---"
+    if iw dev phy1-sta0 info >/dev/null 2>&1; then
+        iw dev phy1-sta0 link 2>/dev/null | grep -E 'Connected|SSID|freq|signal|bitrate' || echo "  未关联"
+    else
+        echo "  phy1-sta0 不存在"
+    fi
+    echo
+    echo "--- 5G AP ---"
+    _bad=""
+    for i in $(iw dev 2>/dev/null | awk '/Interface/{i=$2} /type AP/{print i}'); do
+        echo "  $i:"
+        iwinfo "$i" info 2>/dev/null | grep -E 'ESSID|Channel|Encryption' | sed 's/^/    /'
+        # Channel 0 (unknown) = AP 拿不到信道 = 不广播，是标志性故障
+        iwinfo "$i" info 2>/dev/null | grep -q 'Channel: 0 ' && _bad="$_bad $i"
+    done
+    if [ -n "$_bad" ]; then
+        echo
+        echo "  ★ 警告：$_bad 的 Channel 是 0(unknown) —— AP 没有信道，不会广播！"
+        echo "    原因通常是：① 同射频 STA 没有起来（检查 wifi STA 接口/密码/距离）"
+        echo "                ② 用过 wifi reload，需要 wifi down; wifi up 整组重启"
+    fi
+    echo
+    echo "--- wwan ---"
+    ubus call network.interface.wwan status 2>/dev/null | grep -E '"up"|"address"|nexthop' | sed 's/^/  /'
+    echo
+    echo "--- 连通性 ---"
+    _gw=$(ip route | awk '/^default/{print $3; exit}')
+    echo "  默认网关: ${_gw:-<无>}"
+    [ -n "$_gw" ] && ping -c 2 -W 3 "$_gw" >/dev/null 2>&1 && echo "  ping 网关  ✓" || echo "  ping 网关  ✗"
+    ping -c 2 -W 4 223.5.5.5 >/dev/null 2>&1 && echo "  ping 223.5.5.5 ✓（能上网）" || echo "  ping 223.5.5.5 ✗（上不了网）"
+    echo "============================================"
+}
+
+cmd_off() {
+    RADIO=$(find_5g_radio) || die "找不到 5g radio"
+    STA=$(find_sta "$RADIO" 2>/dev/null) || STA=""
+    [ -n "$STA" ] && uci set wireless.$STA.disabled='1' && log "已禁用 STA $STA"
+    uci set wireless.$RADIO.channel='149'
+    uci commit wireless
+    # 同样不能用 wifi reload（会留下 Channel 0 的 AP）
+    wifi down >/dev/null 2>&1 || /sbin/wifi down
+    sleep 3
+    wifi up   >/dev/null 2>&1 || /sbin/wifi up
+    sleep 12
+    log "已切回普通 AP 模式（5G ch149）"
+    cmd_status
+}
+
+need_uci
+case "$1" in
+    scan)   cmd_scan ;;
+    set)    shift; cmd_set "$@" ;;
+    status) cmd_status ;;
+    off)    cmd_off ;;
+    *)      sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//' ;;
+esac

@@ -1202,7 +1202,10 @@ function Invoke-GetRoot {
 
     $sw = [Diagnostics.Stopwatch]::StartNew()
     $gwA = ($DeviceIp -split '\.')[0..2] -join '.'
-    $aliases = @("$gwA.1", "192.168.0.1")
+    # ★ 绝不能把设备自己的 IP 当网关别名：那会把自己的路由转截住，
+    #   表现为「机器就在线、ping 不通、HTTP 也拿不到」。重启后设备 LAN 可能
+    #   正好是 x.x.x.1，而 $gwA.1 就等于 DeviceIp —— 必顶掉这个坑。
+    $aliases = @("$gwA.1", "192.168.0.1") | Where-Object { $_ -ne $DeviceIp } | Select-Object -Unique
 
     $ifIdx = Get-IfIndexOfIp -Ip $PcAddr
     if ($ifIdx -eq 0) {
@@ -1229,8 +1232,12 @@ function Invoke-GetRoot {
                                -UbusMessage (@{ url = $payload } | ConvertTo-Json -Compress)
     Write-Info "+ payload: $payload"
 
-    Write-Step "[3] 等设备自己回连（周期是秒级，别碰它）"
-    $deadline = [Environment]::TickCount + 120000
+    Write-Step "[3] 等设备自己回连（elinkclt 周期约 4 分钟，别碰它）"
+    # 死线必须 > elinkclt 的回连周期。实测该周期约 240 秒（失败 3 次退避），
+    # 而 cron 类的固定节拍意味着：如果启动时机刚好落在周期后半段，
+    # 120 秒内永远等不到 —— 这就是「同一台板子前一次 0 秒命中、再跑就必超时」的原因。
+    # 360 秒 = 240 * 1.5，留足一个完整周期加退避余量。
+    $deadline = [Environment]::TickCount + 360000
     while ([Environment]::TickCount -lt $deadline) {
         if (Test-PortOpen -Ip $DeviceIp -TcpPort 2323 -TimeoutMs 600) {
             Write-Ok ("*** 2323 OPEN  t={0:N0}s ***" -f $sw.Elapsed.TotalSeconds)
@@ -1243,7 +1250,7 @@ function Invoke-GetRoot {
         Stop-BackgroundService -State $elink -Name 'e-Link'
         Remove-GatewayAlias -IfIndex $ifIdx -Addrs $aliases
         Disable-FirewallPort
-        throw "120 秒内设备没有回连。检查：网线是否插 LAN1、设备 IP 是否为 $DeviceIp、防火墙是否放行 32768。"
+        throw "360 秒内设备没有回连。检查：网线是否插 LAN1、设备 IP 是否为 $DeviceIp、防火墙是否放行 32768、本机是否冒充了网关 $($aliases -join '/')。"
     }
 
     Write-Step "[4] 连上 root shell"
