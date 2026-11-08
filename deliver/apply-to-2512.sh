@@ -466,15 +466,49 @@ fi
  	mkdir -p $OWTREE/package/luci-theme-argon
  	cp -a "$ARGON_SRC/." $OWTREE/package/luci-theme-argon/
  	echo "  源码 -> package/luci-theme-argon（$(ls $OWTREE/package/luci-theme-argon | wc -l) 个顶层项）"
+ 	add_pkg_sym CONFIG_PACKAGE_luci-theme-argon=y \
+ 	            CONFIG_PACKAGE_luci-i18n-argon-config-zh-cn=y
  else
- 	echo "  !! 缺 $ARGON_SRC —— Argon 不会进固件"
- 	echo "     下载 https://codeload.github.com/jerrykuku/luci-theme-argon/tar.gz/refs/tags/v3.1.0"
- 	echo "     解包到 $ARGON_SRC（--strip-components=1）"
+ 	# ★ 这里以前只 echo 警告就继续了 —— 是个静默错误（第四处「别人 clone 必踩」）：
+ 	#   · $CFG 里写着 CONFIG_PACKAGE_luci-theme-argon=y，但 package/ 下没这个包
+ 	#   · OpenWrt 的 Kconfig 对不存在的包直接忽略 ⇒ 不报错、不警告
+ 	#   · make world 照样 RC=0，只是固件里少 2 个包（主题 + 中文语言包）
+ 	#   · 尺寸只差 0.2%（13,394,197 → 13,117,717），判据 ⑧ 根本抓不到
+ 	#   · 刷进去才发现 WebUI 变回 Bootstrap，而用户以为改的是 argon
+ 	# 所以默认 exit 1；确实想要无 Argon 的构建时才显式 ALLOW_NO_ARGON=1。
+ 	if [ "${ALLOW_NO_ARGON:-0}" != "1" ]; then
+ 		cat >&2 <<NOARGON
+!! 缺 Argon 主题源码：$ARGON_SRC
+
+   Argon 是第三方主题（https://github.com/jerrykuku/luci-theme-argon，GPL），
+   不在任何 OpenWrt feed 里，必须单独下载：
+
+     mkdir -p "$(dirname "$ARGON_SRC")"
+     curl -L https://codeload.github.com/jerrykuku/luci-theme-argon/tar.gz/refs/tags/v3.1.0 \\
+       | tar xz -C /tmp
+     mv /tmp/luci-theme-argon-3.1.0 "$ARGON_SRC"
+
+   或者用环境变量指到你已有的位置：ARGON_SRC=/path/to/luci-theme-argon-v3.1.0
+
+   为什么必须拦：$CFG 里写着 CONFIG_PACKAGE_luci-theme-argon=y，
+   但包不存在时 OpenWrt 的 Kconfig **直接忽略、不报错** ——
+   make world 会成功返回 0，固件里只是少了主题和中文语言包，
+   尺寸只差 0.2%，刷进去才发现 WebUI 是 Bootstrap。
+
+   确实要一个无 Argon（用 Bootstrap）的构建：
+     ALLOW_NO_ARGON=1 bash deliver/apply-to-2512.sh
+   此时会把两个 argon 开关显式改成 not set（不留悬空 =y）。
+NOARGON
+ 		exit 1
+ 	fi
+ 	echo "  ⚠️  ALLOW_NO_ARGON=1：跳过 Argon，改用 Bootstrap 作主题"
+ 	del_pkg_sym CONFIG_PACKAGE_luci-theme-argon \
+ 	            CONFIG_PACKAGE_luci-i18n-argon-config-zh-cn
  fi
  # Bootstrap 保留安装（约 40KiB）但不是默认：Argon 的 uci-defaults 会把
  #   luci.main.mediaurlbase 设成 /luci-static/argon。留着它是逃生门 —— Argon 若
  #   渲染失败，uci set luci.main.mediaurlbase=/luci-static/bootstrap 即可回到。
- add_pkg_sym CONFIG_PACKAGE_luci-theme-argon=y CONFIG_PACKAGE_luci-theme-bootstrap=y
+ add_pkg_sym CONFIG_PACKAGE_luci-theme-bootstrap=y
  echo "THEME  => $(grep -cE '^CONFIG_PACKAGE_luci-theme-(argon|bootstrap)=y$' $CFG)/2（argon 为活动主题，bootstrap 仅兜底，顶层 .config）"
 
  # ---------------------------------------------------------------

@@ -143,12 +143,20 @@ else
 	bad "③ 没有 sysupgrade 包"
 fi
 
-# web 包（网页刷写用）—— 由 make-deliverable.sh 产出，不是 make-release.sh。
-# 所以这里分两级：make-release 阶段缺它只是 WARN（还没到那一步），
-# 但如果连 op_kernel/rootfs/tphdr 都在而 web 缺，就说明没跑 make-deliverable。
-WEB=$(ls -1 "$PACK"/*firmware_web.bin 2>/dev/null | head -1)
+# 网页包（网页刷写用）—— 由 make-deliverable.sh 产出，不是 make-release.sh。
+# 所以这里分两级：make-release 阶段缺它只是 WARN（还没到那一步）。
+#
+# 文件名是 wta301-op-<ver>.bin（不是 *firmware_web.bin —— 那是我一开始猜的，
+# 实际看 make-deliverable.sh 的产物命名）。排除掉 sysupgrade 与 rescue/ 下的 ttl。
+WEB=$(ls -1 "$REL"/deliver/wta301-op-*.bin 2>/dev/null | grep -v sysupgrade | head -1)
 if [ -n "$WEB" ] && [ -f "$WEB" ]; then
 	ok "③ 网页包  [$(basename "$WEB")  $(stat -c%s "$WEB") B]"
+	TTL=$(ls -1 "$REL"/deliver/rescue/*ttl*.bin 2>/dev/null | head -1)
+	if [ -n "$TTL" ] && [ -f "$TTL" ]; then
+		ok "③ TTL 包  [$(basename "$TTL")  $(stat -c%s "$TTL") B]"
+	else
+		warn "③ 还没有 TTL 包（rescue/*ttl*.bin）"
+	fi
 else
 	warn "③ 还没有网页包 —— 它由 make-deliverable.sh 产出（下一步）：bash deliver/make-deliverable.sh <VER>"
 fi
@@ -277,13 +285,41 @@ else
 	npkg=$(wc -l < "$MAN")
 	nluci=$(grep -c '^luci' "$MAN" 2>/dev/null || :)
 	nluci=${nluci:-0}
-	# 发布版基线：190 个包，其中 luci* 29 个
-	if [ "$nluci" -ge 25 ] && [ "$npkg" -ge 185 ]; then
+
+	# ★ 不用拍脑袋的阈值，而是与 pin/p30-manifest.txt（发布版190 包）逐包比对。
+	# 阈值太松会放过真问题（我一开始写 ≥25 个 luci，而实际发布版只有 19 个）；
+	# 太紧会把合法选择当错误（ALLOW_NO_ARGON=1 时 argon 两个包确实不该在）。
+	BASELINE=$SRC/pin/p30-manifest.txt
+	if [ ! -f "$BASELINE" ]; then
+		warn "⑨ 找不到 pin/p30-manifest.txt，只能报总数"
 		ok "⑨ manifest：$npkg 个包，其中 luci* $nluci 个"
 	else
-		bad "⑨ manifest：$npkg 个包，其中 luci* $nluci 个（应 ≥185 包 / ≥25 个 luci*）"
-		printf '         ★ 这说明 feeds 没装全，或没铺 pin/ow2512-dot-config.txt。\n'
-		printf '           两者都不会让 make world 报错 —— 见 README 构建章节的表。\n'
+		# 只比包名，不比版本（版本会因 feed 漂移而不同，那不是错误）
+		cut -d' ' -f1 "$BASELINE" | sort > /tmp/.baseline_names
+		cut -d' ' -f1 "$MAN"      | sort > /tmp/.actual_names
+		MISSING=$(comm -23 /tmp/.baseline_names /tmp/.actual_names)
+		EXTRA=$(comm -13 /tmp/.baseline_names /tmp/.actual_names)
+
+		# argon 两个包是「可选输入」：argon 源码不在任何 feed 里，
+		# 要用 ALLOW_NO_ARGON=1 才能跳过。缺了只是换个主题，不算错误。
+		OPTIONAL=$(printf '%s\n' "luci-theme-argon" "luci-i18n-argon-config-zh-cn")
+		missing_req=$(printf '%s\n' "$MISSING" | grep -vxF "$OPTIONAL" | grep . || :)
+		missing_opt=$(printf '%s\n' "$MISSING" | grep -xF "$OPTIONAL" | grep . || :)
+
+		if [ -z "$missing_req" ]; then
+			ok "⑨ manifest $npkg 包：发布版基线里的必需包全在"
+		else
+			bad "⑨ 缺 $(printf '%s\n' "$missing_req" | wc -l) 个必需包（发布版 Manifest 里有）"
+			printf '%s\n' "$missing_req" | sed 's/^/         - /'
+			printf '         ★ feeds 没装全，或没铺 pin/ow2512-dot-config.txt。\n'
+			printf '           两者都不会让 make world 报错 —— 见 README 构建章节的表。\n'
+		fi
+		if [ -n "$missing_opt" ]; then
+			warn "⑨ 缺 Argon 主题（2 个包）—— 固件会用 Bootstrap。这不是错误，但要知道"
+			printf '         %s\n' "$missing_opt"
+			printf '         要 Argon：下载 luci-theme-argon v3.1.0 后用 ARGON_SRC=<路径> 重新 apply。\n'
+		fi
+		[ -n "$EXTRA" ] && warn "⑨ 比发布版多 $(printf '%s\n' "$EXTRA" | wc -l) 个包（一般无妨）"
 	fi
 	# luci-base 必须在（没它就是真没 WebUI）
 	grep -q '^luci-base ' "$MAN" && ok "⑨ manifest 里有 luci-base" \
@@ -353,3 +389,4 @@ cat <<'EON'
 ══════════════════════════════════════════════════════════════
 EON
 exit 0
+
