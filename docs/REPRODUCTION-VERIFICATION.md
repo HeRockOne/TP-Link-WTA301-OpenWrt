@@ -13,7 +13,7 @@
 |---|---|---|
 | 仓库是否完整描述了编译树的输入？ | **是**。全新树 apply 后与 `/root/ow2512` 零实质差异 | ✅ 已实证 |
 | 依赖是否都能公开获取？ | **是**（上游 commit / feeds / 工具链 / Argon 全部可公开获取） | ✅ 已实证 |
-| 全新树能不能编出可用的固件？ | 见 §4 | ⬜ 实测中 |
+| 全新树能不能编出可用的固件？ | 见 §4 | ✅ 已实测（OK=23 FAIL=0） |
 | 能不能编出 **md5 完全相同**的固件？ | **不能**，且这是 squashfs 的固有行为，非本项目缺陷 | ❌ 已实证不可能（§3） |
 | u-boot 能不能复现？ | 槽镜像闭环可复现；`u-boot.bin` 编译依赖基座 commit（只到同代） | ⚠️ 部分 |
 
@@ -161,33 +161,48 @@ endef
 
 ---
 
-## 4. 全新树全量构建（⬜ 实测中）
+## 4. 全新树全量构建（✅ 已实测）
 
 ```bash
-cd /root/repro-verify2
-ln -s /root/ow2512/dl dl          # 上游源码 tarball，复用省 2 GB 下载
+cd /root/repro-verify2                  # 从 /root/ow2512 拷出来的全新树
+cp ../wta301-2512/pin/ow2512-dot-config.txt .config
+# 若无网络下载 feed，复用母树已 clone 的（内容与 feeds.conf 的 commit 一致）
+cp -a /root/ow2512/feeds .
 ./scripts/feeds update -i && ./scripts/feeds install -a
-make defconfig                    # DEFCONFIG_RC=0
-make -j6 world
-make -j6 target/install
+ARGON_SRC=<luci-theme-argon-v3.1.0> bash deliver/apply-to-2512.sh
+make -j6 world && make -j6 target/install
+bash deliver/make-release.sh --version REPRO --stage P30
+bash deliver/make-deliverable.sh P30
 ```
 
-判据（构建完成后逐条填）：
+实测环境：`/root/repro-verify2`，6 核 / 7 GB 内存，
+`make world` 耗时 **13 分 11 秒**（增量，`build_dir` 部分复用），
+`target/install` 另有若干分钟。
 
 | # | 判据 | 结果 |
 |---|---|---|
-| 1 | `WORLD_RC=0` | ⬜ |
-| 2 | `INSTALL_RC=0` | ⬜ |
-| 3 | `make-release.sh` 能出四区 + sysupgrade | ⬜ |
-| 4 | kernel 分区 DTS = `0x4880000 0x740000` | ⬜ |
-| 5 | FIT 内嵌 DTB 与已发布一致 | ⬜ |
-| 6 | rootfs 里 `net-tune` md5 = `8eaaa52f11cc9a1e1e4c6e01edc421f9` | ⬜ |
-| 7 | rootfs 里 `15_sensors.js`、`rpcd/ucode/wta301` 在位 | ⬜ |
-| 8 | 产物尺寸与已发布一致（±UBI 时间戳带来的膨胀） | ⬜ |
-| 9 | **固件里真有 LuCI**（manifest ≥185 包 / ≥25 个 `luci*`） | ⬜ |
+| 1 | `WORLD_RC=0` | ✅ 0 |
+| 2 | `INSTALL_RC=0` | ✅ 0 |
+| 3 | `make-release.sh` 能出四区 + sysupgrade | ✅ 5 区 + sysupgrade 全在 |
+| 4 | kernel 分区 DTS = `0x4880000 0x740000` | ✅ 一致 |
+| 5 | FIT 内嵌 DTB reg 与 DTS 一致 | ✅ `ITB(image 1).dtb: 0x4880000 0x740000` |
+| 6 | rootfs 里 `net-tune` md5 = `8eaaa52f11cc9a1e1e4c6e01edc421f9` | ✅ 一致 |
+| 7 | rootfs 里 `15_sensors.js`、`rpcd/ucode/wta301` 在位 | ✅ 都在 |
+| 8 | 产物尺寸与已发布一致 | ✅ 内核 4,718,592 / rootfs 12,320,768 / tphdr 131,072 / 网页包 17,170,432 **全部精确相同** |
+| 9 | **固件里真有 LuCI**（与 `pin/p30-manifest.txt` 逐包比对） | ✅ 必需包全在 |
+
+```
+final:  OK=23  WARN=1  FAIL=0
+唯一 WARN: ⑨ 缺 Argon 主题（2 个包）—— 该轮 ARGON_SRC 未提供，见 §4.1
+sysupgrade 13,117,717 B（发布版 13,394,197 B，差 2.1% —— squashfs 时间戳，属预期）
+```
 
 > 第 9 条是实测后加的。前八条里的尺寸判据能抓到「缺 LuCI」但只是间接的；
-> ⑨ 直接读 manifest。背景见 §4.1。
+> ⑨ 直接读 manifest 并与基线逐包比对。背景见 §4.1。
+>
+> ⑧ 的「精确相同」不是必然结果 —— 网页包/TTL 包由已编译产物拼接，
+> 不含 squashfs 压缩，所以只要输入一致就逐字节相同。
+> 而 sysupgrade 内含 squashfs，有 mtime 参与，必然不同。
 
 ### 这批判据有脚本，不用手工
 
@@ -229,6 +244,40 @@ feeds/ 目录根本没建立
 两个拦截都实测验证过会 `exit 1`。这是「从零构建验证」真正吓人的地方：
 **成功返回码不等于正确**。
 
+### 4.2 第四处：Argon 主题（最隐蔽的一处）
+
+九条判据全过之后，把 manifest 与发布版逐包比，才看出少 2 个：
+
+```
+- luci-theme-argon               3.1.0-r20261022
+- luci-i18n-argon-config-zh-cn   3.1.0-r20261022
+```
+
+`pin/ow2512-dot-config.txt` 里明明写着 `CONFIG_PACKAGE_luci-theme-argon=y`，
+但 Argon 是第三方主题（`jerrykuku/luci-theme-argon`，GPL），**不在任何 feed 里**，
+必须单独下源码。`apply-to-2512.sh` §5d 缺源码时只 echo 一句警告就继续了 ——
+而 OpenWrt 的 Kconfig 对不存在的包**直接忽略、不报错**。
+
+为什么这处比前三处更难发现：
+
+| | 前三处（feeds / .config / 全盘镜像） | 这一处（Argon） |
+|---|---|---|
+| 尺寸影响 | 掉 5%（13.39 → 12.68 MB） | 只差 **0.2%**（13,394,197 → 13,117,717 B） |
+| 判据 ⑧ 能否抓到 | 能 | **不能** |
+| 只有判据 ⑨ 能抓 | — | 是 |
+
+"只差 0.2%" 恰好落在任何"合理波动"范围里，而 ⑧ 的容差是 ±3%。
+所以 ⑨ 必须做成 **与基线 manifest 逐包比对**，不能用阈值 ——
+我第一版写 `luci* ≥ 25`，而实际发布版只有 **19** 个，阈值太松等于没判。
+
+修法两条（都在本仓）：
+1. §5d 缺 `ARGON_SRC` → `exit 1` + 下载指令；
+   确实要无 Argon 的构建 → `ALLOW_NO_ARGON=1`，此时把两个开关
+   显式改成 `# ... is not set`，不留悬空 `=y`。
+2. 判据 ⑨ 三级：必需包缺 → FAIL（带包名）；argon 缺 → WARN 且
+   明确写「固件会用 Bootstrap」；比基线多 → WARN。
+   基线 = `pin/p30-manifest.txt`（发布版 190 包实测清单）。
+
 改动 `/root/repro-verify2/**` 前后 `diff -rq` 应只差时间戳相关字节。
 
 ---
@@ -255,7 +304,7 @@ feeds/ 目录根本没建立
 - ✅ 可以说「全部输入在仓库内，`apply-to-2512.sh` 在全新树上 52 秒铺完，零实质差异」
 - ✅ 可以说「上游 commit / feeds / Argon / 工具链全部可公开获取」
 - ❌ **不能**说「可逐字节复现」
-- ⬜ 在 §4 跑完之前，**不能**说「已从零验证可编译」
+- ✅ §4 已跑完：从零构建 + 出包，九条判据 `OK=23 WARN=1 FAIL=0`
 
 
 ---
@@ -267,7 +316,7 @@ feeds/ 目录根本没建立
 
 | 门槛 | 内容 | 证据状态 |
 |---|---|---|
-| **A. 能构建** | 输入完整 + 依赖公开 + 出包脚本能跑 | §1/§2 ✅ 已实证；§4 端到端 ⬜ |
+| **A. 能构建** | 输入完整 + 依赖公开 + 出包脚本能跑 | ✅ 已实证（§4 端到端 `OK=23 FAIL=0`） |
 | **B. 能刷入** | 镜像布局与分区贴边 + 刷写手法 + 回退路径在 | ✅ 已实证（真机 `PASS=30 FAIL=0`） |
 
 B 侧不依赖「谁编的」，只依赖镜像结构和刷写手法 —— 但**踩了就是变砖**，
@@ -371,4 +420,6 @@ make-deliverable.sh   RC=0
 `--uboot` 必须是可选形式、不许出现 `--uboot $WORK/... || die`、
 `mk_op_pack.py` 必须有 `_load_tphdr`、模板的 magic 与关键字段必须对得上、
 `apply-to-2512.sh` 必须拦 feeds 与 `.config`。
+
+
 
