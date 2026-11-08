@@ -201,11 +201,11 @@ bash deliver/make-deliverable.sh P30
 | 6 | rootfs 里 `net-tune` md5 = `8eaaa52f11cc9a1e1e4c6e01edc421f9` | ✅ 一致 |
 | 7 | rootfs 里 `15_sensors.js`、`rpcd/ucode/wta301` 在位 | ✅ 都在 |
 | 8 | 产物尺寸与已发布一致 | ✅ 内核 4,718,592 / rootfs 12,320,768 / tphdr 131,072 / 网页包 17,170,432 **全部精确相同** |
-| 9 | **固件里真有 LuCI**（与 `pin/p30-manifest.txt` 逐包比对） | ✅ **190 包 / 19 个 `luci*`**，与基线逐包 diff 无输出 |
+| 9 | **固件里真有 LuCI**（与 `pin/p31-manifest.txt` 逐包比对） | ✅ **190 包 / 19 个 `luci*`**，与基线逐包 diff 无输出 |
 
 ```
 final:  OK=23  WARN=0  FAIL=0           ← 零 WARN
-manifest 190 包 —— 与 pin/p30-manifest.txt diff 完全无输出
+manifest 190 包 —— 与 pin/p31-manifest.txt diff 完全无输出
 sysupgrade 13,404,437 B（发布版 13,394,197 B，差 10,240 B = 0.076%，
              squashfs 时间戳，属预期；这不是「编错了」的判据）
 ```
@@ -294,6 +294,43 @@ bash deliver/verify-scratch-build.sh \
 脚本**有意不判 md5 相同** —— 那不可能，原因见 §3。
 它判的是：分区偏移、内嵌 DTB、关键文件内容、区域尺寸、LuCI 是否真在。
 
+### 4.0.2 p31 出包（v1.0.0 的实际发布产物）
+
+v1.0.0 对应的成品是 **p31**（不是 p30）。p30 是上一个提交出的包，
+缺 `wta301-relay`。两者差别只有那一个文件：
+
+| | p30 | **p31 (v1.0.0)** |
+|---|---|---|
+| 提交 | `a19c5d6` | `dc6aaa4` |
+| squashfs 实际大小 | 9,108,480 B | **9,111,552 B**（+3,072） |
+| `usr/sbin/wta301-relay` | ❌ 无 | ✅ **12,484 B / `-rwxr-xr-x`** |
+| 网页包 | 17,170,432 B | **17,170,432 B**（同） |
+| TTL 包 | 20,447,232 B | **20,447,232 B**（同） |
+| 内核区 / rootfs 区 / tphdr | — | 4,718,592 / 12,320,768 / 131,072（精确） |
+| `board-2.bin` 2G / 5G | `78f5b21b…` / `e4904f13…` | **完全相同** |
+| 九条判据 | — | **`OK=23 WARN=0 FAIL=0`** |
+
+判据里唯一需要放宽的是 sysupgrade 尺寸（`13394197 ±3%`）——
+p31 因多一个 relay 变成 13,404,437，**差 0.076%**，仍在容差内。
+区域尺寸常量（`0x480000` / `0xbc0000` / `0x20000` / `0x1060000`）不随版本变，
+因为那是分区布局与包格式决定的。
+
+**离线验证了 relay 真的在包里**（不依赖刷机）：
+
+```
+p31 固件内 usr/sbin/wta301-relay   md5 b32f8ac3348c18c8df09294f017d12df
+仓库源 files-rootfs/usr/sbin/…     md5 b32f8ac3348c18c8df09294f017d12df
+上游树应用后 files/usr/sbin/…      md5 b32f8ac3348c18c8df09294f017d12df
+```
+
+⇒ 三方逐字节相同，且权限 `-rwxr-xr-x` 正确。
+
+> ⚠️ **p31 未真机刷入**。刷写路径与 p30 相同（布局、分区、tphdr 全一致），
+> p30 已 `PASS=30 FAIL=0`，所以风险很低 —— 但「已验证刷入」这句话
+> 只对 p30 成立。这条区别必须写清，不能含糊。
+
+---
+
 ### 4.1 首次从零构建时踩到的两个坑（已修）
 
 第一次从零跑，`make world` 返回 **0**、零报错，产物也看着像回事。
@@ -349,7 +386,7 @@ feeds/ 目录根本没建立
    显式改成 `# ... is not set`，不留悬空 `=y`。
 2. 判据 ⑨ 三级：必需包缺 → FAIL（带包名）；argon 缺 → WARN 且
    明确写「固件会用 Bootstrap」；比基线多 → WARN。
-   基线 = `pin/p30-manifest.txt`（发布版 190 包实测清单）。
+   基线 = `pin/p31-manifest.txt`（发布版 190 包实测清单）。
 
 改动 `/root/repro-verify2/**` 前后 `diff -rq` 应只差时间戳相关字节。
 
@@ -506,6 +543,7 @@ make-deliverable.sh   RC=0
 `--uboot` 必须是可选形式、不许出现 `--uboot $WORK/... || die`、
 `mk_op_pack.py` 必须有 `_load_tphdr`、模板的 magic 与关键字段必须对得上、
 `apply-to-2512.sh` 必须拦 feeds 与 `.config`。
+
 
 
 

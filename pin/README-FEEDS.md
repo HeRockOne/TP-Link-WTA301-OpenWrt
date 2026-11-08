@@ -42,7 +42,7 @@ $ git fetch --depth 1 origin 75a306df84a020c57a631ef5b4c02ace56d93387
 | telephony | git.openwrt.org | 可达 | ✅ |
 | **video** | **github.com** | **常不可达** | ❌ **0 个包** |
 
-实测 `pin/p30-manifest.txt`（发布版 190 包）里
+实测 `pin/p31-manifest.txt`（发布版 190 包）里
 `gstreamer|ffmpeg|qt5|ffplay|libv4l|v4l-utils|x264|x265` **一个都没有**，
 `.config` 里 `CONFIG_PACKAGE_.*(gstreamer|ffmpeg|qt5)` 也是 0。
 

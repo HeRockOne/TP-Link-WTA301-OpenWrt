@@ -55,7 +55,9 @@ done
 
 PACK=$REL/pack
 
-# ── 已发布 v1.0.0 / p30 的基线（用来判「是不是一回事」）──────────────
+# ── 已发布的基线（用来判「是不是一回事」）──────────────────────────
+#   区域尺寸（KERNEL/ROOTFS/TPHDR/WEB/TTL）来自分区布局与包格式，与版本无关，
+#   所以 p30 → p31 未变。sysupgrade 尺寸随 squashfs 内容浮动，只判量级。
 # 把 "<0x04880000 0x00740000>" 归一化成 "0x4880000 0x740000"
 # （dtc 会把 0x4880000 补成 0x04880000，DTS 源里则不补 —— 两边要能直接比）
 norm_reg() {
@@ -72,7 +74,8 @@ BASE_RLEN=0xbc0000     # rootfs 区
 BASE_TPHDR=0x20000     # tphdr 区
 BASE_WEB=0x1060000     # 网页包 = tphdr + kernel + rootfs
 BASE_TTL=0x1380000     # TTL 救砖包（网页包 + u-boot 槽 + 尾部）
-BASE_SYSUP=13394197    # sysupgrade（squashfs 有压缩率浮动，只判量级）
+BASE_SYSUP=13394197    # p30 的 sysupgrade（p31 多 relay 后 13404437，差 0.076%）
+                       # 只判量级（±3%），不判相等 —— 见 docs §3
 
 echo "══════════════════════════════════════════════════════════════"
 echo " 从零构建判据 —— REPRODUCTION-VERIFICATION §4.3"
@@ -286,12 +289,12 @@ else
 	nluci=$(grep -c '^luci' "$MAN" 2>/dev/null || :)
 	nluci=${nluci:-0}
 
-	# ★ 不用拍脑袋的阈值，而是与 pin/p30-manifest.txt（发布版190 包）逐包比对。
+	# ★ 不用拍脑袋的阈值，而是与 pin/p31-manifest.txt（发布版190 包）逐包比对。
 	# 阈值太松会放过真问题（我一开始写 ≥25 个 luci，而实际发布版只有 19 个）；
 	# 太紧会把合法选择当错误（ALLOW_NO_ARGON=1 时 argon 两个包确实不该在）。
-	BASELINE=$SRC/pin/p30-manifest.txt
+	BASELINE=$SRC/pin/p31-manifest.txt
 	if [ ! -f "$BASELINE" ]; then
-		warn "⑨ 找不到 pin/p30-manifest.txt，只能报总数"
+		warn "⑨ 找不到 pin/p31-manifest.txt，只能报总数"
 		ok "⑨ manifest：$npkg 个包，其中 luci* $nluci 个"
 	else
 		# 只比包名，不比版本（版本会因 feed 漂移而不同，那不是错误）
@@ -389,4 +392,5 @@ cat <<'EON'
 ══════════════════════════════════════════════════════════════
 EON
 exit 0
+
 

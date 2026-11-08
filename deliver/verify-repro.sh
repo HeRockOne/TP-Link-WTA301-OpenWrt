@@ -928,13 +928,13 @@ grep -q 'README-FEEDS.md' "$SRC/deliver/apply-to-2512.sh" 2>/dev/null \
 	&& ok "apply-to-2512.sh 的 feeds 拦截指向 README-FEEDS.md" \
 	|| bad "apply 拦截没指向 README-FEEDS.md"
 # 基线 manifest —— 判据 ⑨ 靠它逐包比对
-BM=$SRC/pin/p30-manifest.txt
+BM=$SRC/pin/p31-manifest.txt
 if [ ! -f "$BM" ]; then
-	bad "缺 pin/p30-manifest.txt（判据 ⑨ 无法逐包比对，只能退化成阈值）"
+	bad "缺 pin/p31-manifest.txt（判据 ⑨ 无法逐包比对，只能退化成阈值）"
 else
 	nb=$(wc -l < "$BM")
-	[ "$nb" = "190" ] && ok "pin/p30-manifest.txt 190 包（发布版实测基线）" \
-		|| bad "pin/p30-manifest.txt 应 190 行，实为 $nb"
+	[ "$nb" = "190" ] && ok "pin/p31-manifest.txt 190 包（发布版实测基线）" \
+		|| bad "pin/p31-manifest.txt 应 190 行，实为 $nb"
 	grep -q '^luci-base ' "$BM" && ok "基线含 luci-base" || bad "基线缺 luci-base"
 fi
 # 判据 ⑨ 不许退回拍脑袋阈值
