@@ -377,22 +377,30 @@ fi
 # 为什么忽略末尾换行：仓库侧按 POSIX 习惯给 19 个文件补了末尾换行，
 # 源树里是从 tar 解出来的无换行版本。两者内容一致、编译产物一致，
 # 逐字节比会报 19 个假 FAIL（我在 e33c9a7 就制造过这个坑）。
+#
+# ★ 但有文件是「重写」而不是「拷过来」，它们本来就应该不同。
+#   判据必须把这些排除，否则一还原源树就假 FAIL（实测踩过）。
+#   清单来源：patches/uboot/CHANGES.md 里标了「**重写**」的行。
+REWRITTEN="failsafe/fsdata/index.html"
+REWRITE_WHY="CHANGES.md 第 75 行：自研中文网页恢复控制台 UI（1118 行），无厂商素材"
 UBT=""
 for c in "$(dirname "$SRC")/src/u-boot-2016" "$WORK/../src/u-boot-2016"; do
 	[ -d "$c" ] && { UBT="$c"; break; }
 done
 if [ -n "$UBT" ]; then
-	CNT=0; DIFFS=0; REALS=0
+	CNT=0; REALS=0; SKIPN=0
 	while IFS= read -r rel; do
 		a="$UBT/$rel"; b="$SRC/patches/uboot/files/$rel"
 		[ -f "$a" ] || { REALS=$((REALS+1)); bad "u-boot: $rel 在源树里不存在"; continue; }
+		case " $REWRITTEN " in *" $rel "*) SKIPN=$((SKIPN+1)); continue;; esac
 		CNT=$((CNT+1))
 		if [ "$(printf '%s' "$(cat "$a")")" != "$(printf '%s' "$(cat "$b")")" ]; then
 			REALS=$((REALS+1)); bad "u-boot: $rel 与源树**内容**不同（不只是行尾）"
 		fi
 	done < <(cd "$SRC/patches/uboot/files" && find . -type f | sed 's|^\./||')
 	if [ "$REALS" -eq 0 ]; then
-		ok "u-boot files/ 与源树内容一致（$CNT 个文件，已忽略末尾换行）"
+		ok "u-boot files/ 与源树内容一致（$CNT 个拷贝文件，已忽略末尾换行）"
+		[ "$SKIPN" -gt 0 ] && ok "已跳过 $SKIPN 个重写文件（$REWRITE_WHY）"
 	fi
 else
 	warn "未找到 u-boot 源树（正常：树不进仓库），files/ 与源树的比对已跳过"

@@ -95,16 +95,28 @@ $ git -C /root/ow2512 status --porcelain feeds.conf.default
 
 ```
 src-git packages  https://git.openwrt.org/feed/packages.git^093d551675b1119a06ef224d419905e8d6b2af1a
-src-git luci*      https://git.openwrt.org/project/luci*.git^75a306df84a020c57a631ef5b4c02ace56d93387
+src-git luci       https://git.openwrt.org/project/luci.git^75a306df84a020c57a631ef5b4c02ace56d93387
 src-git routing   https://git.openwrt.org/feed/routing.git^48c808034414a2112cf9d5261a20a320e8d0d170
 src-git telephony https://git.openwrt.org/feed/telephony.git^2618106d5846a4a542fdf5809f0d3ed228ce439b
 src-git video     https://github.com/openwrt/video.git^094bf58da6682f895255a35a84349a79dab4bf95
 ```
 
+本轮补了两条实测（详见 `pin/README-FEEDS.md`）：
+
+1. **官方服务器接受任意 sha 的 fetch** —— feed 脚本的做法是
+   `git fetch --depth 1 origin <sha>`，不是 clone 再 checkout。
+   实测 `git fetch --depth 1 origin 75a306df…` 直接拿到 commit 对象。
+   ⇒ 不需要作者的本地缓存做中转。
+
+2. **`video` feed 可以跳过** —— 它在 `github.com`，中国网络常不可达。
+   但本固件 **0 个包**来自 video（核对发布版 190 包清单，
+   `gstreamer/ffmpeg/qt5/ffplay/libv4l/v4l-utils/x264/x265` 一个都没有）。
+   注释掉那行后 `apply-to-2512.sh` 不会拦（只检查 luci/packages）。
+
 且实测 5 个 feed 检出后 `git status --porcelain` 全为 **0 改动**：
 
 ```
-luci* 75a306df 0 · packages 093d551 0 · routing 48c8080 0 · telephony 2618106 0 · video 094bf58 0
+luci 75a306df · packages 093d5516 · routing 48c8080 · telephony 2618106 · video 094bf58
 ```
 
 ⇒ feed 版本由上游 commit 决定，不需要额外钉。
@@ -169,7 +181,7 @@ cp ../wta301-2512/pin/ow2512-dot-config.txt .config
 # 若无网络下载 feed，复用母树已 clone 的（内容与 feeds.conf 的 commit 一致）
 cp -a /root/ow2512/feeds .
 ./scripts/feeds update -i && ./scripts/feeds install -a
-ARGON_SRC=<luci*-theme-argon-v3.1.0> bash deliver/apply-to-2512.sh
+ARGON_SRC=<luci-theme-argon-v3.1.0> bash deliver/apply-to-2512.sh
 make -j6 world && make -j6 target/install
 bash deliver/make-release.sh --version REPRO --stage P30
 bash deliver/make-deliverable.sh P30
@@ -189,7 +201,7 @@ bash deliver/make-deliverable.sh P30
 | 6 | rootfs 里 `net-tune` md5 = `8eaaa52f11cc9a1e1e4c6e01edc421f9` | ✅ 一致 |
 | 7 | rootfs 里 `15_sensors.js`、`rpcd/ucode/wta301` 在位 | ✅ 都在 |
 | 8 | 产物尺寸与已发布一致 | ✅ 内核 4,718,592 / rootfs 12,320,768 / tphdr 131,072 / 网页包 17,170,432 **全部精确相同** |
-| 9 | **固件里真有 LuCI**（与 `pin/p30-manifest.txt` 逐包比对） | ✅ **190 包 / 19 个 luci**，与基线逐包 diff 无输出** |
+| 9 | **固件里真有 LuCI**（与 `pin/p30-manifest.txt` 逐包比对） | ✅ **190 包 / 19 个 `luci*`**，与基线逐包 diff 无输出 |
 
 ```
 final:  OK=23  WARN=0  FAIL=0           ← 零 WARN
@@ -202,7 +214,7 @@ sysupgrade 13,404,437 B（发布版 13,394,197 B，差 10,240 B = 0.076%，
 
 | | 不给（`ARGON_SRC` 缺失） | 给了 |
 |---|---|---|
-| manifest | 188 包 / 17 luci** | **190 包 / 19 luci**** |
+| manifest | 188 包 / 17 个 `luci*` | **190 包 / 19 个 `luci*`** |
 | 判据 | `OK=23 WARN=1 FAIL=0` | **`OK=23 WARN=0 FAIL=0`** |
 | 固件 | 用 Bootstrap 主题 | 用 Argon 主题 |
 
@@ -240,9 +252,9 @@ bash deliver/verify-scratch-build.sh \
 
 ```
 manifest      163 个包（应 190）
-luci**           0 个（应 29）
+luci*            0 个（应 19）
 sysupgrade   12,677,397 B（应 13,394,197，小 5.4%）
-.config 里 CONFIG_PACKAGE_luci** = 0 个（母树 19 个）
+.config 里 `CONFIG_PACKAGE_luci*` = 0 个（母树 19 个）
 feeds/ 目录根本没建立
 ```
 
@@ -250,7 +262,7 @@ feeds/ 目录根本没建立
 
 | # | 漏了什么 | 为何静默 | 现状 |
 |---|---|---|---|
-| ① | `./scripts/feeds install -a` | LuCI 全部来自 luci* feed；包不存在时 Kconfig 就当没这个选项 | README 列为显式步骤；`apply-to-2512.sh` 直接 `exit 1` |
+| ① | `./scripts/feeds install -a` | LuCI 全部来自 luci feed；包不存在时 Kconfig 就当没这个选项 | README 列为显式步骤；`apply-to-2512.sh` 直接 `exit 1` |
 | ② | `cp pin/ow2512-dot-config.txt .config` | 没有 `.config` 时 `apply-to-2512.sh` 会新建一个只有几行的，`make defconfig` 从最小集重算 | 同上，且检查 `CONFIG_PACKAGE_luci*` ≥ 10 |
 
 两个拦截都实测验证过会 `exit 1`。这是「从零构建验证」真正吓人的地方：
@@ -261,12 +273,12 @@ feeds/ 目录根本没建立
 九条判据全过之后，把 manifest 与发布版逐包比，才看出少 2 个：
 
 ```
-- luci*-theme-argon               3.1.0-r20261022
-- luci*-i18n-argon-config-zh-cn   3.1.0-r20261022
+- luci-theme-argon               3.1.0-r20261022
+- luci-i18n-argon-config-zh-cn   3.1.0-r20261022
 ```
 
-`pin/ow2512-dot-config.txt` 里明明写着 `CONFIG_PACKAGE_luci*-theme-argon=y`，
-但 Argon 是第三方主题（`jerrykuku/luci*-theme-argon`，GPL），**不在任何 feed 里**，
+`pin/ow2512-dot-config.txt` 里明明写着 `CONFIG_PACKAGE_luci-theme-argon=y`，
+但 Argon 是第三方主题（`jerrykuku/luci-theme-argon`，GPL），**不在任何 feed 里**，
 必须单独下源码。`apply-to-2512.sh` §5d 缺源码时只 echo 一句警告就继续了 ——
 而 OpenWrt 的 Kconfig 对不存在的包**直接忽略、不报错**。
 
@@ -280,7 +292,7 @@ feeds/ 目录根本没建立
 
 "只差 0.2%" 恰好落在任何"合理波动"范围里，而 ⑧ 的容差是 ±3%。
 所以 ⑨ 必须做成 **与基线 manifest 逐包比对**，不能用阈值 ——
-我第一版写 `luci** ≥ 25`，而实际发布版只有 **19** 个，阈值太松等于没判。
+我第一版写 `luci* ≥ 25`，而实际发布版只有 **19** 个，阈值太松等于没判。
 
 修法两条（都在本仓）：
 1. §5d 缺 `ARGON_SRC` → `exit 1` + 下载指令；
@@ -432,6 +444,8 @@ make-deliverable.sh   RC=0
 `--uboot` 必须是可选形式、不许出现 `--uboot $WORK/... || die`、
 `mk_op_pack.py` 必须有 `_load_tphdr`、模板的 magic 与关键字段必须对得上、
 `apply-to-2512.sh` 必须拦 feeds 与 `.config`。
+
+
 
 
 
