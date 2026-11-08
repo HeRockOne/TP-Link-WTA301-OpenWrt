@@ -313,8 +313,21 @@ feeds/ 目录根本没建立
 | 槽镜像 `u-boot.bin` → 262,144 B | ✅ 闭环，逐字节对过板子实物 |
 | 构建包装 commit | ✅ `9ce31573`，**产物自证**：`strings u-boot.bin` → `U-Boot 2016.01-9ce3157-dirty` |
 | 内层 codelinaro commit | ⚠️ 只到 QSDK 发布标签 `AU_LINUX_QSDK_NHSS.QSDK.12.5_TARGET_ALL.12.5.2783.2994` |
-| 从基座源码编出 `u-boot.bin` | ⬜ 未实跑 |
+| 从基座源码编出 `u-boot.bin` | ⬜ 未实跑（`build_j1.sh` 已参数化，本轮没跑） |
 | 工具链 `arm_cortex-a7_gcc-5.2.0_musl-1.1.16_eabi` | ✅ 公开（QSDK 标准，`SWRT-dev/qca-toolchains` 有） |
+
+### 5.1 槽镜像这一环已做成「行为判据」（不是查文档）
+
+`wta301-uboot-kit/verify-kit.sh` 本轮从 30 条加到 **34 条**，
+新增的 4 条会**实际执行** `build/mk_uboot_slot.py`，而不是只 grep README：
+
+```
+u-boot.bin   556,032 B  md5 3a4cb00e37065936e5ff89cb5710a519
+槽镜像       262,144 B  md5 d0ada9f76e4f1aba9b96a559a5220cee  crc32 0xCB2D3108
+```
+
+第三次复验，与 README §3 验收判据逐字相同。
+**为什么改**：原来两条判据只证明「文档里写了期望值」，文档和代码可以各说各话。
 
 ⇒ u-boot 是**「同代基座 + overlay」可复现**，不是「同一棵树」。
 详见 `patches/uboot/README.md` §1、§3.1，`patches/uboot/CHANGES.md` §3。
@@ -444,6 +457,7 @@ make-deliverable.sh   RC=0
 `--uboot` 必须是可选形式、不许出现 `--uboot $WORK/... || die`、
 `mk_op_pack.py` 必须有 `_load_tphdr`、模板的 magic 与关键字段必须对得上、
 `apply-to-2512.sh` 必须拦 feeds 与 `.config`。
+
 
 
 
