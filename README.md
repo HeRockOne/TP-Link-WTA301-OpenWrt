@@ -6,6 +6,11 @@
 板子是本仓库作者自己的一台机器，所有结论都在**真机**上验证过；没验证的地方在文档里
 明确标为「未验证」，不写成「已完成」。
 
+![WTA301 上运行的 OpenWrt 25.12.6 LuCI 界面](docs/images/wta301-luci.png)
+
+↑ 真机截图：WTA301 上跑着的 OpenWrt 25.12.6 `r33311-981c978eff`，浏览器访问 `192.168.1.1` 的 LuCI。
+成品固件在 [Releases](https://github.com/HeRockOne/wta301-2512/releases)。
+
 ---
 
 ## 支持的硬件
