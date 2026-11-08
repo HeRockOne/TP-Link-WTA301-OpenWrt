@@ -13,7 +13,7 @@
 |---|---|---|
 | 仓库是否完整描述了编译树的输入？ | **是**。全新树 apply 后与 `/root/ow2512` 零实质差异 | ✅ 已实证 |
 | 依赖是否都能公开获取？ | **是**（上游 commit / feeds / 工具链 / Argon 全部可公开获取） | ✅ 已实证 |
-| 全新树能不能编出可用的固件？ | 见 §4 | ✅ 已实测（OK=23 FAIL=0） |
+| 全新树能不能编出可用的固件？ | **能**。两棵**完全独立**的树（一棵 clone --no-local 自母树、一棵从 git.openwrt.org 全新 clone）各编一遍，都是 190 包逐包一致、`OK=23 WARN=0 FAIL=0` | ✅ 已实测（§4） |
 | 能不能编出 **md5 完全相同**的固件？ | **不能**，且这是 squashfs 的固有行为，非本项目缺陷 | ❌ 已实证不可能（§3） |
 | u-boot 能不能复现？ | 槽镜像闭环可复现；`u-boot.bin` 编译依赖基座 commit（只到同代） | ⚠️ 部分 |
 
@@ -209,6 +209,55 @@ manifest 190 包 —— 与 pin/p30-manifest.txt diff 完全无输出
 sysupgrade 13,404,437 B（发布版 13,394,197 B，差 10,240 B = 0.076%，
              squashfs 时间戳，属预期；这不是「编错了」的判据）
 ```
+
+### 4.0 两棵**完全独立**的树，结论一致
+
+上面那轮跑在 `/root/repro-verify2`（`git clone --no-local` 自母树）。
+为了排除「只对作者的树成立」，又跑了一棵真·上游树：
+
+```bash
+git clone --depth 1 --branch v25.12.6     https://git.openwrt.org/openwrt/openwrt.git /root/ow-upstream
+#   HEAD = 64900e756efa667774214f9c6b17c113222e01f7   ← 与发布 pin 精确一致
+#   10,316 个文件，103 MB
+```
+
+（`github.com` 国内连不上；`git.openwrt.org` 可达，是官方源。）
+
+| | `/root/repro-verify2` | `/root/ow-upstream` |
+|---|---|---|
+| 树来源 | `clone --no-local` 自母树 | **从 git.openwrt.org 全新 clone** |
+| apply-to-2512.sh | RC=0 | **RC=0**（7 个关键文件与已验证树 md5 全部相同） |
+| `make world` | RC=0，13 分 | **RC=0，1 小时 17 分**（含从零编 host tools + gcc + 内核） |
+| `make target/install` | RC=0 | **RC=0** |
+| manifest | 190 包 / 19 `luci*` | **190 包 / 19 `luci*`** |
+| 与基线 diff | 无输出 | **无输出** |
+| 内核区 / rootfs / tphdr | 4,718,592 / 12,320,768 / 131,072 | **完全相同** |
+| 网页包 / TTL 包 | 17,170,432 / 20,447,232 | **完全相同** |
+| sysupgrade | 13,404,437 | **13,404,437**（同尺寸，md5 不同） |
+| 九条判据 | `OK=23 WARN=0 FAIL=0` | **`OK=23 WARN=0 FAIL=0`** |
+
+两个 sysupgrade 尺寸精确相同到字节，但 md5 不同：
+
+```
+13,404,437  a28b1da77d7b60d73ff4c90bba633b66   (ow-upstream)
+13,404,437  5de1ed184c7dec1092d3d1960f4ad0f6   (repro-verify2)
+cmp -l 首个差异在偏移 1668（squashfs 时间戳区）
+```
+
+⇒ 印证 §3 的结论：**结构可复现到逐字节，内容不可**（时间戳等长、压缩率一致）。
+
+### 4.0.1 上游树跑的这一个小时顺带证明了什么
+
+`make world` 第一次运行时要从零编译：host tools（gcc/make/python/patchelf…）
+→ toolchain → 内核 → 全部包。**零报错**跑完，说明：
+
+- 我们的补丁对**纯净上游树**可应用（不是只能打在作者的树上）
+- `feeds.conf.default` 的 5 个 commit pin 能直接取到（`feeds install -a` RC=0）
+- 上游 feed 自身的 Kconfig 循环依赖（`luci-app-weechat` ↔ `weechat-full`
+  ↔ `weechat-minimal`）只是个 error 提示，`make defconfig` 仍 RC=0，
+  不影响本固件（这 3 个包都不在 .config 里）
+
+---
 
 两轮构建的差别只有一处输入：**Argon 主题源码给不给**。
 
@@ -457,6 +506,8 @@ make-deliverable.sh   RC=0
 `--uboot` 必须是可选形式、不许出现 `--uboot $WORK/... || die`、
 `mk_op_pack.py` 必须有 `_load_tphdr`、模板的 magic 与关键字段必须对得上、
 `apply-to-2512.sh` 必须拦 feeds 与 `.config`。
+
+
 
 
 
