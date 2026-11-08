@@ -378,21 +378,37 @@ fi
 # 源树里是从 tar 解出来的无换行版本。两者内容一致、编译产物一致，
 # 逐字节比会报 19 个假 FAIL（我在 e33c9a7 就制造过这个坑）。
 #
-# ★ 但有文件是「重写」而不是「拷过来」，它们本来就应该不同。
-#   判据必须把这些排除，否则一还原源树就假 FAIL（实测踩过）。
-#   清单来源：patches/uboot/CHANGES.md 里标了「**重写**」的行。
+# ★ 但有文件是「重写」或「新增」而不是「拷过来」，它们本来就不该与源树相同。
+#   判据必须区分，否则一还原源树就假 FAIL（实测踩过）。
+#   清单来源：patches/uboot/CHANGES.md 里标了「**重写**」/「**新增**」的行。
 REWRITTEN="failsafe/fsdata/index.html"
-REWRITE_WHY="CHANGES.md 第 75 行：自研中文网页恢复控制台 UI（1118 行），无厂商素材"
+ADDED="arch/arm/dts/ipq5018-tplink-wta301.dts
+configs/ipq5018_tplink_wta301_defconfig
+drivers/net/ipq5018/rtl8367s.c
+failsafe/modules/tplinkinfo.c"
 UBT=""
 for c in "$(dirname "$SRC")/src/u-boot-2016" "$WORK/../src/u-boot-2016"; do
 	[ -d "$c" ] && { UBT="$c"; break; }
 done
 if [ -n "$UBT" ]; then
-	CNT=0; REALS=0; SKIPN=0
+	CNT=0; REALS=0; SKIPN=0; ADDN=0
 	while IFS= read -r rel; do
 		a="$UBT/$rel"; b="$SRC/patches/uboot/files/$rel"
-		[ -f "$a" ] || { REALS=$((REALS+1)); bad "u-boot: $rel 在源树里不存在"; continue; }
 		case " $REWRITTEN " in *" $rel "*) SKIPN=$((SKIPN+1)); continue;; esac
+		case "
+$ADDED
+" in *"
+$rel
+"*)
+			# 新增文件：源树里没有是正常的（我们还没提交到上游）
+			ADDN=$((ADDN+1))
+			if [ -f "$a" ] && [ "$(printf '%s' "$(cat "$a")")" != "$(printf '%s' "$(cat "$b")")" ]; then
+				warn "u-boot: 新增文件 $rel 在源树里存在但与仓库版不同（正常，只要源树那份是旧版）"
+			fi
+			continue
+		;;
+		esac
+		[ -f "$a" ] || { REALS=$((REALS+1)); bad "u-boot: $rel 在源树里不存在（也不是新增/重写文件）"; continue; }
 		CNT=$((CNT+1))
 		if [ "$(printf '%s' "$(cat "$a")")" != "$(printf '%s' "$(cat "$b")")" ]; then
 			REALS=$((REALS+1)); bad "u-boot: $rel 与源树**内容**不同（不只是行尾）"
@@ -400,7 +416,8 @@ if [ -n "$UBT" ]; then
 	done < <(cd "$SRC/patches/uboot/files" && find . -type f | sed 's|^\./||')
 	if [ "$REALS" -eq 0 ]; then
 		ok "u-boot files/ 与源树内容一致（$CNT 个拷贝文件，已忽略末尾换行）"
-		[ "$SKIPN" -gt 0 ] && ok "已跳过 $SKIPN 个重写文件（$REWRITE_WHY）"
+		[ "$SKIPN" -gt 0 ] && ok "已跳过 $SKIPN 个重写文件（自研 failsafe UI，CHANGES.md 第 75 行）"
+		[ "$ADDN" -gt 0 ] && ok "已跳过 $ADDN 个新增文件（板上新代码，上游没有）"
 	fi
 else
 	warn "未找到 u-boot 源树（正常：树不进仓库），files/ 与源树的比对已跳过"
