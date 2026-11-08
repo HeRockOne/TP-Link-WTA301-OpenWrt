@@ -205,7 +205,7 @@ bash patches/uboot/build/build_j1.sh
 
 | 问题 | 答案 | 依据 |
 |---|---|---|
-| **能编出结构正确的固件吗？** | **能**。从零构建后 manifest **190 包与发布版逐包 diff 无输出**，内核区 / rootfs 区 / tphdr / 网页包尺寸**精确相同** | `docs/REPRODUCTION-VERIFICATION.md` §4 |
+| **能编出结构正确的固件吗？** | **能**。**两棵完全独立的树**各编一遍（一棵 `clone --no-local` 自作者的树、一棵从 `git.openwrt.org` 全新 clone），都是 manifest **190 包逐包 diff 无输出**，内核区 / rootfs 区 / tphdr / 网页包尺寸**精确相同** | `docs/REPRODUCTION-VERIFICATION.md` §4 |
 | **能按流程刷入吗？** | **能**。p30 已真机干净刷入，`check-v30.sh` **PASS=30 FAIL=0** | 同上 §7 |
 | **能编出 md5 完全相同的固件吗？** | **不能**，且这不是本项目缺陷 | 同上 §3 |
 
@@ -289,3 +289,4 @@ FIT 内嵌 DTB 与 DTS 一致、rootfs 里关键文件 md5、区域尺寸、
 - **kenzok8 / jerrykuku** —— Argon 主题
 - 所有在 OpenWrt 论坛、linux-arm-msm、lore.kernel.org 上留下实证记录的人 ——
   本工程大部分的「可行 / 不可行」结论，先是他们的，然后才是我们验证的
+
