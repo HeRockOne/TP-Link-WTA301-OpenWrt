@@ -41,6 +41,11 @@ if [ -n "$missing_feeds" ]; then
 
    为什么要在这里拦：LuCI 全部来自 luci feed。漏装后 make world 会
    成功返回 0，但固件少 27 个 LuCI 包、没有 Web 界面（已实测踩过）。
+
+   ★ 中国网络提示：video feed 在 github.com，常不可达。
+     本固件 0 个包来自 video（已核对发布版 190 包清单），
+     可以直接把 feeds.conf.default 里 video 那行注释掉 ——
+     只检查 luci / packages，不会拦你。详见 pin/README-FEEDS.md。
 FEEDS
 	exit 1
 fi
@@ -602,3 +607,4 @@ NOARGON
       | grep 'reg = ' | sed 's/^\s*/    /'
 
  echo "== DONE =="
+
