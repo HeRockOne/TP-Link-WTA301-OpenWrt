@@ -199,6 +199,48 @@ bash patches/uboot/build/build_j1.sh
 
 ---
 
+## 「别人 clone 下来能不能编出来」—— 已实测回答
+
+这是开源前必须先回答的问题。结论分三个层次，每层都有实测依据：
+
+| 问题 | 答案 | 依据 |
+|---|---|---|
+| **能编出结构正确的固件吗？** | **能**。从零构建后 manifest **190 包与发布版逐包 diff 无输出**，内核区 / rootfs 区 / tphdr / 网页包尺寸**精确相同** | `docs/REPRODUCTION-VERIFICATION.md` §4 |
+| **能按流程刷入吗？** | **能**。p30 已真机干净刷入，`check-v30.sh` **PASS=30 FAIL=0** | 同上 §7 |
+| **能编出 md5 完全相同的固件吗？** | **不能**，且这不是本项目缺陷 | 同上 §3 |
+
+### 自己编完怎么判断「编对了」
+
+```bash
+bash deliver/verify-scratch-build.sh \
+     --log  /path/to/build.log   \      # 必须有 WORLD_RC= / INSTALL_RC=
+     --tree /path/to/openwrt     \      # apply 过的那棵树
+     --rel  /path/to/rel-out            # make-release.sh 的输出
+#   → OK=23  WARN=0  FAIL=0
+```
+
+它把九条判据做成可执行检查，包括：分区偏移要 **精确** `0x4880000/0x740000`、
+FIT 内嵌 DTB 与 DTS 一致、rootfs 里关键文件 md5、区域尺寸、
+以及**与 `pin/p30-manifest.txt` 逐包比对**。
+
+★ 它**有意不判 md5 相同** —— squashfs 含时间戳，那个判据只会永远是红的。
+判的是「结构是否正確」，这才是能判的东西。
+
+### 三个编完才发现的静默失败（都已修，判据已覆盖）
+
+`make world` 返回 0 **不等于**结果对。实测踩到三处：
+
+| 漏了什么 | 后果 | 现在会被拦住 |
+|---|---|---|
+| `./scripts/feeds install -a` | 少 27 个 LuCI 包、没 Web 界面 | `apply-to-2512.sh` `exit 1` |
+| `cp pin/ow2512-dot-config.txt .config` | 同上 | 同上（检查 `luci*` ≥ 10） |
+| Argon 主题源码 | 少 2 个包，**尺寸只差 0.2%** | `apply-to-2512.sh` `exit 1`；判据 ⑨ 逐包比对 |
+
+第三处最难发现 —— 0.2% 落在任何「合理波动」范围里。详见
+`docs/REPRODUCTION-VERIFICATION.md` §4.2。
+
+---
+
 ## ⚠️ 刷机前必须知道的三件事
 
 1. **二级 u-boot 链接基址是 `0x49900000`，不是 `0x4a920000`。**
