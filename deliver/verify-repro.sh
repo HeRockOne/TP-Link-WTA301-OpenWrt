@@ -866,6 +866,59 @@ else
 	}
 fi
 
+# ════════════════════════════════════════════════════════
+sec "15. feeds 定版的说明必须正确（不许留空文件误导）"
+# ════════════════════════════════════════════════════════
+# 原来 pin/feeds.conf 是 0 字节空文件 —— 外部用户看到只会困惑。
+# 真实机制：上游 v25.12.6 的 feeds.conf.default 自带 5 个 commit pin。
+if [ -f "$SRC/pin/feeds.conf" ]; then
+	if [ -s "$SRC/pin/feeds.conf" ]; then
+		warn "pin/feeds.conf 不为空 —— 若它与上游 feeds.conf.default 不同，请说明理由"
+	else
+		bad "pin/feeds.conf 是 0 字节空文件（会误导读者，应删除）"
+	fi
+else
+	ok "没有 pin/feeds.conf（正确：用上游 feeds.conf.default 的 pin）"
+fi
+FDM=$SRC/pin/README-FEEDS.md
+if [ ! -f "$FDM" ]; then
+	bad "缺 pin/README-FEEDS.md（feeds 怎么定版无人可查）"
+else
+	np=$(grep -c '\^[0-9a-f]\{40\}' "$FDM" || :)
+	np=${np:-0}
+	[ "$np" -ge 5 ] && ok "README-FEEDS.md 列了 $np 个 feed pin" \
+		|| bad "README-FEEDS.md 只列了 $np 个 feed pin（应 5 个）"
+	grep -q '64900e75' "$FDM" && ok "README-FEEDS.md 点名上游 commit" \
+		|| bad "README-FEEDS.md 没写上游 commit"
+	grep -q 'github' "$FDM" && ok "README-FEEDS.md 说明 video feed 在 github" \
+		|| bad "README-FEEDS.md 没说明 video feed 的网络问题"
+	if grep -q '0 个包' "$FDM" || grep -q '一个都没有' "$FDM"; then
+		ok "README-FEEDS.md 说明 video 对本固件非必需"
+	else
+		bad "README-FEEDS.md 没说明 video 可否跳过"
+	fi
+fi
+# apply 的拦截提示也要指向它（否则用户看不到跳过 video 的办法）
+grep -q 'README-FEEDS.md' "$SRC/deliver/apply-to-2512.sh" 2>/dev/null \
+	&& ok "apply-to-2512.sh 的 feeds 拦截指向 README-FEEDS.md" \
+	|| bad "apply 拦截没指向 README-FEEDS.md"
+# 基线 manifest —— 判据 ⑨ 靠它逐包比对
+BM=$SRC/pin/p30-manifest.txt
+if [ ! -f "$BM" ]; then
+	bad "缺 pin/p30-manifest.txt（判据 ⑨ 无法逐包比对，只能退化成阈值）"
+else
+	nb=$(wc -l < "$BM")
+	[ "$nb" = "190" ] && ok "pin/p30-manifest.txt 190 包（发布版实测基线）" \
+		|| bad "pin/p30-manifest.txt 应 190 行，实为 $nb"
+	grep -q '^luci-base ' "$BM" && ok "基线含 luci-base" || bad "基线缺 luci-base"
+fi
+# 判据 ⑨ 不许退回拍脑袋阈值
+if grep -q 'nluci" -ge 25' "$SRC/deliver/verify-scratch-build.sh" 2>/dev/null; then
+	bad "verify-scratch-build.sh 又用 luci>=25 阈值（实际发布版只有 19 个）"
+else
+	ok "判据 ⑨ 用基线逐包比对，不是阈值"
+fi
+
 # ══════════════════════════════════════════════════════════════════
 sec "总结"
 # ══════════════════════════════════════════════════════════════════
