@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """rawserial.py —— 把 COM 口原样搬到 stdin/stdout（给 SSH 通道用）
 
-设计意图：**不要自研 TCP 守护进程**。
+设计意图：**不要手写 TCP 守护进程**。
 本机通过 plink 的 stdin/stdout 直连这个脚本，SSH 连接本身就是生命线：
 
   - SSH 连接在 -> 本机读写就是串口字节，没有任何中间端口

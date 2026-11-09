@@ -92,7 +92,7 @@ md5sum -c MD5SUMS.txt
 
 ## 七、u-boot kit 使用者请注意
 
-`uboot-kit/` 里是**自研 u-boot 代码全量 overlay**（23 个文件）+ 构建脚本 + 槽镜像。
+`uboot-kit/` 里是**u-boot 新增代码全量 overlay**（23 个文件）+ 构建脚本 + 槽镜像。
 **动手前必须读 `uboot-kit/README.md`**，尤其 §4「四个必须知道的坑」：
 
 - 二级 u-boot 链接基址必须是 **`0x49900000`**，不是 `0x4a920000`（后者链上去串口直接死）

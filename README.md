@@ -120,7 +120,7 @@
 
 | 目录 | 内容 |
 |---|---|
-| `patches/uboot/` | **u-boot kit** —— 全部自研 u-boot 代码（23 个文件，整份 overlay 不打 diff）+ 构建脚本 + 槽镜像打包器。见 `patches/uboot/README.md` |
+| `patches/uboot/` | **u-boot kit** —— 全部 u-boot 新增代码（23 个文件，整份 overlay 不打 diff）+ 构建脚本 + 槽镜像打包器。见 `patches/uboot/README.md` |
 | `patches/kernel-6.12/` | 内核补丁：UNIPHY PCS、stmmac DWMAC、gephy 时钟、dt-binding |
 | `patches/mac80211/` | ath11k 低内存 DP ring 尺寸 |
 | `patches/fstools/` | `fstools_overlay_name` 支持（overlay 用自定义 UBI 卷名） |
@@ -301,7 +301,7 @@ FIT 内嵌 DTB 与 DTS 一致、rootfs 里关键文件 md5、区域尺寸、
 
 ## 许可
 
-本仓库的**原创部分**（脚本、文档、DTS、u-boot 自研代码、内核补丁）以 **GPL-2.0** 发布，
+本仓库的**原创部分**（脚本、文档、DTS、u-boot 新增代码、内核补丁）以 **GPL-2.0** 发布，
 见 [`LICENSE`](LICENSE)。这是与 OpenWrt、u-boot、Linux 内核保持一致的选择。
 
 仓库内含的第三方材料及其许可见 [`THIRD-PARTY.md`](THIRD-PARTY.md)。
@@ -324,4 +324,3 @@ GPL-2.0 第 15、16 条原文即包含免责：本程序**不提供任何担保*
 - **kenzok8 / jerrykuku** —— Argon 主题
 - 所有在 OpenWrt 论坛、linux-arm-msm、lore.kernel.org 上留下实证记录的人 ——
   本工程大部分的「可行 / 不可行」结论，先是他们的，然后才是我们验证的
-

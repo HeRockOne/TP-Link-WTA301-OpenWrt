@@ -12,7 +12,7 @@
 | 类别 | 路径 | 理由 |
 |---|---|---|
 | DTS / 内核补丁 / 板级 overlay | `files/` `patches/kernel-6.12/` | 移植的**全部实质内容**。没有这些就是一堆没用的二进制 |
-| u-boot 自研代码 | `patches/uboot/files/` | 整份 overlay 而非 diff，见 `patches/uboot/README.md` §1.1 |
+| u-boot 新增代码 | `patches/uboot/files/` | 整份 overlay 而非 diff，见 `patches/uboot/README.md` §1.1 |
 | 用户态 overlay | `files-rootfs/` `files-base-files/` `files-ipq50xx-upgrade/` | 开箱即用与系统内升级的落地文件 |
 | 构建/出包/验收脚本 | `deliver/` `tools/` | 可复现性 |
 | Wi-Fi 板型数据 | `patches/bdf/` | **构建的必要输入**，上游任何仓库都没有。IP 问题见 `THIRD-PARTY.md` §2 |
@@ -152,7 +152,7 @@ grep -rn "⛔\|不能\|不支持\|不做" docs/USER-MANUAL.md README.md | head -
 | QSDK 发布标签 | `AU_LINUX_QSDK_NHSS.QSDK.12.5_TARGET_ALL.12.5.2783.2994` | ✅ 公开镜像 README 明写 |
 | 公开镜像 | `1980490718/u-boot-2016`（GPL-2.0） | ✅ 不用登录 codelinaro |
 | 本机树 == 该镜像 | **未对过** | ⬜ 未验证（不影响同代 overlay） |
-| failsafe Web UI 是不是厂商的 | **不是** | ✅ 自研：中文、自研 CSS 变量，`tplink` 仅作型号名/API 路径 |
+| failsafe Web UI 是不是厂商的 | **不是** | ✅ 新写：中文、自有 CSS 变量，`tplink` 仅作型号名/API 路径 |
 | `patches/uboot/files/` 有无二进制 blob | **无** | ✅ `file(1)` 全部 text |
 
 **法务必读**：`THIRD-PARTY.md` §3.1 已写入归属声明，并明确禁止删除那 6 个

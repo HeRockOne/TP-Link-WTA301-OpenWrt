@@ -416,7 +416,7 @@ $rel
 	done < <(cd "$SRC/patches/uboot/files" && find . -type f | sed 's|^\./||')
 	if [ "$REALS" -eq 0 ]; then
 		ok "u-boot files/ 与源树内容一致（$CNT 个拷贝文件，已忽略末尾换行）"
-		[ "$SKIPN" -gt 0 ] && ok "已跳过 $SKIPN 个重写文件（自研 failsafe UI，CHANGES.md 第 75 行）"
+		[ "$SKIPN" -gt 0 ] && ok "已跳过 $SKIPN 个重写文件（新写的 failsafe UI，CHANGES.md 第 75 行）"
 		[ "$ADDN" -gt 0 ] && ok "已跳过 $ADDN 个新增文件（板上新代码，上游没有）"
 	fi
 else
@@ -963,5 +963,4 @@ echo "    3) bash deliver/make-deliverable.sh <ver>"
 echo "    4) bash deliver/make-open-release.sh <VER>"
 echo "    5) 上板：verify-p26.sh / verify-p28.sh"
 exit 0
-
 

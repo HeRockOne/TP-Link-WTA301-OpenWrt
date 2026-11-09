@@ -1,7 +1,7 @@
 # 复现指南 —— 从零到可刷固件
 
 > 仓库里**不放源码树、不放工具链**，只放三样：
-> ① 上游固定引用（tag + commit） ② 我们的代码（385 KB） ③ 构建与校验脚本。
+> ① 上游固定引用（tag + commit） ② 我们的代码（412 KB） ③ 构建与校验脚本。
 >
 > 两个产物分别复现：
 > - **OpenWrt 固件** —— `op_single_0x4800000.bin`（20,447,232 B）
@@ -37,7 +37,7 @@
 | mac80211 补丁 | `patches/mac80211/0950-*` | ath11k ring 降到 256 MiB 档（P15） |
 | 板级 base-files | `deliver/ipq50xx-base-files/` | MAC / caldata / LED / uci-defaults |
 | Device 定义 | `deliver/ipq50xx-device.mk` | 追加进 `image/ipq50xx.mk` |
-| u-boot 全部自研代码 | `patches/uboot/files/`（23 文件 / 385 KB） | 见 `patches/uboot/README.md` |
+| u-boot 全部新增代码 | `patches/uboot/files/`（23 文件 / 412 KB） | 见 `patches/uboot/README.md` |
 | 校验基线 | `deliver/images/FINGERPRINT.json` | md5/crc32 期望值 |
 
 ---
