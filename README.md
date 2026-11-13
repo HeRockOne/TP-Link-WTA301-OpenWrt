@@ -5,7 +5,8 @@
 > **本项目仅供技术交流与学习研究。**
 >
 > 1. **仅代表本人设备。** 仓库里所有结论、日志、截图、md5、分区地址，都来自
->    作者手里**这一台** WTA301（IPQ5018 / 128 MiB NAND / GD5F1GQ5REYIG）。
+>    作者手里**这一台** WTA301（IPQ5018 / 128 MiB NAND / GD5F1GQ5REYIG），
+>    **原厂固件是 2.0.2 的电信定制版**（详见下文「支持的硬件」）。
 >    TP-Link 存在多个硬件版本、多个出厂固件版本，你的板子**可能不是同一台**，
 >    同一个地址在你的板子上完全可能是别的东西。**不要假设通用。**
 > 2. **刷入后果自负。** 刷 u-boot、刷固件、改分区、写 NAND 都是不可逆或
@@ -33,7 +34,7 @@
 ![WTA301 上运行的 OpenWrt 25.12.6 LuCI 界面](docs/images/wta301-luci.png)
 
 ↑ 真机截图：WTA301 上跑着的 OpenWrt 25.12.6 `r33311-981c978eff`，浏览器访问 `192.168.1.1` 的 LuCI。
-成品固件在 [Releases](https://github.com/HeRockOne/wta301-2512/releases)。
+成品固件在 [Releases](https://github.com/HeRockOne/TP-Link-WTA301-OpenWrt/releases)。
 
 ---
 
@@ -51,6 +52,39 @@
 | 串口 | 1 个（`blsp1_uart1`） |
 
 **没有**：USB、PCIe 外设、SD/MMC。（DTS 里 `pcie0/pcie1` 注明 `disabled on purpose`。）
+
+### 出厂固件：2.0.2 · 电信定制版
+
+> **本项目的每一行代码、每一个分区地址，都是针对「原厂固件 2.0.2 电信定制版」
+> 这一台机器做的。** 换成零售版、其他运营商版、或别的固件版本，**不保证适用**。
+
+| 项 | 值 | 依据 |
+|---|---|---|
+| 原厂固件版本 | **2.0.2** | TP-Link 官网原包 `fw_202.bin`，17,302,016 B，crc32 `d74c3411` |
+| 发行渠道 | **电信定制版**（China Telecom） | 见下 |
+| 原厂内核 | **4.4.60**（QSDK，`arch=arm` 32 位） | `docs/04-MODULE-LEDGER.md` |
+| 原厂二级 u-boot | LZMA 压缩，解压后 0x5AE2C 字节 | `docs/P18-WEB-FLASH.md` §3.2 |
+
+**为什么能确定是电信定制版**（不是推测，板上有实物证据）：
+
+1. 原厂固件里有 **`elinkclt`** —— 中国电信 e-Link 平台的客户端守护进程，
+   周期性反连 `<网关>:32768` 做远程管理。零售版固件没有这个组件。
+   完整抓包与协议还原见 [`tools/getroot/README.md`](tools/getroot/README.md)。
+2. 参数站归类在 `telecom/` 分类下（`mao.fan/Router/telecom/WTA301`），
+   同一模具另有零售版型号。
+
+**这对你意味着什么：**
+
+- 定制版比零售版**多了运营商组件**（`elinkclt` 及其 ubus 接口 `ctcapd.appd`）。
+  这些组件在 OpenWrt 下不存在，相关记录只作为原厂分析材料保留，**不是移植成果**。
+- **不同的出厂固件版本可能对应不同的分区布局 / u-boot 校验 / TP 头几何。**
+  本仓库的 A/B 槽地址表（[`docs/TP-SLOT-HEADER-VERIFIED.md`](docs/TP-SLOT-HEADER-VERIFIED.md)）虽然与出厂 TP 头 6/6 对上，
+  但那只是**这一台**的头部。**刷之前请先核对你自己的 TP 头。**
+  注意：两个槽头（`0x800000` / `0x4800000`）**不在任何 mtd 分区内**，
+  Linux 侧 `nanddump` / `dd` 都读不到，只能从 u-boot 侧 `nand read` + `md.b` 读。
+- 想回原厂：需要 **2.0.2 的原版包**（`fw_202.bin`，crc32 `d74c3411`），
+  而且要先用 `tools/` 里的转换脚本处理成能 `nand write` 的格式，
+  见 [`docs/USER-MANUAL.md`](docs/USER-MANUAL.md) §2。**别的版本的回原厂路径没验证过。**
 
 ---
 
