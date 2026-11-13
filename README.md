@@ -1,7 +1,7 @@
 # TP-Link WTA301 OpenWrt
 
-> **TP-Link WTA301（Qualcomm IPQ5018 / Wi-Fi 6 / 256 MiB DDR3 + 128 MiB NAND）
-> 刷 OpenWrt 25.12.6 的完整移植工程与成品固件。**
+> **TP-Link WTA301（Qualcomm IPQ5018 / Wi-Fi 6 / 256 MiB DDR3 + 128 MiB NAND）刷
+> OpenWrt 25.12.6 的完整移植工程与成品固件。**
 > 原厂固件 2.0.2 电信定制版 · 双频 Wi-Fi · u-boot 网页刷机 · 真机实测证据。
 
 > ## ⚠️ 免责声明 · 先读这一段
