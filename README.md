@@ -1,4 +1,4 @@
-# WTA301 → OpenWrt
+# TP-Link WTA301 OpenWrt
 
 > ## ⚠️ 免责声明 · 先读这一段
 >

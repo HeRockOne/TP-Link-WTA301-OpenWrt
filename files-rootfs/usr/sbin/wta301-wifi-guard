@@ -1,0 +1,257 @@
+#!/bin/sh
+# WTA301 Wi-Fi 守护 —— 只为查清「每天早上两个 Wi-Fi 都消失」这件事
+#
+# 为什么要有它：本板日志是 128 KB 的 RAM 环缓冲（/etc/config/system 的 log_size=128），
+# 一断电就全没了。用户每次都得拔电源，所以出事那一晚的证据永远留不下来。
+#
+# 这个脚本做三件事，每件都直接冲着「取证」：
+#   1) 每分钟往 /overlay/log/heartbeat.log 写一行体检记录 ——
+#      如果哪天早上机器是「卡死」的，心跳会出现断档，一眼就能区分
+#      「整机挂了」和「只是 Wi-Fi 挂了」。
+#   2) 一旦发现 AP 接口消失，先把现场整体 dump 到 /overlay/log/incident-<时间>/ ，
+#      再动手救。先取证、后自救，顺序不能反。
+#   3) 自救分三级，逐级加重，救活就停：
+#        L1 wifi reload                 （最轻，不掉已连的客户端太久）
+#        L2 wifi down; wifi up
+#        L3 ath11k 平台设备 unbind/bind （上游 issue #22583 实证：不重启也能恢复）
+#
+# 不做的事：不自动重启。重启会把证据清掉，等取证有结论再说。
+
+LOG_DIR=/overlay/log
+HB="$LOG_DIR/heartbeat.log"
+STEP=60              # 体检周期（秒）
+MISS_LIMIT=3         # 连续几轮看不到 AP 才判定"真的挂了"，防抖
+CUR_FAIL=0
+CUR_LEVEL=0
+
+mkdir -p "$LOG_DIR"
+
+ts()    { date +%Y-%m-%dT%H:%M:%S%z; }
+now()   { date +%s; }
+uptime_s() { cut -d. -f1 /proc/uptime; }
+memavail() { sed -n 's/^MemAvailable: *\([0-9]*\).*/\1/p' /proc/meminfo; }
+swapfree() { sed -n 's/^SwapFree: *\([0-9]*\).*/\1/p' /proc/meminfo; }
+# 内核侧内存。ath11k 的环/DMA 链表都在 slab 里，
+# 区分「用户态泄漏」还是「内核泄漏」靠这两个数。
+slab_kb()    { sed -n 's/^Slab: *\([0-9]*\).*/\1/p' /proc/meminfo; }
+sunre_kb()   { sed -n 's/^SUnreclaim: *\([0-9]*\).*/\1/p' /proc/meminfo; }
+
+# AP 接口名不写死：从 iw dev 里按 "type AP" 反查，改名了也不会误判
+ap_list() {
+	iw dev 2>/dev/null | awk '
+		/^[ \t]*Interface /{ name=$2 }
+		/^[ \t]*type AP/   { if (name != "") print name }
+	'
+}
+
+# 每个 AP 是否真的在发 SSID（接口存在但 hostapd 死了也算挂）
+ap_ok_count() {
+	local n=0 a
+	for a in $(ap_list); do
+		iwinfo "$a" info 2>/dev/null | grep -q 'ESSID:' && n=$((n+1))
+	done
+	echo "$n"
+}
+
+sta_state() {
+	local s a
+	s=$(iw dev 2>/dev/null | awk '
+		/^[ \t]*Interface /{ name=$2 }
+		/^[ \t]*type managed/ { if (name != "") print name }
+	' | head -1)
+	[ -z "$s" ] && { echo "none"; return; }
+	if iw dev "$s" link 2>/dev/null | grep -q 'Connected to'; then
+		a=$(iw dev "$s" link 2>/dev/null | sed -n 's/.*signal: *\(-*[0-9]*\) dBm.*/\1/p')
+		echo "up${a:+,$a}"
+	else
+		echo "down"
+	fi
+}
+
+# 已知错误特征的出现次数。计数随时间增长 = 出事的时间点能定位到分钟
+# 注意：grep -c 无命中时会打印 0 但退出码为 1，所以这里绝不能加 `|| echo 0`——
+# 否则会输出两行，把心跳行的字段错位。
+err_count() {
+	dmesg 2>/dev/null | grep -c "$1" 2>/dev/null
+}
+
+# 从 /proc/interrupts 取某个中断的触发总数（CPU0+CPU1）。
+# 这是判断「Q6 固件是不是崩了」最直接的证据：
+#   q6v5 fatal / userpd1_fatal / userpd2_fatal 只要非 0，就是固件报死过。
+# 两个射频共用同一个 Q6，所以固件一崩就是两个 SSID 一起没，而 Linux 还活着。
+irq_count() {
+	awk -v pat="$1" '
+		index($0, pat) {
+			s = 0
+			for (i = 2; i <= 4; i++) if ($i ~ /^[0-9]+$/) s += $i
+			print s + 0
+			exit
+		}
+	' /proc/interrupts
+}
+
+rotate_if_big() {
+	[ -f "$1" ] || return 0
+	sz=$(wc -c < "$1" 2>/dev/null || echo 0)
+	[ "$sz" -gt 524288 ] && mv -f "$1" "$1.1"
+}
+
+heartbeat() {
+	local ap n105 nreo
+	ap=$(ap_ok_count)
+	n105=$(err_count 'REO_CMD_UPDATE_RX_QUEUE')
+	nreo=$(err_count 'failed to send WMI')
+	rotate_if_big "$HB"
+	echo "$(ts) up=$(uptime_s) memavail=$(memavail) swapfree=$(swapfree) slab=$(slab_kb) sunre=$(sunre_kb) ap=$ap sta=$(sta_state) qf=$(irq_count 'q6v5 fatal') pd1f=$(irq_count 'userpd1_fatal') pd2f=$(irq_count 'userpd2_fatal') e105=$n105 ewmi=$nreo" >> "$HB"
+	echo "$ap"
+}
+
+snapshot() {
+	# $1 = 现场标记，进目录名，方便事后一眼看出是“AP 没了”还是“内存吃光”。
+	# 后者（lowmem）在 OOM 杀掉 hostapd 之前就能抓到，比 AP 消失更早、更有价值。
+	local tag="${1:-apgone}"
+	local d="$LOG_DIR/incident-$(now)-$tag"
+	mkdir -p "$d"
+	{
+		echo "== 判定为故障的时刻 =="; ts
+		echo "== uptime =="; uptime_s
+		echo "== free =="; free
+		echo "== iw dev =="; iw dev
+		echo "== ubus network.wireless =="; ubus call network.wireless status 2>&1
+		echo "== ps =="; ps w
+		echo "== /proc/interrupts (ath11k 相关) =="
+		grep -E 'reo|wbm|rxdma|tcl|ce[0-9]|ath11k' /proc/interrupts
+		echo "== Q6 / remoteproc =="
+		grep -E 'fatal|q6v5' /proc/interrupts
+		cat /sys/class/remoteproc/remoteproc*/state 2>/dev/null
+		echo "== ath11k soc_dp_stats（硬件丢包/环满证据） =="
+		for f in /sys/kernel/debug/ath11k/*/soc_dp_stats; do
+			[ -f "$f" ] && { echo "--- $f"; cat "$f"; }
+		done
+		echo "== dmesg (全部) =="; dmesg
+		echo "== logread (全部) =="; logread
+	} > "$d/dump.txt" 2>&1
+	# 只留最近 5 次。busybox 的 head 不支持 `head -n -5`（GNU 扩展），
+	# 所以用「数总数 + 反复删最旧」这种笨但通用的写法。
+	cnt=$(ls -1d "$LOG_DIR"/incident-* 2>/dev/null | wc -l)
+	while [ "$cnt" -gt 5 ]; do
+		old=$(ls -1d "$LOG_DIR"/incident-* 2>/dev/null | sort | head -1)
+		[ -z "$old" ] && break
+		rm -rf "$old"
+		cnt=$((cnt-1))
+	done
+	echo "$d"
+}
+
+do_level() {
+	case "$1" in
+	1) echo "$(ts) L1 wifi reload" >> "$LOG_DIR/recovery.log"; wifi reload ;;
+	2) echo "$(ts) L2 wifi down/up" >> "$LOG_DIR/recovery.log"; wifi down; sleep 3; wifi up ;;
+	3) echo "$(ts) L3 ath11k unbind/bind" >> "$LOG_DIR/recovery.log"
+	   # 先拆子设备（qcn6122），再拆基设备（ipq5018）；装回来顺序反过来
+	   echo b00a040.wifi > /sys/bus/platform/drivers/ath11k/unbind 2>/dev/null
+	   echo c000000.wifi > /sys/bus/platform/drivers/ath11k/unbind 2>/dev/null
+	   sleep 2
+	   echo c000000.wifi > /sys/bus/platform/drivers/ath11k/bind 2>/dev/null
+	   sleep 3
+	   echo b00a040.wifi > /sys/bus/platform/drivers/ath11k/bind 2>/dev/null
+	   sleep 5
+	   wifi up ;;
+	esac
+}
+
+# 救完最多等 60 秒看有没有活过来。
+# 2026-11-11 修正：原来这里写死 `-ge 2`，若用户只开一个频段（BASELINE=1），
+# 这个判断永远不会成立，于是每次自救都报“没活过来”、不断升级到 L3。
+# 必须用 BASELINE，与主循环的判据一致。
+wait_alive() {
+	local i=0
+	while [ $i -lt 12 ]; do
+		sleep 5
+		[ "$(ap_ok_count)" -ge "$BASELINE" ] && return 0
+		i=$((i+1))
+	done
+	return 1
+}
+
+echo "$(ts) guard start (pid $$)" >> "$LOG_DIR/recovery.log"
+
+# 2026-11-11 定案：本板掉 Wi-Fi 的真因是 ath11k RX 缓冲池把内存吃光，
+# 内核 OOM killer 杀掉 hostapd/netifd（详见 work/docs/WIFI-DISAPPEAR-DIAGNOSIS.md §8）。
+# 这种耗尽是**内核页级**的，用户态无法释放，只有重启能恢复。
+# 所以低于阈值就主动、干净地重启，而不是等它硬挂死、用户手动拔电源。
+#
+# 阈值取 12 MB：低于此值内核已开始频繁换入换出，功能已经不正常，
+# 再等只会走到 OOM 杀进程。重启一次约 60 秒，比挂死几小时好得多。
+LOWMEM_KB=12288
+lowmem_hits=0
+
+# 基线：应该有几个 AP。从 UCI 配置里数，不在开机瞬间实测——
+# 2026-11-11 实测教训：上一次开机时守护在 START=95 就启动，
+# 那时第二个 AP 还没起来，基线被记成 1，于是 ap 从 2 降到 1 也判不出来故障。
+# 配置里有几个 `option mode 'ap'`，就是应该有几个。
+ap_expected() {
+	local n
+	n=$(uci -q show wireless 2>/dev/null | grep -c "\.mode='ap'$")
+	[ "$n" -lt 1 ] && n=1
+	echo "$n"
+}
+
+BASELINE=$(ap_expected)
+[ "$BASELINE" -gt 2 ] && BASELINE=2
+echo "$(ts) baseline AP 数 = $BASELINE（按 UCI 配置计）" >> "$LOG_DIR/recovery.log"
+
+while :; do
+	ap=$(heartbeat)
+	MA=$(memavail)
+
+	# 低内存分支：OOM 前主动重启（可在 uci 里关掉）
+	if [ "$MA" -lt "$LOWMEM_KB" ] 2>/dev/null; then
+		lowmem_hits=$((lowmem_hits+1))
+		echo "$(ts) LOWMEM memavail=$MA hits=$lowmem_hits" >> "$LOG_DIR/recovery.log"
+		if [ "$lowmem_hits" -ge 2 ]; then
+			snapshot "lowmem-$MA"
+			echo "$(ts) LOWMEM 触发重启 memavail=$MA" >> "$LOG_DIR/recovery.log"
+			[ "$(uci -q get wta301-guard.settings.autoreboot)" = "0" ] && {
+				echo "$(ts) autoreboot 已关闭，不重启" >> "$LOG_DIR/recovery.log"
+				lowmem_hits=0
+			} || {
+				sync
+				/sbin/reboot
+			}
+		fi
+	else
+		lowmem_hits=0
+	fi
+
+	if [ "$ap" -ge "$BASELINE" ]; then
+		[ "$CUR_FAIL" -ne 0 ] && echo "$(ts) 恢复（ap=$ap）" >> "$LOG_DIR/recovery.log"
+		CUR_FAIL=0; CUR_LEVEL=0
+		sleep "$STEP"; continue
+	fi
+
+	CUR_FAIL=$((CUR_FAIL+1))
+	[ "$CUR_FAIL" -lt "$MISS_LIMIT" ] && { sleep "$STEP"; continue; }
+
+	# ---- 到这里说明真的挂了 ----
+	if [ "$CUR_LEVEL" -eq 0 ]; then
+		d=$(snapshot)
+		echo "$(ts) 故障确认 ap=$ap sta=$(sta_state) 现场=$d" >> "$LOG_DIR/recovery.log"
+	fi
+
+	CUR_LEVEL=$((CUR_LEVEL+1))
+	if [ "$CUR_LEVEL" -le 3 ]; then
+		do_level "$CUR_LEVEL"
+		if wait_alive; then
+			echo "$(ts) L$CUR_LEVEL 自救成功" >> "$LOG_DIR/recovery.log"
+			CUR_FAIL=0; CUR_LEVEL=0
+		else
+			echo "$(ts) L$CUR_LEVEL 无效" >> "$LOG_DIR/recovery.log"
+		fi
+	else
+		echo "$(ts) 三级自救全部无效，等人工（现场已保存）" >> "$LOG_DIR/recovery.log"
+		CUR_LEVEL=0   # 下一轮重新从 L1 试，避免卡死在一个状态
+		CUR_FAIL=0
+	fi
+	sleep "$STEP"
+done

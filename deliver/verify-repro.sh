@@ -390,6 +390,17 @@ UBT=""
 for c in "$(dirname "$SRC")/src/u-boot-2016" "$WORK/../src/u-boot-2016"; do
 	[ -d "$c" ] && { UBT="$c"; break; }
 done
+# ★ 基座完整性：src/u-boot-2016 只是**内层**（QSDK 12.5 u-boot 2016.01），
+#   外层基座 chenxin527/uboot-qsdk12.5-build 提供 failsafe 框架与 TPIMG 解析，
+#   真正的编译树 = 内层 + 外层 + 本目录 overlay。只拿内层时，凡是由**外层**
+#   提供的文件（tplink_tpimg.c / failsafe.c / ipq5018.h 等）必然不存在。
+#   这跟「仓库里的文件对不上」是两回事，不能报 FAIL，否则 clone 下来
+#   换个环境就永远红着，把真正的回归盖掉。
+#   判据：看基座里有没有 failsafe/ 目录 —— 外层基座一定有，内层没有。
+BASE_FULL=0
+if [ -n "$UBT" ] && [ -d "$UBT/failsafe" ] && [ -f "$UBT/failsafe/failsafe.c" ]; then
+	BASE_FULL=1
+fi
 if [ -n "$UBT" ]; then
 	CNT=0; REALS=0; SKIPN=0; ADDN=0
 	while IFS= read -r rel; do
@@ -408,7 +419,13 @@ $rel
 			continue
 		;;
 		esac
-		[ -f "$a" ] || { REALS=$((REALS+1)); bad "u-boot: $rel 在源树里不存在（也不是新增/重写文件）"; continue; }
+		[ -f "$a" ] || {
+			if [ "$BASE_FULL" -eq 0 ]; then
+				SKIPN=$((SKIPN+1))   # 基座不全，缺的文件来自外层，不算仓库问题
+				continue
+			fi
+			REALS=$((REALS+1)); bad "u-boot: $rel 在源树里不存在（也不是新增/重写文件）"; continue
+		}
 		CNT=$((CNT+1))
 		if [ "$(printf '%s' "$(cat "$a")")" != "$(printf '%s' "$(cat "$b")")" ]; then
 			REALS=$((REALS+1)); bad "u-boot: $rel 与源树**内容**不同（不只是行尾）"
@@ -421,6 +438,9 @@ $rel
 	fi
 else
 	warn "未找到 u-boot 源树（正常：树不进仓库），files/ 与源树的比对已跳过"
+fi
+if [ -n "$UBT" ] && [ "$BASE_FULL" -eq 0 ]; then
+	warn "u-boot 基座只含内层（QSDK 12.5），缺外层 chenxin527/uboot-qsdk12.5-build 的 failsafe 框架 ⇒ 部分文件本来就不存在，已跳过比对（要看完整比对，把两层基座 + 本仓 overlay 叠起来后重跑）"
 fi
 
 # ══════════════════════════════════════════════════════════════════
@@ -963,4 +983,3 @@ echo "    3) bash deliver/make-deliverable.sh <ver>"
 echo "    4) bash deliver/make-open-release.sh <VER>"
 echo "    5) 上板：verify-p26.sh / verify-p28.sh"
 exit 0
-

@@ -50,9 +50,16 @@ cp "$TTL" "$OUT/rescue/wta301-op-25.12.6-${VER}-ttl.bin"
 cp "$PACK/FINGERPRINT.json" "$PACK/flash_cmds.txt" "$OUT/"
 
 # README：仓库里存 LF，交付目录里必须是 CRLF（Windows 记事本打开才不断行）
+#
+# 版本行必须替换。模板里写的是固定字串（长期停在「版本：P28 · 构建时间 2026-11-06」），
+# 交付时若不改，p31/p34 的包里都写着 P28，收包的人会以为刷错了东西。
+# 只改版本号与构建日期两处，其余正文保持模板不动。
 RD="$SRC/deliver/README-刷机说明.txt"
 if [ -f "$RD" ]; then
-	lf2crlf < "$RD" > "$OUT/README-刷机说明.txt"
+	lf2crlf < "$RD" \
+		| sed -e "s/版本：P[0-9][0-9]*/版本：${VER}/" \
+		      -e "s/构建时间 [0-9][0-9-]*/构建时间 $(date +%Y-%m-%d)/" \
+		> "$OUT/README-刷机说明.txt"
 else
 	echo "  !! 找不到 $RD"
 fi

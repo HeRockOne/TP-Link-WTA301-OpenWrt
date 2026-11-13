@@ -1,0 +1,5 @@
+config settings 'settings'
+	# 低内存时是否自动重启。1 = 是（默认），0 = 只记录不重启。
+	# 本板 ath11k 会在运行约 1.5 小时后把内存吃光（详见
+	# work/docs/WIFI-DISAPPEAR-DIAGNOSIS.md §8），重启是目前唯一可靠的恢复手段。
+	option autoreboot '1'

@@ -22,7 +22,17 @@
 #     bash deliver/apply-rootfs-only.sh
 #     OWTREE=/path/to/openwrt bash deliver/apply-rootfs-only.sh
 # 之后：
-#     make -j6 target/install
+#     make -j6 package/install && make -j6 target/install
+#
+# ⚠ 必须是上面两条，不能只跑 target/install。
+#   实测（2026-11-11）：只改 files/ 里的**已存在文件**的内容时，
+#   `make target/install` 出来的镜像里还是旧内容，且不报任何错。
+#   原因：把 $(TOPDIR)/files 铺进 $(TARGET_DIR) 的那一步在
+#   `package/Makefile:126`（`$(call prepare_rootfs,$(TARGET_DIR),$(TOPDIR)/files)`），
+#   它属于 `make package/install` 而不是 `make target/install`。
+#   `target/install` 只是把已有的 root-qualcommax 打成 squashfs。
+#   以前这里只写了 target/install，照着做会得到“文件改了但镜像没变”
+#   的假成功 —— 排查了很久，记在这里。
 #
 set -e
 _here=$(cd "$(dirname "$0")" && pwd)
@@ -39,6 +49,30 @@ ROOTFILES=$OWTREE/files
 rm -f $ROOTFILES/usr/sbin/rps-watch $ROOTFILES/etc/init.d/rps \
       $ROOTFILES/etc/sysctl.d/99-wta301-rps.conf $ROOTFILES/etc/rc.d/S99rps
 mkdir -p $ROOTFILES
+
+# ---------------------------------------------------------------------------
+# 剪掉「上次装过、这次仓库里已经没有」的文件
+#
+# 踩过的坑：`cp -a` 只会覆盖和新增，不会删除。p33 试做时往 files-rootfs 里
+# 放过 usr/sbin/wta301-slot 和 luci 的 menu.d/acl.d/view 四个文件，后来决定
+# 退回 p31 基线、把这四个从仓库移走，但编译树里的是旧拷贝 —— 不加这一步，
+# “p31 基线”的镜像里会静默带着 p33 的双系统切换菜单，差异表会对不上。
+#
+# 只删**普通文件**（-type f）：本脚本自己在下面创建的 /etc/rc.d 符号链接不能碰。
+# $OWTREE/files（rootfs overlay）在本项目里只由本脚本与 apply-to-2512.sh §5e
+# 写入，$T/files 那个内核 overlay 是另一个目录，与此处无关。
+# ---------------------------------------------------------------------------
+if [ -d "$ROOTFILES" ]; then
+	while IFS= read -r _f; do
+		_rel=${_f#$ROOTFILES/}
+		if [ ! -e "$SRC/files-rootfs/$_rel" ]; then
+			rm -f "$_f"
+			echo "  prune files/$_rel"
+		fi
+	done < <(find "$ROOTFILES" -type f)
+	find "$ROOTFILES" -mindepth 1 -type d -empty -delete 2>/dev/null || true
+fi
+
 cp -a $SRC/files-rootfs/. $ROOTFILES/
 # ---------------------------------------------------------------------------
 # 权限归一化（必须，别删）
@@ -60,10 +94,14 @@ find $ROOTFILES -type d -exec chmod 0755 {} +
 find $ROOTFILES -type f -exec chmod 0644 {} +
 find $ROOTFILES/etc/init.d $ROOTFILES/usr/sbin -type f -exec chmod 0755 {} + 2>/dev/null || true
 chmod 0755 $ROOTFILES/usr/sbin/net-tune $ROOTFILES/etc/init.d/net-tune
+chmod 0755 $ROOTFILES/usr/sbin/wta301-wifi-guard $ROOTFILES/etc/init.d/wta301-guard 2>/dev/null || true
 # /etc/rc.d 符号链接：OpenWrt 用 S<NN><name> -> ../init.d/<name> 控制开机顺序。
 # 不用 `/etc/init.d/net-tune enable` 的原因是那要等板子起来跑；构建期放链接才叫固化。
 mkdir -p $ROOTFILES/etc/rc.d
 ln -sf ../init.d/net-tune $ROOTFILES/etc/rc.d/S99net-tune
+# wta301-guard：START=95，必须在 netifd/wifi 之后起来才能数到 AP。
+# 板上是 `wta301-guard enable` 生成的，构建期直接放链接才是固化的。
+ln -sf ../init.d/wta301-guard $ROOTFILES/etc/rc.d/S95wta301-guard
 find $ROOTFILES -type f -o -type l | sed "s|$ROOTFILES|  files/|"
 
 echo "== 5f. base-files（无线出厂值 + packet steering 兜底）=="

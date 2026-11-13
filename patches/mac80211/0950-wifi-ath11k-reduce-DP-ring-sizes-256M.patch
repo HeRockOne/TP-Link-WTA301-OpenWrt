@@ -32,15 +32,58 @@ against backports-6.18.55 differs in *exactly* these five constants -
 hal.h, dp_rx.c, dp_tx.c, hal.c are identical - so this patch restores
 parity with a build that ran both radios on this board for weeks:
 
-    DP_TX_COMP_RING_SIZE          32768 -> 8192
-    DP_RXDMA_BUF_RING_SIZE         4096 -> 2048
+    DP_TX_COMP_RING_SIZE          32768 -> 2048
+    DP_RXDMA_BUF_RING_SIZE         4096 -> 1024
     DP_RXDMA_MON_STATUS_RING_SIZE  1024 ->  512
     DP_RXDMA_MONITOR_BUF_RING_SIZE 4096 ->  128
     DP_RXDMA_MONITOR_DST_RING_SIZE 2048 ->  128
 
+SUPERSEDED 2026-11-11: the earlier revision of this patch stopped at
+8192 / 2048, and the board still died.  See "Second revision" below.
+
+Second revision, 2026-11-11 -- why the first one was not enough
+---------------------------------------------------------------
+Measured on this board with the 8192/2048 values, one boot, heartbeat
+sampled once a minute (MemAvailable, kB):
+
+    up=37     78332      <- fresh boot
+    up=4506   34540
+    up=5116   23652
+    up=5177   18468
+    up=5727   16244
+    up=5807   15924      <- oom-killer fired
+
+    Out of memory: Killed process 1772 (netifd)
+    Out of memory: Killed process 1733 (hostapd)
+
+hostapd serves *both* phys, so killing it makes 2.4 GHz and 5 GHz vanish
+together while the netdevs -- and therefore the LEDs -- stay up, which is
+exactly the reported symptom.  `Slab` stayed flat at ~23 MB and `anon` was
+~0 for the whole run, yet the OOM dump shows ~140 MiB of `managed` that no
+meminfo counter accounts for:
+
+    managed 178672 kB - free 8620 kB - slab/file/anon/stack ~25 MB
+    = ~140 MB unowned
+
+That is the page-fragment cache signature described in OpenWrt issue
+#24154: one referenced 2 KB fragment pins its whole order-3 (32 KB) page,
+so the pools' real cost is a large multiple of their nominal bytes.  With
+2048 buffers the worst case is
+
+    2048 buffers x 32 KB x 2 phys = 128 MB
+
+which is what we measured.  Dropping to 1024 halves that ceiling to
+64 MB, which fits inside this board's 174 MB `managed`.  These are now
+the exact values OpenWrt PR #21495 ("ath11k: provide smallbuffers
+variant", CONFIG_ATH11K_SMALLBUFFERS) uses, so nothing is invented.
+
 Expected saving, two radios: RX refill 4 MiB/radio, monitor buffer
 7.75 MiB/radio, monitor dest 3.75 MiB/radio, monitor status 1 MiB/radio,
 TX completion ~0.2 MiB/radio  =>  ~33 MiB.
+
+The dominant term is not the nominal size but the page-frag pinning
+multiplier described above: going from 2048 to 1024 RX buffers is where
+the real ~64 MiB comes from.
 
 Notes
 -----
@@ -62,7 +105,7 @@ diff --git a/drivers/net/wireless/ath/ath11k/dp.h b/drivers/net/wireless/ath/ath
  #define DP_TCL_DATA_RING_SIZE		512
  #define DP_TCL_DATA_RING_SIZE_WCN6750	2048
 -#define DP_TX_COMP_RING_SIZE		32768
-+#define DP_TX_COMP_RING_SIZE		8192
++#define DP_TX_COMP_RING_SIZE		2048
  #define DP_TX_IDR_SIZE			DP_TX_COMP_RING_SIZE
  #define DP_TCL_CMD_RING_SIZE		32
  #define DP_TCL_STATUS_RING_SIZE		32
@@ -71,7 +114,7 @@ diff --git a/drivers/net/wireless/ath/ath11k/dp.h b/drivers/net/wireless/ath/ath
  #define DP_REO_CMD_RING_SIZE		256
  #define DP_REO_STATUS_RING_SIZE		2048
 -#define DP_RXDMA_BUF_RING_SIZE		4096
-+#define DP_RXDMA_BUF_RING_SIZE		2048
++#define DP_RXDMA_BUF_RING_SIZE		1024
  #define DP_RXDMA_REFILL_RING_SIZE	2048
  #define DP_RXDMA_ERR_DST_RING_SIZE	1024
 -#define DP_RXDMA_MON_STATUS_RING_SIZE	1024

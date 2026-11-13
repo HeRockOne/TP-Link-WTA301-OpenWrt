@@ -1,0 +1,202 @@
+From: WTA301 port <port@localhost>
+Subject: [PATCH] wifi: ath11k: give IPQ5018/QCN6122 their own CE tables with
+ smaller RX rings
+
+Why this patch exists
+---------------------
+0950-wifi-ath11k-reduce-DP-ring-sizes-256M.patch only touches dp.h.  It was
+believed to cover "the rings" of ath11k, but the Copy Engine rings live
+somewhere else entirely: the per-pipe depths come from
+ath11k_host_ce_config_*[] in ce.c, and that table was never touched.
+
+Measured on this board after the dp.h change, with page_owner=on and the
+allocation stacks aggregated by hand (433810 lines, 24482 allocated pages,
+143 MiB total).  The per-stack ledger looked like this:
+
+    24.0 MiB  shmem_get_folio            (tmpfs, reclaimable)
+    22.2 MiB  __page_frag_alloc_align <- __netdev_alloc_skb <- CE path
+    16.0 MiB  squashfs_readahead         (page cache, reclaimable)
+    11.9 MiB  dma_alloc_attrs            (ath11k coherent rings)
+     7.3 MiB  ath11k_dp_rxbufs_replenish
+     6.5 MiB  ath11k_dp_tx_htt_monitor_mode_ring_config
+     4.7 MiB  init_page_owner            (diagnostic build only)
+
+The 22 MiB entry was still growing while the board idled: 21.8 -> 31.1 MiB
+over six minutes of sampling, while Slab stayed flat at 23 MB and the
+DP_LINK_DESC ring stayed flat at 10.0 MB.  So the leak is not slab, not the
+DP rings that 0950 already shrank, and not the link descriptor ring.
+
+IPQ5018 and QCN6122 both use ath11k_host_ce_config_qcn9074 (see core.c,
+hw_rev ATH11K_HW_IPQ5018_HW10 and ATH11K_HW_QCN6122_HW10).  With ce_count=6
+that table allocates receive buffers like this:
+
+    CE1  dest_nentries = 512   src_sz_max = 2048   <- HTT data path
+    CE5  dest_nentries = 512   src_sz_max = 2048   <- pktlog
+    CE2  dest_nentries =   32                      <- WMI
+
+i.e. 1024 receive buffers of 2 KiB per radio, 2048 for both radios, 4 MiB
+nominal.  Measured usage is 22 MiB and climbing, so the page-fragment
+allocator is amplifying it roughly 5.5x.  That is the well-known effect
+described in openwrt/openwrt#24154: dev_alloc_skb() carves 2 KiB fragments
+out of order-3 (32 KiB) pages, and a single still-referenced fragment pins
+the whole page.  Sixteen fragments per page, freed out of order, means most
+pages stay pinned far longer than a single buffer's lifetime.
+
+The same upstream thread notes this is "bounded but oversized for the RAM"
+rather than an unbounded leak, which is exactly what the numbers say: the
+board does not run away to infinity, it sits 20-30 MiB lower than it should
+and tips into the OOM killer whenever anything else (a sysupgrade write, an
+firmware decompress) needs a few MiB.
+
+What this patch changes
+-----------------------
+Instead of editing the shared qcn9074 table (which is also used by real
+QCN9074 cards on other boards), add a dedicated ath11k_host_ce_config_ipq5018
+and point both IPQ5018 and QCN6122 at it.  Only two depths move:
+
+    CE1  (HTT data path)   512 -> 256
+    CE5  (pktlog)          512 -> 128
+
+CE2 (WMI, 32), CE3, CE4 and CE0 are copied verbatim.  CE4 keeps
+src_nentries = 2048 with src_sz_max = 256: that is the TX side, 512 KiB of
+256-byte descriptors, and it does not go through page_frag.
+
+Why 256 is not a throughput risk on this board
+----------------------------------------------
+A 256-deep ring of 2 KiB buffers is 512 KiB of receive buffering per pipe.
+The 5 GHz radio is an uplink relay whose station link measures -79..-90 dBm
+and 13..26 Mbit/s, i.e. 1.6..3.3 MB/s: 512 KiB is 150-320 ms of buffering,
+two orders of magnitude more than the bandwidth-delay product of that link.
+Even a local 866 Mbit/s client blasting the AP at ~50 MB/s leaves ~10 ms,
+which still covers NAPI jitter.  The ring was oversized for a 256 MiB board,
+not sized for this hardware.
+
+Note the firmware-side tables (ath11k_target_ce_config_wlan_ipq5018 in hw.c)
+declare nentries = 32 for these pipes and are deliberately left alone: they
+are the firmware's own bookkeeping, the host ring depth is what the host
+posts, and it was already far above 32 before this patch.
+
+RESULT: this patch does NOT fix the CE memory.  Measured on hardware.
+----------------------------------------------------------------------
+Built, flashed and verified (ath11k.ko md5 39381f80362dece79a43df071867d41c,
+symbol ath11k_host_ce_config_ipq5018 present, .rodata confirming CE1=0x100 and
+CE5=0x80 while the untouched qcn9074 table still reads 0x200).  The CE
+allocation did not move: 22.2 MiB before, 22.9 MiB after.  Kept in the tree
+only as a record of the attempt -- it is harmless (smaller rings, no measured
+throughput effect on a 13-26 Mbit/s relay) but it buys nothing.
+
+The reason, from page_owner with all 8 stack frames captured (aggregating
+3 frames is what misled the original analysis, because the third frame is
+ath11k_ce_cleanup_pipes, which only *frees*):
+
+    10.7 MiB  <- ath11k_ce_cleanup_pipes <- ath11k_ce_per_engine_service <- tasklet_action_common
+     3.2 MiB  <- ath11k_ce_cleanup_pipes <- ath11k_ce_per_engine_service <- 0xffffffc078f69fc0 <- tasklet
+     0.3 MiB  <- ath11k_ce_rx_post_buf <- ath11k_core_qmi_firmware_ready
+
+Only the 0.3 MiB is the boot-time pre-post driven by dest_nentries, i.e. the
+only part ring depth controls.  The other 13.9 MiB is replenishment done one
+packet at a time from the CE tasklet (ce.c:389 dev_alloc_skb).  Ring depth
+cannot bound per-packet churn through a shared page_frag cache.
+
+What would be needed is the per-ring page_frag_cache mechanism that
+eisbaw/ath11k-page-frag-fix applies to the RXDMA rings -- but that series
+explicitly leaves CE/HTC on the shared allocator, and CE is the worst
+offender here (13.9 MiB vs ~6 MiB for RXDMA).  Porting it to ce.c's rx_post
+path is driver surgery, not a constant change.
+
+Signed-off-by: WTA301 port <port@localhost>
+
+--- a/drivers/net/wireless/ath/ath11k/ce.h	2026-11-12 00:22:56.923365955 +0800
++++ b/drivers/net/wireless/ath/ath11k/ce.h	2026-11-12 00:22:56.963365947 +0800
+@@ -192,6 +192,7 @@
+ extern const struct ce_attr ath11k_host_ce_config_ipq8074[];
+ extern const struct ce_attr ath11k_host_ce_config_qca6390[];
+ extern const struct ce_attr ath11k_host_ce_config_qcn9074[];
++extern const struct ce_attr ath11k_host_ce_config_ipq5018[];
+ 
+ void ath11k_ce_cleanup_pipes(struct ath11k_base *ab);
+ void ath11k_ce_rx_replenish_retry(struct timer_list *t);
+--- a/drivers/net/wireless/ath/ath11k/core.c	2026-11-12 00:22:56.923365955 +0800
++++ b/drivers/net/wireless/ath/ath11k/core.c	2026-11-12 00:22:56.963365947 +0800
+@@ -673,7 +673,7 @@
+ 		.internal_sleep_clock = false,
+ 		.regs = &ipq5018_regs,
+ 		.hw_ops = &ipq5018_ops,
+-		.host_ce_config = ath11k_host_ce_config_qcn9074,
++		.host_ce_config = ath11k_host_ce_config_ipq5018,
+ 		.ce_count = CE_CNT_5018,
+ 		.target_ce_config = ath11k_target_ce_config_wlan_ipq5018,
+ 		.target_ce_count = TARGET_CE_CNT_5018,
+@@ -939,7 +939,7 @@
+ 		.supports_shadow_regs = false,
+ 		.idle_ps = false,
+ 		.supports_suspend = false,
+-		.host_ce_config = ath11k_host_ce_config_qcn9074,
++		.host_ce_config = ath11k_host_ce_config_ipq5018,
+ 		.ce_count = CE_CNT_5018,
+ 		.target_ce_config = ath11k_target_ce_config_wlan_ipq5018,
+ 		.target_ce_count = TARGET_CE_CNT_5018,
+--- a/drivers/net/wireless/ath/ath11k/ce.c	2026-11-12 00:22:56.919365955 +0800
++++ b/drivers/net/wireless/ath/ath11k/ce.c	2026-11-12 00:22:56.963365947 +0800
+@@ -250,6 +250,61 @@
+ 	},
+ };
+ 
++const struct ce_attr ath11k_host_ce_config_ipq5018[] = {
++	/* CE0: host->target HTC control and raw streams */
++	{
++		.flags = CE_ATTR_FLAGS,
++		.src_nentries = 16,
++		.src_sz_max = 2048,
++		.dest_nentries = 0,
++	},
++
++	/* CE1: target->host HTT + HTC control */
++	{
++		.flags = CE_ATTR_FLAGS,
++		.src_nentries = 0,
++		.src_sz_max = 2048,
++		.dest_nentries = 256,
++		.recv_cb = ath11k_htc_rx_completion_handler,
++	},
++
++	/* CE2: target->host WMI */
++	{
++		.flags = CE_ATTR_FLAGS,
++		.src_nentries = 0,
++		.src_sz_max = 2048,
++		.dest_nentries = 32,
++		.recv_cb = ath11k_htc_rx_completion_handler,
++	},
++
++	/* CE3: host->target WMI (mac0) */
++	{
++		.flags = CE_ATTR_FLAGS,
++		.src_nentries = 32,
++		.src_sz_max = 2048,
++		.dest_nentries = 0,
++		.send_cb = ath11k_htc_tx_completion_handler,
++	},
++
++	/* CE4: host->target HTT */
++	{
++		.flags = CE_ATTR_FLAGS | CE_ATTR_DIS_INTR,
++		.src_nentries = 2048,
++		.src_sz_max = 256,
++		.dest_nentries = 0,
++	},
++
++	/* CE5: target->host pktlog */
++	{
++		.flags = CE_ATTR_FLAGS,
++		.src_nentries = 0,
++		.src_sz_max = 2048,
++		.dest_nentries = 128,
++		.recv_cb = ath11k_dp_htt_htc_t2h_msg_handler,
++	},
++
++};
++
+ static bool ath11k_ce_need_shadow_fix(int ce_id)
+ {
+ 	/* only ce4 needs shadow workaround */
