@@ -259,6 +259,22 @@ iw phy phy1 info | sed -n '/Supported interface modes/,/Band/p'
 判据：**`monitor_all` 默认是 `N`**。如果默认就是 `Y`，说明补丁的默认值写错了，
 不要继续用。
 
+### 文件名：GitHub 只收 ASCII，本地才带「监听版」
+
+实测：把 `wta301-op-25.12.6-P37-监听版.bin` 传上 GitHub release，
+服务端把中文替换成 `.`，变成 `wta301-op-25.12.6-P37-.-bin`。
+**GitHub 的资源名只允许 ASCII**（字母数字 `.` `-` `_`），中文、括号、空格都不行。
+
+所以：
+
+| 位置 | 文件名 | md5 |
+|---|---|---|
+| 本地交付目录 | `...-P37-监听版-*.bin` | 同下 |
+| GitHub release 资产 | `...-P37-monitor-*.bin` | 完全相同 |
+
+是同一份文件，只是名字。`MD5SUMS.txt` 里两套名字都列了。
+下次出包如果想线上名字也带中文，做不到 —— 只能用 transliteration。
+
 ### 包清单
 
 198 个包，相对 p31 基线 **+8、−0**：
