@@ -1,0 +1,92 @@
+From: WTA301 port <port@localhost>
+Subject: [PATCH] wifi: ath11k: add monitor_all to keep monitor mode on IPQ5018
+
+Why this patch exists
+---------------------
+On this board the 5 GHz radio (QCN6122) can do monitor mode but the 2.4 GHz
+one (IPQ5018) cannot, and it is not a firmware or configuration problem:
+
+    phy0 (IPQ5018)  Supported interface modes:
+                      * managed   * AP   * mesh point
+    phy1 (QCN6122)  Supported interface modes:
+                      * managed   * AP   * monitor   * mesh point
+
+mac80211 advertises MONITOR unconditionally for every driver
+(net/mac80211/main.c:1353, "mac80211 always supports monitor").  ath11k then
+takes it away again right after ieee80211_register_hw():
+
+    if (!ab->hw_params.supports_monitor)
+            ar->hw->wiphy->interface_modes &= ~BIT(NL80211_IFTYPE_MONITOR);
+
+and core.c has .supports_monitor = false for ATH11K_HW_IPQ5018_HW10 while
+ATH11K_HW_QCN9074_HW10 (used by QCN6122) has true.  That is the entire
+difference between the two radios.
+
+This patch turns that single removal into something the user can override,
+via a module parameter that defaults to off:
+
+    ath11k.monitor_all=0   default, identical to unpatched behaviour
+    ath11k.monitor_all=1   keep monitor advertised on IPQ5018 as well
+
+The default matters.  ipq5018's hw_params marks monitor unsupported for a
+reason we cannot see from the host side: the Q6 firmware may reject
+WMI_VDEV_TYPE_MONITOR for that pdev.  If it does, interface creation fails at
+vdev start, which is recoverable (reboot clears the parameter).  Making this
+opt-in means nobody gets a different boot behaviour by accident.
+
+Verified on the reference board: phy0 keeps managed/AP/mesh point, phy1 is
+unchanged, and the .ko differs from the previous build only in this one
+comparison plus the added parameter.
+
+--- a/drivers/net/wireless/ath/ath11k/core.c	2026-11-15 00:48:22.931976063 +0800
++++ b/drivers/net/wireless/ath/ath11k/core.c	2026-11-15 00:48:22.963976064 +0800
+@@ -35,6 +35,28 @@
+ MODULE_PARM_DESC(frame_mode,
+ 		 "Datapath frame mode (0: raw, 1: native wifi (default), 2: ethernet)");
+ 
++/*
++ * WTA301: let monitor mode survive on hardware whose hw_params says it is
++ * unsupported.
++ *
++ * mac80211 unconditionally advertises NL80211_IFTYPE_MONITOR
++ * (net/mac80211/main.c, "mac80211 always supports monitor"), and ath11k then
++ * removes it again after registration when hw_params.supports_monitor is
++ * false.  That flag is false for IPQ5018_HW10, so the 2.4 GHz radio on this
++ * board can never get a monitor interface, while the 5 GHz one can (it uses
++ * the QCN9074 hw_params, where the flag is true).
++ *
++ * Whether the Q6 firmware actually accepts WMI_VDEV_TYPE_MONITOR on that pdev
++ * is not something the host can know, so this is a module parameter that
++ * defaults to off: with monitor_all=0 the behaviour is byte-for-byte what it
++ * was before this patch.
++ */
++bool ath11k_monitor_all;
++module_param_named(monitor_all, ath11k_monitor_all, bool, 0644);
++MODULE_PARM_DESC(monitor_all,
++		 "Keep monitor mode advertised even if hw_params.supports_monitor is false");
++
++
+ bool ath11k_ftm_mode;
+ module_param_named(ftm_mode, ath11k_ftm_mode, bool, 0444);
+ MODULE_PARM_DESC(ftm_mode, "Boots up in factory test mode");
+--- a/drivers/net/wireless/ath/ath11k/core.h	2026-11-15 00:48:22.931976063 +0800
++++ b/drivers/net/wireless/ath/ath11k/core.h	2026-11-15 00:48:22.963976064 +0800
+@@ -59,6 +59,7 @@
+ 
+ extern unsigned int ath11k_frame_mode;
+ extern bool ath11k_ftm_mode;
++extern bool ath11k_monitor_all;
+ 
+ #define ATH11K_SCAN_TIMEOUT_HZ (20 * HZ)
+ 
+--- a/drivers/net/wireless/ath/ath11k/mac.c	2026-11-15 00:48:22.931976063 +0800
++++ b/drivers/net/wireless/ath/ath11k/mac.c	2026-11-15 00:48:22.971976064 +0800
+@@ -10477,7 +10477,7 @@
+ 		goto err_free_if_combs;
+ 	}
+ 
+-	if (!ab->hw_params.supports_monitor)
++	if (!ab->hw_params.supports_monitor && !ath11k_monitor_all)
+ 		/* There's a race between calling ieee80211_register_hw()
+ 		 * and here where the monitor mode is enabled for a little
+ 		 * while. But that time is so short and in practise it make
